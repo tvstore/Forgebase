@@ -1,6 +1,6 @@
 # 0006 Extension model: compile-time apps, no runtime plugins
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-28
 
 ## Context

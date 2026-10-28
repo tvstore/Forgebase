@@ -1,6 +1,6 @@
 # Architecture
 
-Everything here is a design proposal; nothing is implemented. Workflow and approval rules: [AGENTS.md](../../AGENTS.md).
+Nothing here is implemented. Sections and statements marked Accepted are owner-accepted ADRs; the rest is a design proposal. Workflow and approval rules: [AGENTS.md](../../AGENTS.md).
 
 **Status vocabulary**
 
@@ -8,11 +8,13 @@ Everything here is a design proposal; nothing is implemented. Workflow and appro
 |---|---|
 | Accepted | Confirmed by the owner, or a process decision recorded as Accepted (an ADR marked "Accepted by owner" is an Accepted decision the owner made or provided). |
 | Proposed | Recommendation, awaiting owner decision. |
-| Undecided | Options listed; decision deferred. The deciding milestone is named where the owner's direction ties it (for example file format: M1, UI library: M4, multi-site: before the multi-site milestone); otherwise: decide when the related milestone is planned. |
+| Undecided | Options listed; decision deferred. The deciding milestone is named where the approved plan ties it (for example file format: M1, UI library: M4, multi-site: before the multi-site milestone); otherwise: decide when the related milestone is planned. |
 
-Accepted so far: ADR 0001 (record decisions as ADRs), MIT license (ADR 0007), English docs, the four-stage workflow and the Model Selection Policy (ADR 0008). **Everything else below is Proposed or Undecided.** Decisions are recorded in [docs/adr](../adr/README.md). Frappe behavior referenced here is labelled in the [feature matrix](feature-matrix.md).
+Accepted so far: ADR 0001 (record decisions as ADRs), ADRs 0002-0006 (accepted by the owner on 2026-10-28: modular monolith and workspace layout, PostgreSQL only, database access layer direction, HTTP stack, extension model), MIT license (ADR 0007), English docs, the four-stage workflow and the Model Selection Policy (ADR 0008). **Everything else below is Proposed or Undecided.** The ADR 0004 direction is conditional on the M1 spike: if the spike contradicts it, a new ADR supersedes ADR 0004. Decisions are recorded in [docs/adr](../adr/README.md). Frappe behavior referenced here is labelled in the [feature matrix](feature-matrix.md).
 
-## 1. Shape: modular monolith (Proposed, [ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md))
+## 1. Shape: modular monolith (Accepted, [ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md))
+
+The Accepted scope is exactly the ADR 0002 decision: four crates (`forgebase-core`, `forgebase-db`, `forgebase-http`, `forgebase-cli`), the dependency direction cli → http → db → core, jobs and scheduler as a module in `forgebase-db` plus a `worker` command, and a React + TypeScript `desk/` arriving at M4. Other details in this section (clap, Vite, the specific CLI command list, the "Rejected for now" list) remain Proposed.
 
 One Cargo workspace, four crates. Do not split further until a real boundary problem appears.
 
@@ -36,7 +38,7 @@ Background jobs and the scheduler are a module in `forgebase-db` plus a `worker`
 
 Rejected for now: microservices, dynamic libraries, WASM plugins, a separate jobs service, Redis.
 
-## 2. Extension model (Proposed, [ADR 0006](../adr/0006-extension-model.md))
+## 2. Extension model (Accepted, [ADR 0006](../adr/0006-extension-model.md))
 
 A Forgebase "app" is a Rust crate compiled into the user's binary. The user's `main` depends on `forgebase-*` and registers app DocTypes and hooks at startup through an explicit registration list (no global magic or inventory macros).
 
@@ -72,13 +74,14 @@ Two distinct problems:
      - A plain `CREATE INDEX` takes a lock that blocks writes on the table while it builds, which matters on large tables.
      - `CREATE INDEX CONCURRENTLY` and `CREATE DATABASE` (needed for database-per-site) cannot run inside a transaction block, so they sit outside the sync transaction and need special handling (for example an explicit, separate step).
      - Adding a Link column also adds a foreign key constraint, which takes locks on the referenced table.
-     - PostgreSQL does not automatically index the referencing column of a foreign key; sync should create an index on each Link foreign key column, otherwise `ON DELETE RESTRICT` checks and child-row lookups scan the whole table.
+     - PostgreSQL does not automatically index the referencing column of a foreign key; sync should create an index on every foreign key column (Link columns and child `parent_id`), otherwise `ON DELETE RESTRICT` checks and child-row lookups scan the whole table.
+     - Most `ALTER TABLE` forms (including ADD COLUMN) take an ACCESS EXCLUSIVE lock (ADD FOREIGN KEY takes SHARE ROW EXCLUSIVE); while such a statement waits behind a long-running transaction it queues and blocks every later read and write on that table. Set `lock_timeout` for sync DDL so it fails fast instead of stalling the application. Hitting `lock_timeout` aborts the sync transaction, so sync must report the failure and allow a retry.
 3. **Data patches.** Ordered, run-once, recorded in a table, inside transactions, with "before schema sync" and "after schema sync" phases (concept from Frappe's pre/post model sync).
 
 ## 6. Document lifecycle and transactions (Proposed)
 
 - **One fixed, documented, tested pipeline per operation.** Insert: set defaults, naming, validate (field types, required, links, permissions), `before_insert` hook, `validate` hook, write, `after_insert` hook, enqueue after-commit effects, commit. Save, Submit, Cancel and Delete are analogous. The exact order is specified in M2 and covered by tests.
-- **Hooks** are a small Rust trait per DocType (`DocTypeHooks`, default no-op methods) registered by the app; with several apps, hooks run in registration order. No class override mechanism.
+- **Hooks** (Accepted, [ADR 0006](../adr/0006-extension-model.md)) are a small Rust trait per DocType (`DocTypeHooks`, default no-op methods) registered by the app; with several apps, hooks run in registration order. No class override mechanism. The pipeline and transaction details below remain Proposed.
 - **Transactions.** Exactly one DB transaction per API request or command; the framework owns commit and rollback. Hooks **cannot commit**. Design requirement: hooks receive a restricted, framework-provided handle (a fixed set of operations) rather than a raw database connection or transaction, so app code cannot issue `COMMIT` or unvalidated SQL; the exact mechanism, and whether hook reads run as the user or the system, are decided in M2. Side effects that must happen only after commit (jobs, realtime, emails) go to an outbox/job table written in the same transaction (transactional outbox).
 - **docstatus.** Draft (0) / Submitted (1) / Cancelled (2), and amendment (new draft with `amended_from`) for submittable DocTypes; fields locked after submit except those explicitly allowed.
 - **Optimistic concurrency.** Updates require the client's `version`; mismatch returns 409 Conflict.
@@ -94,8 +97,8 @@ Security rules for the API are in [security-model](security-model.md).
 
 ## 8. Background jobs, scheduler, realtime
 
-- **Jobs (Proposed).** Postgres table queue using `SELECT ... FOR UPDATE SKIP LOCKED`, run by `forgebase worker` (same binary). At-least-once delivery, so jobs must be idempotent; retries with backoff; a dead state.
-- **Scheduler (Proposed).** Cron-like, table driven, leader elected with a Postgres advisory lock. Milestone M5. Design note: a session-level advisory lock belongs to one connection, so it must be held on a dedicated (non-pooled) connection, or a transaction-level lock taken per tick must be used; the mechanism is decided in M5.
+- **Jobs (Proposed).** Postgres table queue using `SELECT ... FOR UPDATE SKIP LOCKED`, run by `forgebase worker` (same binary; Accepted, [ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md): jobs are a module in `forgebase-db` plus a `worker` command; the queue design in this bullet remains Proposed). At-least-once delivery, so jobs must be idempotent; retries with backoff; a lease/visibility timeout so jobs claimed by a crashed worker become runnable again; a dead state.
+- **Scheduler (Proposed).** Cron-like, table driven, leader elected with a Postgres advisory lock. Milestone M5. Design note: a session-level advisory lock belongs to one connection, so it must be held on a dedicated (non-pooled) connection, or a transaction-level lock taken per tick must be used. With the per-tick lock, `next_run_at` must be advanced in the same transaction so a second instance cannot re-run the same tick right after the first commits. The mechanism is decided in M5.
 - **Realtime (Undecided, deferred).** Later option: Postgres `LISTEN/NOTIFY` to SSE/WebSocket in the same binary. No Node/socket.io, no Redis.
 
 ## 9. Multi-site (Undecided)
@@ -118,9 +121,9 @@ Custom fields and property setters: when added, a small explicit per-site overla
 
 | Challenge | Approach |
 |---|---|
-| Tables and columns come from runtime metadata, so static ORMs do not fit | Small in-house SQL layer for DocType DDL/CRUD with strict identifier validation, quoting and bound parameters ([dependency-evaluation](dependency-evaluation.md)). Final DB-layer choice after the M1 spike. |
+| Tables and columns come from runtime metadata, so static ORMs do not fit | Small in-house SQL layer for DocType DDL/CRUD with strict identifier validation, quoting and bound parameters ([dependency-evaluation](dependency-evaluation.md)). Accepted direction ([ADR 0004](../adr/0004-database-access-layer.md)); the M1 spike remains a required checkpoint. |
 | Schema drift and risky migrations | Additive-only auto-sync, explicit files for destructive changes, `--dry-run`, transactional DDL. |
-| Hook order and partial commits. Frappe's docs list hook order inconsistently (Source-indexed, see [feature matrix](feature-matrix.md)); partial commits from user-code `commit()` are our own analysis (opinion, not documented fact) | One fixed pipeline, one transaction per request, hooks cannot commit, outbox for side effects. |
+| Hook order and partial commits. Frappe's docs may list hook order inconsistently (Unverified; search summaries suggest the hook table and the Document API page differ, see [feature matrix](feature-matrix.md)); partial commits from user-code `commit()` are our own analysis (opinion, not documented fact) | One fixed pipeline, one transaction per request, hooks cannot commit, outbox for side effects. |
 | Permission complexity | One evaluator in `forgebase-core`; all reads go through a permission-filtered query path; exhaustive negative tests ([security-model](security-model.md)). |
 | Integrity of references | Real foreign keys instead of application-level checks. |
 | Multi-site retrofit cost | Explicit site/pool context from day one; decision deferred. |

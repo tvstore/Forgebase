@@ -31,10 +31,10 @@ An ADR records one significant decision: the context, what was decided, what els
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0002](0002-modular-monolith-and-workspace-layout.md) | Modular monolith and workspace layout | Proposed |
-| [0003](0003-postgresql-only.md) | PostgreSQL only | Proposed |
-| [0004](0004-database-access-layer.md) | Database access layer | Proposed |
-| [0005](0005-http-stack.md) | HTTP stack: axum on tokio | Proposed |
-| [0006](0006-extension-model.md) | Extension model: compile-time apps | Proposed |
+| [0002](0002-modular-monolith-and-workspace-layout.md) | Modular monolith and workspace layout | Accepted |
+| [0003](0003-postgresql-only.md) | PostgreSQL only | Accepted |
+| [0004](0004-database-access-layer.md) | Database access layer | Accepted |
+| [0005](0005-http-stack.md) | HTTP stack: axum on tokio | Accepted |
+| [0006](0006-extension-model.md) | Extension model: compile-time apps | Accepted |
 | [0007](0007-license-mit.md) | License: MIT | Accepted by owner |
 | [0008](0008-model-selection-policy.md) | Model selection policy for the agent workflow | Accepted by owner |

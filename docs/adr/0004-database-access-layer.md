@@ -1,6 +1,6 @@
 # 0004 Database access layer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-28
 
 ## Context
@@ -9,7 +9,9 @@ DocType tables and columns exist only at runtime, so compile-time-schema tools (
 
 ## Decision
 
-Proposed: `tokio-postgres` + `deadpool-postgres` with a small in-house SQL/DDL/CRUD layer and a custom embedded migration runner (advisory lock, checksums). Measured weight is 74 packages with pooling and MSRV 1.85. sqlx (macros off) is the close alternative. **The final choice is made after the M1 spike** that prototypes one DocType CRUD path with both; this Proposed ADR is then revised with the spike result and submitted for owner acceptance.
+Accepted direction: `tokio-postgres` + `deadpool-postgres` with a small in-house SQL/DDL/CRUD layer and a custom embedded migration runner (advisory lock, checksums). Measured weight is 74 packages with pooling and MSRV 1.85. sqlx (macros off) is the close alternative.
+
+**Condition: the M1 spike remains a required checkpoint.** The M1 spike prototypes one DocType CRUD path with both stacks. If the spike result contradicts this direction, a new ADR supersedes this one (an accepted ADR is not edited); otherwise the spike result is recorded in the M1 plan or review.
 
 ## Alternatives considered
 

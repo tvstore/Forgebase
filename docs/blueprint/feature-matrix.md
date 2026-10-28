@@ -19,7 +19,7 @@ There is **no `Verified-fetched`** entry yet: `docs.frappe.io` could not be fetc
 |---|---|
 | Planned (Mx) | Intended for milestone Mx. Still **Proposed** until the owner accepts the plan for that milestone. |
 | Intentional difference | Forgebase deliberately does it differently from Frappe. |
-| Undecided | Options exist; decision deferred. A milestone is noted where the owner's direction ties it; otherwise: decide when the related milestone is planned. |
+| Undecided | Options exist; decision deferred. A milestone is noted where the approved plan ties it; otherwise: decide when the related milestone is planned. |
 | Not a priority | May be considered later; no plan. |
 | Out of scope | Will not be built. |
 

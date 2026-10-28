@@ -1,6 +1,6 @@
 # 0003 PostgreSQL only
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-28
 
 ## Context

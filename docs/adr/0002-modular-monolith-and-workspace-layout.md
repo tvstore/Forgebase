@@ -1,6 +1,6 @@
 # 0002 Modular monolith and workspace layout
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-28
 
 ## Context

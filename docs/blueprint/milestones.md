@@ -20,7 +20,7 @@ All milestones are **Proposed**. There are no dates. **Each milestone needs its 
 
 ## M1 Metadata and storage
 
-- **Scope:** DocType definition loading and validation; additive schema sync with dry-run; insert/get/update/delete of simple documents via library API and CLI; framework migrations. Includes the DB-layer spike (tokio-postgres vs sqlx) that finalizes [ADR 0004](../adr/0004-database-access-layer.md). Also decides the metadata file format (TOML vs JSON) and confirms the surrogate-UUID primary key.
+- **Scope:** DocType definition loading and validation; additive schema sync with dry-run; insert/get/update/delete of simple documents via library API and CLI; framework migrations. Includes the DB-layer spike (tokio-postgres vs sqlx) that is the required checkpoint for [ADR 0004](../adr/0004-database-access-layer.md); if the spike contradicts the accepted direction, a new ADR supersedes it. Also decides the metadata file format (TOML vs JSON) and confirms the surrogate-UUID primary key.
 - **Exit criteria:** integration tests against a real PostgreSQL (CI service container).
 - **Non-goals:** links, child tables, lifecycle hooks, HTTP API, authentication, permissions, jobs, multi-site.
 

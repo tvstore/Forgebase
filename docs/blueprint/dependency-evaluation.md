@@ -1,6 +1,6 @@
 # Dependency evaluation
 
-Condensed from research done on 2026-10-28; sources are given inline. **Versions, licenses and MSRVs are as of 2026-10-28**; re-run `cargo info` at decision time. Every recommendation is **Proposed**; none is decided. Admission rules: [maintenance-policy](maintenance-policy.md). Related decisions: [ADR 0004](../adr/0004-database-access-layer.md), [ADR 0005](../adr/0005-http-stack.md).
+Condensed from research done on 2026-10-28; sources are given inline. **Versions, licenses and MSRVs are as of 2026-10-28**; re-run `cargo info` at decision time. Recommendations are **Proposed** unless marked Accepted: the axum, tokio and tokio-postgres + deadpool-postgres (with the custom migration runner) directions are Accepted by the owner (ADRs 0004 and 0005, 2026-10-28; ADR 0004 is conditional on the M1 spike), as are React + TypeScript for the desk (ADR 0002) and TLS termination at a reverse proxy (ADR 0005); everything not marked Accepted is not decided. Admission rules: [maintenance-policy](maintenance-policy.md). Related decisions: [ADR 0004](../adr/0004-database-access-layer.md), [ADR 0005](../adr/0005-http-stack.md).
 
 Selection criteria, in priority order: long-term maintenance cost, simplicity, small dependency count, then fit with runtime-metadata DocTypes (tables and columns created from metadata at runtime; documents cross the boundary as validated maps/JSON). Popularity is not a criterion.
 
@@ -76,7 +76,7 @@ All rows `Verified (cargo info)`. "n/d" = no `rust-version` declared.
 | jiff | 0.2.38 | Unlicense OR MIT | 1.70 |
 | rust_decimal | 1.43.0 | MIT | 1.67.1 |
 
-Frontend (not `cargo info`): React MIT (Unverified); TypeScript Apache-2.0 (Source-indexed, https://licenses.dev/npm/typescript/2.4.1); Vite MIT, its published artifact also bundles Apache-2.0, BSD-2-Clause, CC0-1.0, ISC and MIT code (Source-indexed, https://arches.lcc.ufmg.br/static/vitest/node_modules/vite/LICENSE.md).
+Frontend (not `cargo info`): React MIT (Unverified); TypeScript Apache-2.0 (Source-indexed, https://licenses.dev/npm/typescript/2.4.1); Vite MIT, its published artifact also bundles Apache-2.0, BSD-2-Clause, CC0-1.0, ISC and MIT code (Source-indexed, https://arches.lcc.ufmg.br/static/vitest/node_modules/vite/LICENSE.md). Both frontend sources are non-authoritative (the TypeScript page is for the old 2.4.1 version; the Vite page is a third-party mirror): re-verify against the official repositories before relying on them.
 
 ### Transitive weight (`Verified (local measurement)`, unique packages)
 
@@ -113,13 +113,13 @@ Frontend (not `cargo info`): React MIT (Unverified); TypeScript Apache-2.0 (Sour
 
 poem (3.1.12) and rocket (0.5.2) offer nothing Forgebase needs that axum lacks.
 
-**Recommendation (Proposed): axum**, plus tower-http only as needed.
+**Recommendation (Accepted, [ADR 0005](../adr/0005-http-stack.md)): axum**, plus tower-http only as needed.
 Trade-off: 0.x breaking upgrades; mitigate by keeping axum types inside `forgebase-http`. Alternative: actix-web if a 1.0+-style stability promise outweighs about 90 extra packages.
 
 ### 2. Async runtime
 
 tokio 1.54.1 (MIT, MSRV 1.85). axum, tokio-postgres, deadpool, sqlx and tower-sessions all target tokio; async-std is deprecated (Source-indexed, https://github.com/launchbadge/sqlx/discussions/4271: sqlx 0.9 added smol / async-global-executor support as successors to it); smol/glommio would force their own stacks.
-**Recommendation (Proposed): tokio** with explicit features (`rt-multi-thread, macros, net, signal, time`), not `full`.
+**Recommendation (Accepted, [ADR 0005](../adr/0005-http-stack.md): tokio with explicit features, not `full`; the exact feature list `rt-multi-thread, macros, net, signal, time` is Proposed):** tokio.
 Trade-off: the whole stack is tied to the tokio ecosystem and its release cadence; there is no realistic alternative among the chosen libraries, so the cost is accepted rather than mitigated.
 
 ### 3. CLI
@@ -151,8 +151,8 @@ Other facts:
 - tokio-postgres development is concentrated in one maintainer (Unverified bus-factor assessment).
 - sea-query 1.0.2 as a query/DDL builder only (backend-postgres) adds 1 package; optional later behind an internal trait.
 
-**Recommendation (Proposed): tokio-postgres + deadpool-postgres + small in-house SQL/DDL layer** (strict identifier pattern such as `^[a-z][a-z0-9_]{0,62}$` (the 63-byte PostgreSQL limit applies to the full name including the `doc_` prefix, so the DocType part must be shorter) and always double-quoted; values only as bound parameters; Postgres-to-field-type mapping).
-Close alternative: sqlx with `default-features = false`, features `postgres, runtime-tokio, migrate, json`, macros off: better if built-in migrations and pooling in one crate are worth about 40-60 extra packages, MSRV 1.94 and the governance transition. Not recommended: diesel, sea-orm. **The final choice is made after the M1 spike** (see [ADR 0004](../adr/0004-database-access-layer.md)).
+**Recommendation (Accepted direction, [ADR 0004](../adr/0004-database-access-layer.md)): tokio-postgres + deadpool-postgres + small in-house SQL/DDL layer** (strict identifier pattern such as `^[a-z][a-z0-9_]{0,58}$` for the DocType part (the 63-byte PostgreSQL limit applies to the full name including the 4-byte `doc_` prefix, so at most 59 bytes remain; derived index and constraint names such as `doc_<name>_parent_id_idx` can exceed 63 bytes and need their own bounded naming scheme, decided in M1) and always double-quoted; values only as bound parameters; Postgres-to-field-type mapping).
+Close alternative: sqlx with `default-features = false`, features `postgres, runtime-tokio, migrate, json`, macros off: better if built-in migrations and pooling in one crate are worth about 40-60 extra packages, MSRV 1.94 and the governance transition. Not recommended: diesel, sea-orm. **The M1 spike remains a required checkpoint; if it contradicts this direction, a new ADR supersedes ADR 0004** (see [ADR 0004](../adr/0004-database-access-layer.md)).
 
 ### 5. Migrations
 
@@ -164,7 +164,7 @@ Two problems: (1) framework-internal ordered SQL migrations; (2) DocType schema 
 | refinery 0.10.0 | MSRV 1.92; 110 packages; only 0.8.x from 2024 seen in search, so 0.10 history unconfirmed. |
 | Custom runner | `forgebase_migrations(id, checksum, applied_at)`, `pg_advisory_xact_lock`, embedded SQL via `include_str!`, checksum verification; about 100-200 lines (Unverified estimate). |
 
-**Recommendation (Proposed):** custom runner if tokio-postgres; `sqlx::migrate!` if sqlx. Schema sync is always framework code, transactional, destructive changes explicit. Avoid refinery.
+**Recommendation (custom runner Accepted with [ADR 0004](../adr/0004-database-access-layer.md), conditional on the M1 spike; the rest Proposed):** custom runner if tokio-postgres; `sqlx::migrate!` if sqlx. Schema sync is always framework code, transactional, destructive changes explicit. Avoid refinery.
 
 ### 6. Serialization and validation
 
@@ -212,24 +212,26 @@ Alternatives (not evaluated in the research; all Unverified, from general knowle
 
 ### 12. Frontend (brief)
 
-React, TypeScript and Vite were given by the owner as candidates; this evaluation checked license compatibility only (compatible with an MIT project; Apache-2.0 requires keeping NOTICE files if present). Alternatives, listed briefly and not evaluated (Unverified): Vue, Svelte or Solid as the UI framework; Webpack or esbuild-based tooling instead of Vite; server-rendered HTML (for example with htmx) instead of a SPA. Trade-offs were not assessed. UI library, router, data-fetching and form libraries are deferred (UI library decided in M4). Apply equivalent npm supply-chain checks (committed lockfile, audit, license checker; tooling not evaluated).
+React + TypeScript for `desk/` is Accepted ([ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md), arriving at M4); Vite remains an owner-given candidate (Proposed). React, TypeScript and Vite were given by the owner as candidates; this evaluation checked license compatibility only (compatible with an MIT project; Apache-2.0 requires keeping NOTICE files if present). Alternatives, listed briefly and not evaluated (Unverified): Vue, Svelte or Solid as the UI framework; Webpack or esbuild-based tooling instead of Vite; server-rendered HTML (for example with htmx) instead of a SPA. Trade-offs were not assessed. UI library, router, data-fetching and form libraries are deferred (UI library decided in M4). Apply equivalent npm supply-chain checks (committed lockfile, audit, license checker; tooling not evaluated).
 
-## Recommended baseline (Proposed)
+## Recommended baseline
 
-| Concern | Proposed | Main alternative |
+Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 0005); everything else is Proposed.
+
+| Concern | Recommendation | Main alternative |
 |---|---|---|
-| HTTP | axum (+ tower-http as needed) | actix-web |
-| Runtime | tokio (explicit features) | none realistic (ecosystem tie-in accepted) |
+| HTTP | axum (+ tower-http as needed) (Accepted) | actix-web |
+| Runtime | tokio (explicit features) (Accepted) | none realistic (ecosystem tie-in accepted) |
 | CLI | clap (derive) | lexopt |
-| DB | tokio-postgres + deadpool-postgres + in-house SQL/DDL builder | sqlx (macros off); sea-query as builder |
-| Framework migrations | custom embedded runner | sqlx migrate (if sqlx) |
+| DB | tokio-postgres + deadpool-postgres + in-house SQL/DDL builder (Accepted; conditional on the M1 spike) | sqlx (macros off); sea-query as builder |
+| Framework migrations | custom embedded runner (Accepted with the DB direction) | sqlx migrate (if sqlx) |
 | Serialization / validation | serde + serde_json; runtime metadata validator | garde for fixed structs |
 | Errors / logging | thiserror, anyhow, tracing | snafu, eyre, log + env_logger (not evaluated) |
 | Auth | argon2 + opaque DB-backed sessions | tower-sessions with own store |
 | Jobs | custom Postgres SKIP LOCKED queue | apalis (if sqlx, after maturing) |
 | Config | toml + serde + env overlay | figment |
-| TLS | none in app (reverse proxy); rustls+ring for Postgres behind a feature | native-tls |
-| Frontend | React + TypeScript + Vite (owner-given candidates) | Vue/Svelte/Solid, htmx (not evaluated) |
+| TLS | none in app, TLS terminated at a reverse proxy (Accepted, ADR 0005); rustls+ring for Postgres behind a feature (Proposed) | native-tls |
+| Frontend | React + TypeScript (Accepted, ADR 0002) + Vite (Proposed, owner-given candidate) | Vue/Svelte/Solid, htmx (not evaluated) |
 
 Approximate core-stack weight: 136 packages (A) vs 179 (B); excludes TLS, sessions and sha2.
 
@@ -252,7 +254,7 @@ Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md
 - **Postgres:** optional on private networks, required for most managed databases.
   - rustls 0.23.46: pure Rust, no system OpenSSL. Default provider aws-lc-rs needs a C compiler and CMake (NASM on Windows); the `ring` provider avoids CMake. sqlx `tls-rustls` currently resolves to ring (verified locally).
   - native-tls 0.2.18: uses system OpenSSL on Linux; adds a system dependency and version drift.
-- **Recommendation (Proposed):** reverse proxy for HTTPS; Postgres TLS behind a cargo feature using rustls with ring via `tokio-postgres-rustls` 0.14.0 (third-party, MIT), or sqlx `tls-rustls-ring` if sqlx is chosen (feature name Unverified). Root certificates via `webpki-roots` or `rustls-native-certs` (not evaluated).
+- **Recommendation:** reverse proxy for HTTPS (Accepted, [ADR 0005](../adr/0005-http-stack.md)); Postgres TLS (Proposed) behind a cargo feature using rustls with ring via `tokio-postgres-rustls` 0.14.0 (third-party, MIT), or sqlx `tls-rustls-ring` if sqlx is chosen (feature name Unverified). Root certificates via `webpki-roots` or `rustls-native-certs` (not evaluated).
 
 ## Open questions
 

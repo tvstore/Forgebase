@@ -5,7 +5,7 @@ Status: **Proposed** (awaiting owner acceptance). Workflow, approval gates, git 
 ## Toolchain and MSRV
 
 - Pin the toolchain in `rust-toolchain.toml`.
-- MSRV = pinned stable minus a small window; raise it deliberately and note it in the changelog. The dependency set sets the floor (measured: about 1.89 for the proposed stack, 1.94 if sqlx is chosen; see [dependency-evaluation](dependency-evaluation.md#11-supply-chain-tooling-and-msrv)). An earlier research suggestion was "latest stable minus 2 minor releases"; the exact window is to be fixed in M0.
+- MSRV = pinned stable minus a small window; raise it deliberately and note it in the changelog. The dependency set sets the floor (measured: about 1.89 for recommended stack A (ADR 0004/0005 directions plus Proposed crates; the floor is set by `uuid` 1.29.0), 1.94 if sqlx is chosen; see [dependency-evaluation](dependency-evaluation.md#11-supply-chain-tooling-and-msrv)). An earlier research suggestion was "latest stable minus 2 minor releases"; the exact window is to be fixed in M0.
 - Edition 2024 (verify in M0). Commit `Cargo.lock` (the workspace ships binaries).
 
 ## Dependency admission
