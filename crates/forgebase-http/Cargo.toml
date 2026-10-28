@@ -1,0 +1,15 @@
+[package]
+name = "forgebase-http"
+description = "Forgebase HTTP API layer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+forgebase-db.workspace = true

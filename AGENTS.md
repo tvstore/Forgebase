@@ -86,6 +86,8 @@ Keep Plan, Doing and Review separate. Do not rely on the implementing agent to d
 |---|---|
 | [AGENTS.md](AGENTS.md) | Permanent project instructions and agent workflow (this file) |
 | [README.md](README.md) | Purpose, status, how to get started |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, run local checks and contribute |
+| [CHANGELOG.md](CHANGELOG.md) | Notable changes, Keep a Changelog format |
 | [docs/blueprint/](docs/blueprint/) | `vision`, `feature-matrix`, `architecture`, `dependency-evaluation`, `security-model`, `milestones`, `maintenance-policy` |
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records |
 

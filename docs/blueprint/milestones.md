@@ -1,6 +1,6 @@
 # Milestones
 
-All milestones are **Proposed**. There are no dates. **Each milestone needs its own Stage 1 plan and explicit owner approval before implementation starts** (see [AGENTS.md](../../AGENTS.md#3-mandatory-four-stage-workflow)); the scope below is the starting proposal for that plan, not an approval. Design context: [architecture](architecture.md); capability status: [feature matrix](feature-matrix.md).
+Milestones are **Proposed** until their Stage 1 plan is approved; each milestone's status line says otherwise. There are no dates. **Each milestone needs its own Stage 1 plan and explicit owner approval before implementation starts** (see [AGENTS.md](../../AGENTS.md#3-mandatory-four-stage-workflow)); the scope below is the starting proposal for that plan, not an approval. Design context: [architecture](architecture.md); capability status: [feature matrix](feature-matrix.md).
 
 | Milestone | Theme |
 |---|---|
@@ -14,6 +14,7 @@ All milestones are **Proposed**. There are no dates. **Each milestone needs its 
 
 ## M0 Foundations
 
+- **Status:** In progress (Stage 1 plan approved by the owner 2026-10-28).
 - **Scope:** workspace skeleton with 4 empty crates; CI (fmt, `clippy -D warnings`, test, build, cargo-deny); toolchain pin; contribution docs.
 - **Exit criteria:** green CI on the empty skeleton.
 - **Non-goals:** any feature code; database access; frontend.

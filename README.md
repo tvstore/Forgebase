@@ -6,7 +6,7 @@ Forgebase is a Rust framework for building business applications, inspired by th
 
 ## Status
 
-**Research and blueprint phase. There is no code yet.** The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
+**M0 Foundations in progress (workspace skeleton, no features).** The workspace has four empty crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
 
 The repository is currently **private**. It is intended to be open source under the MIT license; it is not open source yet.
 
@@ -22,11 +22,17 @@ The repository is currently **private**. It is intended to be open source under 
 | [docs/blueprint/security-model.md](docs/blueprint/security-model.md) | Authentication, authorization, injection defense, isolation |
 | [docs/blueprint/milestones.md](docs/blueprint/milestones.md) | M0 to M5 and later work, with exit criteria |
 | [docs/blueprint/maintenance-policy.md](docs/blueprint/maintenance-policy.md) | Toolchain, dependency admission, testing, docs and review rules |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Prerequisites and local checks |
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records |
 
 ## Getting started
 
-There is nothing to build or run yet. To get oriented, read the blueprint in this order: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [milestones](docs/blueprint/milestones.md). Contributors and agents must follow [AGENTS.md](AGENTS.md).
+```sh
+cargo build
+cargo run -p forgebase-cli
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks. To get oriented, read the blueprint in this order: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [milestones](docs/blueprint/milestones.md). Contributors and agents must follow [AGENTS.md](AGENTS.md).
 
 ## License
 
