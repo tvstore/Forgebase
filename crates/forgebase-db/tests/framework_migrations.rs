@@ -1,0 +1,140 @@
+//! Framework migrations against a real PostgreSQL (see `common::TestDb`).
+
+mod common;
+
+use common::{TestDb, url_for_database, url_with_password};
+use forgebase_db::{DbError, MIGRATIONS, connect, migrate_framework};
+
+#[tokio::test]
+async fn migrates_empty_database_and_is_idempotent() {
+    let db = TestDb::new().await;
+    let mut client = db.pool.get().await.unwrap();
+
+    let applied = migrate_framework(&mut client, false).await.unwrap();
+    assert_eq!(applied.len(), MIGRATIONS.len());
+    let rows = db
+        .rows("SELECT version::text, name, length(checksum)::text FROM fb_migration")
+        .await;
+    assert_eq!(rows, vec![vec!["1".to_owned(), "init".into(), "64".into()]]);
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM fb_doctype").await,
+        vec![vec!["0".to_owned()]]
+    );
+
+    assert!(
+        migrate_framework(&mut client, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM fb_migration").await,
+        vec![vec!["1".to_owned()]]
+    );
+}
+
+#[tokio::test]
+async fn dry_run_applies_nothing() {
+    let db = TestDb::new().await;
+    let mut client = db.pool.get().await.unwrap();
+    let pending = migrate_framework(&mut client, true).await.unwrap();
+    assert_eq!(pending.len(), MIGRATIONS.len());
+    let tables = db
+        .rows("SELECT table_name::text FROM information_schema.tables WHERE table_name LIKE 'fb_%'")
+        .await;
+    assert!(tables.is_empty(), "dry run left tables behind: {tables:?}");
+}
+
+#[tokio::test]
+async fn tampered_checksum_is_rejected() {
+    let db = TestDb::migrated().await;
+    db.exec("UPDATE fb_migration SET checksum = repeat('0', 64)")
+        .await;
+    let mut client = db.pool.get().await.unwrap();
+    let err = migrate_framework(&mut client, false).await.unwrap_err();
+    assert!(
+        matches!(err, DbError::ChecksumMismatch { version: 1, .. }),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_applied_version_is_rejected() {
+    let db = TestDb::migrated().await;
+    db.exec(
+        "INSERT INTO fb_migration (version, name, checksum) VALUES (999, 'from_the_future', 'x')",
+    )
+    .await;
+    let mut client = db.pool.get().await.unwrap();
+    let err = migrate_framework(&mut client, false).await.unwrap_err();
+    assert!(
+        matches!(&err, DbError::UnknownMigration { version: 999, .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("from_the_future"));
+}
+
+#[tokio::test]
+async fn invalid_url_and_unreachable_server_give_clear_errors() {
+    let err = connect("not a url").await.unwrap_err();
+    assert!(matches!(err, DbError::CreatePool(_)), "{err}");
+    let err = connect("postgres://nobody:nothing@127.0.0.1:1/none")
+        .await
+        .unwrap_err();
+    // A failed connection attempt is a Postgres error carrying the cause, not a bare "db error".
+    assert!(matches!(err, DbError::Postgres(_)), "{err}");
+    assert!(err.to_string().contains("error connecting"), "{err}");
+}
+
+#[tokio::test]
+async fn postgres_errors_show_server_message_and_sqlstate() {
+    let db = TestDb::migrated().await;
+    let client = db.pool.get().await.unwrap();
+    // Violates the primary key of fb_migration.
+    let err = client
+        .batch_execute("INSERT INTO fb_migration VALUES (1, 'dup', 'x')")
+        .await
+        .map_err(DbError::from)
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("duplicate key") && text.contains("23505"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn connect_errors_show_server_message_and_sqlstate() {
+    let err = connect(&url_with_password("definitely-wrong"))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("password authentication failed") && text.contains("28P01"),
+        "{text}"
+    );
+    assert!(!text.contains("definitely-wrong"), "{text}");
+
+    let err = connect(&url_for_database("fb_no_such_database"))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("does not exist") && text.contains("3D000"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn unexpected_fb_migration_shape_is_an_error_not_a_panic() {
+    let db = TestDb::new().await;
+    db.exec(
+        "CREATE TABLE fb_migration (version bigint PRIMARY KEY, name text NOT NULL, \
+         checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()); \
+         INSERT INTO fb_migration (version, name, checksum) VALUES (1, 'init', 'x')",
+    )
+    .await;
+    let mut client = db.pool.get().await.unwrap();
+    let err = migrate_framework(&mut client, false).await.unwrap_err();
+    assert!(matches!(err, DbError::Postgres(_)), "{err}");
+}

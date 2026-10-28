@@ -35,7 +35,9 @@ JWT for first-party browser sessions is avoided (revocation complexity).
 ## Injection defense
 
 - SQL identifiers come only from validated metadata, are matched against a strict pattern and are always quoted.
-- Values are always bound parameters.
+- Values are always bound parameters. Generated DDL (schema sync) contains no values at all: only validated, quoted identifiers and numeric type parameters (`varchar(n)`, `numeric(p,s)`) taken from validated metadata; settings such as `lock_timeout` are passed as bound parameters.
+- Identifiers are validated twice: by `forgebase-core` when metadata is loaded, and quoted by `forgebase_db::quote_ident` (doubling any `"`) at every use in generated SQL (implemented in M1.2).
+- Database connections do not use TLS yet (M1.2); connect over a local or private network until rustls support is added.
 - List filters are parsed into a typed AST, never string-concatenated.
 - Reports (later) run with a read-only DB role.
 

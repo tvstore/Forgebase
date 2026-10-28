@@ -23,6 +23,22 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # forgebase-db integration tests need PostgreSQL (they create and drop fb_test_* databases).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forgebase
+          POSTGRES_PASSWORD: forgebase
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forgebase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      FORGEBASE_TEST_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

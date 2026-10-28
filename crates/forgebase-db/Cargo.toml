@@ -13,3 +13,9 @@ workspace = true
 
 [dependencies]
 forgebase-core.workspace = true
+deadpool-postgres.workspace = true
+thiserror.workspace = true
+tokio-postgres.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

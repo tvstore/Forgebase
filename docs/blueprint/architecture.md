@@ -48,7 +48,7 @@ A Forgebase "app" is a Rust crate compiled into the user's binary. The user's `m
 
 ## 3. Metadata (DocType) model (Proposed)
 
-**Owner decisions, 2026-10-28 (Accepted)**, for M1; the remaining items in this section keep their stated status:
+**Owner decisions, 2026-10-28 (Accepted)**, for M1; the remaining items in this section keep their stated status. The last four bullets were confirmed ("setuju semua") after the M1.1 review:
 
 - Metadata file format: **TOML**.
 - `id` is a **UUID v7 generated in the application**.
@@ -56,7 +56,10 @@ A Forgebase "app" is a Rust crate compiled into the user's binary. The user's `m
 - `required` is enforced by application validation, not by a database `NOT NULL`, in M1.
 - M1 field types: Data, Text, Int, Decimal, Check, Date, Datetime, Select (Link and Table arrive in M2).
 
-**Proposed (implementation choice, pending owner confirmation):** Int maps to PostgreSQL `bigint` (spike lesson: an `int` column decodes as `i32`, while `Value::Int` is `i64`); Data fields default to `max_length` 140; a required Data, Text or Select field treats an empty or whitespace-only string as missing; Decimal values with more decimal places than the field's scale are rejected rather than rounded.
+- Int maps to PostgreSQL `bigint` (spike lesson: an `int` column decodes as `i32`, while `Value::Int` is `i64`).
+- Data fields default to `max_length` 140.
+- A required Data, Text or Select field treats an empty or whitespace-only string as missing.
+- Decimal values with more decimal places than the field's scale are rejected rather than rounded.
 
 - **Schema-as-code.** DocTypes are defined in files inside the app crate (versioned in git) and loaded at startup; the DB holds a synced copy for introspection and admin. Single direction of truth: files to DB. File format: TOML (Accepted, see above).
 - **Field types.** Small closed set first: Data (text with max length), Text, Int, Decimal (Postgres `numeric`; Float only if justified), Check (bool), Date, Datetime (`timestamptz`), Select, Link, Table (child). Layout-only types (section/column breaks) stay out of the data field list; UI layout is a separate optional section. Other types (Attach, JSON, Dynamic Link, Currency, ...) are added one at a time with a reason.
@@ -94,7 +97,17 @@ Text, Data and Select values and Select options must not contain NUL (`\0`), whi
 - **Child tables.** Each child DocType belongs to exactly one parent DocType. The child table has `parent_id` FK `ON DELETE CASCADE` and `idx` ordering; no polymorphic `parenttype`/`parentfield` columns. Intentional difference (Frappe allows reusing one child DocType across parents). Child rows are saved or replaced only as part of the parent document, in the same transaction.
 - **Dynamic Link:** deferred (no FK possible); not a priority.
 
-## 5. Schema sync and migrations (Proposed)
+## 5. Schema sync and migrations (Proposed; M1.2 implemented in `forgebase-db`)
+
+**Implemented in M1.2** (the rest of this section is still the design direction):
+
+- **Framework migrations**: embedded SQL in `crates/forgebase-db/migrations/`, run by `migrate_framework` in one transaction under a transaction-level advisory lock (`pg_advisory_xact_lock`, released automatically, never a session lock on a pooled connection). Applied migrations are verified first: unknown version (database newer than code) or checksum mismatch is an error. The checksum is SHA-256 computed by PostgreSQL (no hash crate). Tables: `fb_migration`, `fb_doctype` (which DocType tables Forgebase manages).
+- **Schema sync** (`sync`): one transaction; transaction-local `lock_timeout` (default 5 s, clamped to 1 ms ..= `i32::MAX` ms; an error `LockTimeout` that is safe to retry; in `migrate` the framework migrations stay applied, only the sync step is not), advisory lock, then introspection of the connection's current schema inside the transaction so concurrent syncs see each other's result. Steps are additive only: create table, add the keys of new tables, add nullable column, create unique index, register in `fb_doctype`. `dry_run` rolls back and returns the SQL; for framework migrations a dry run still executes the migration DDL before rolling back. Connection errors keep the server message and SQLSTATE (for example 28P01, 3D000). Database state that does not match expectations (such as an `fb_migration` with other column types) gives an error, never a panic.
+- **Type mapping**: Data `varchar(n)`, Text and Select `text` (Select options are validated by the application, so option changes need no migration), Int `bigint`, Decimal `numeric(p,s)`, Check `boolean`, Date `date`, Datetime `timestamptz`. Field columns are always nullable; `required` is application-enforced.
+- **Conflicts** (whole sync refused, nothing applied): a column whose type, length, precision or scale differs from the metadata (including a Data `max_length` change in either direction), a standard column that is missing, differently typed or nullable (also `id` not being the primary key and `name` not unique), a `timestamptz` column with a precision other than the default 6, a non-table relation or standalone type named `doc_<name>`, and an existing `doc_<name>` table that Forgebase did not create (never adopted). **Warnings** (reported, nothing changed): a field column that is `NOT NULL` in the database (fields are nullable; the application enforces `required`), a column no field describes, a unique index whose field is no longer `unique`, and a registered DocType missing from the registry.
+- **Names**: Forgebase does not name constraints or indexes. `CREATE TABLE` creates columns only, keys are added afterwards with `ALTER TABLE ... ADD PRIMARY KEY ("id"), ADD UNIQUE ("col")` (unnamed), and unique indexes added later use `CREATE UNIQUE INDEX ON ... ("col")`; PostgreSQL picks free names of at most 63 bytes. A sync works in phases: it first creates every new table with columns only, then adds the primary key and unique constraints of the new tables, then added columns, then late unique indexes, then registers the DocTypes. Because all tables of the sync exist before any key or index is named, a generated name cannot clash with a DocType table in the same sync, even when PostgreSQL truncates long names. Unique detection reads `pg_index` (valid, single-column, non-partial), not names. If a relation of any kind or a standalone type (view, index, sequence, domain, ...) already has the name `doc_<name>`, the sync reports a conflict; an ordinary table of that name that Forgebase did not create is reported as unmanaged. A later sync can still conflict when a DocType table name equals a name PostgreSQL already gave to an index of an earlier table.
+- **Limits**: plain `CREATE INDEX` (blocks writes on that table while building; no `CONCURRENTLY` yet); adding a unique index to an existing column fails, and the sync rolls back, if the column already holds duplicates; only the connection's current schema is handled; no TLS to PostgreSQL yet (planned: rustls; run over a local or private network until then).
+
 
 Two distinct problems:
 

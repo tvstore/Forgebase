@@ -15,11 +15,23 @@ Run the same commands as CI ([.github/workflows/ci.yml](.github/workflows/ci.yml
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo test --workspace --locked                        # needs FORGEBASE_TEST_DATABASE_URL, see below
 cargo build --workspace --locked
 cargo +1.97 check --workspace --all-targets --locked   # MSRV
 cargo deny --locked check                              # needs network for advisories
 ```
+
+## PostgreSQL for tests
+
+The `forgebase-db` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end.
+
+```sh
+docker run -d --name forgebase-pg -p 5432:5432 -e POSTGRES_USER=forgebase -e POSTGRES_PASSWORD=forgebase postgres:16
+# or install PostgreSQL 16 from your system package manager and create a superuser role
+export FORGEBASE_TEST_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/postgres
+```
+
+CI runs the same tests against a `postgres:16` service container.
 
 ## Dependencies
 
