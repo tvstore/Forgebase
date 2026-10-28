@@ -275,8 +275,8 @@ async fn get_in(
 ///    leave an invalid document;
 /// 6. Links are resolved, then **every column field** of the merged document is written, and
 ///    the rows of every Table field whose rows differ from the stored ones (given in `changes` or
-///    modified by a hook) are replaced, so row ids change only for a table whose rows changed. `version`
-///    is incremented in the same statement as the document row, which comes first.
+///    modified by a hook) are replaced, so row ids change only for a table whose rows changed.
+///    `version` is incremented in the same statement as the document row, which comes first.
 ///
 /// An update is an explicit save: it increments `version` and sets `modified_at` even when the
 /// merged document equals the stored one (for example when the changes repeat the stored values

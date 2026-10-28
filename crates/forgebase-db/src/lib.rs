@@ -18,10 +18,11 @@
 //!   transaction (a savepoint inside a caller's). They take the [`Registry`] and the DocType
 //!   name. Link values are target names, resolved to ids internally; `update` and `delete` need
 //!   the `expected_version` (optimistic concurrency); an update replaces the rows of the Table
-//!   fields it names when they differ from the stored ones. The app's lifecycle hooks (`forgebase_core::hooks`, registered in the
-//!   [`Registry`]) run inside each call's transaction in a fixed order, documented on each of the
-//!   four functions; a hook error is [`DbError::Hook`] and rolls the call back. `update` works on the
-//!   whole stored document with the changes merged in. No permissions and no renames yet.
+//!   fields it names when they differ from the stored ones. The app's lifecycle hooks
+//!   (`forgebase_core::hooks`, registered in the [`Registry`]) run inside each call's
+//!   transaction in a fixed order, documented on each of the four functions; a hook error is
+//!   [`DbError::Hook`] and rolls the call back. `update` works on the whole stored document with
+//!   the changes merged in. No permissions and no renames yet.
 
 mod document;
 mod error;
