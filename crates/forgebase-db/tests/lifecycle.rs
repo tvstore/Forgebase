@@ -201,7 +201,7 @@ async fn insert_update_and_delete_run_the_hooks_in_the_documented_order() {
     .unwrap();
     assert_eq!(taken(&log), ["A:validate:Update", "B:validate:Update"]);
 
-    delete(&mut **client, &reg, "invoice", &stored.name, 2)
+    delete(&mut **client, &reg, "invoice", &stored.name, 2, "ann")
         .await
         .unwrap();
     assert_eq!(
@@ -232,7 +232,7 @@ async fn hooks_run_before_framework_validation_and_it_runs_again_after_them() {
 #[tokio::test]
 async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
     /// What a hook was called with: doctype, actor, operation and the document.
-    type Call = (String, Option<String>, Operation, Document);
+    type Call = (String, String, Operation, Document);
 
     /// Keeps what it was called with.
     #[derive(Default)]
@@ -242,7 +242,7 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
         fn see(&self, ctx: &HookContext<'_>, doc: &Document) {
             self.0.lock().expect("spy").push((
                 ctx.doctype.to_owned(),
-                ctx.actor.map(str::to_owned),
+                ctx.actor.to_owned(),
                 ctx.operation,
                 doc.clone(),
             ));
@@ -297,7 +297,7 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
     )
     .await
     .unwrap();
-    delete(&mut **client, &reg, "invoice", &stored.name, 3)
+    delete(&mut **client, &reg, "invoice", &stored.name, 3, "dee")
         .await
         .unwrap();
 
@@ -305,15 +305,12 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
     assert_eq!(seen.len(), 4);
     let (doctype, actor, operation, doc) = &seen[0];
     assert_eq!(
-        (doctype.as_str(), actor.as_deref(), *operation),
-        ("invoice", Some("ann"), Operation::Insert)
+        (doctype.as_str(), actor.as_str(), *operation),
+        ("invoice", "ann", Operation::Insert)
     );
     assert_eq!(doc.name, None);
     let (_, actor, operation, doc) = &seen[1];
-    assert_eq!(
-        (actor.as_deref(), *operation),
-        (Some("bob"), Operation::Update)
-    );
+    assert_eq!((actor.as_str(), *operation), ("bob", Operation::Update));
     assert_eq!(doc.name.as_deref(), Some(stored.name.as_str()));
     assert_eq!(doc.values["title"], text("two"));
     assert_eq!(doc.values["note"], text("kept"));
@@ -327,9 +324,9 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
         "stored values are merged in"
     );
     assert_eq!(doc.tables["items"].len(), 2, "stored rows are merged in");
-    // before_delete: the stored document with its rows; the actor is not known for delete.
+    // before_delete: the stored document with its rows; the actor is the one given to delete.
     let (_, actor, operation, doc) = &seen[3];
-    assert_eq!((actor.as_deref(), *operation), (None, Operation::Delete));
+    assert_eq!((actor.as_str(), *operation), ("dee", Operation::Delete));
     assert_eq!(doc.values["title"], text("three"));
     assert_eq!(doc.tables["items"], vec![item(1, "a"), item(2, "b")]);
 }
@@ -600,7 +597,7 @@ async fn a_failing_hook_rejects_the_operation_and_persists_nothing() {
             )
             .await
             .map(|_| ()),
-            _ => delete(&mut **client, &reg, "invoice", &stored.name, 1).await,
+            _ => delete(&mut **client, &reg, "invoice", &stored.name, 1, "ann").await,
         };
         let error = result.unwrap_err();
         match &error {
@@ -703,11 +700,15 @@ async fn not_found_and_conflict_are_reported_before_any_hook_runs() {
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
-    let error = delete(&mut **client, &reg, "invoice", &stored.name, 5)
+    let error = delete(&mut **client, &reg, "invoice", &stored.name, 5, "ann")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Conflict { .. }), "{error}");
-    let error = delete(&mut **client, &reg, "invoice", "nope", 1)
+    let error = delete(&mut **client, &reg, "invoice", &stored.name, 1, "")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::InvalidActor), "{error}");
+    let error = delete(&mut **client, &reg, "invoice", "nope", 1, "ann")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");

@@ -376,6 +376,21 @@ fn insert_get_update_delete() {
     assert_eq!(after["credit_limit"], "0.50");
     assert_eq!(after["created_at"], doc["created_at"]);
 
+    // An empty actor is refused for delete too, and nothing is deleted.
+    let refused = db.forgebase(&[
+        "doc",
+        "delete",
+        "customer",
+        "a@example.com",
+        "--version",
+        "2",
+        "--doctypes",
+        DOCTYPES,
+        "--actor",
+        "",
+    ]);
+    assert_eq!(code(&refused), Some(1), "{}", stderr(&refused));
+
     let deleted = db.forgebase(&[
         "doc",
         "delete",
@@ -385,6 +400,8 @@ fn insert_get_update_delete() {
         "2",
         "--doctypes",
         DOCTYPES,
+        "--actor",
+        "dee",
     ]);
     assert_eq!(code(&deleted), Some(0), "{}", stderr(&deleted));
     assert!(stdout(&deleted).is_empty());

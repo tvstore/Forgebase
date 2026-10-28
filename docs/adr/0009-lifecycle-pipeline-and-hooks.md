@@ -22,7 +22,7 @@ Before this ADR, `forgebase-db` validated and wrote a document in a fixed order 
 - **Hooks run before framework validation**, so they may see invalid input and must be defensive; the framework validates again after them, so a hook cannot leave an invalid document behind. `validate` hooks run on insert and update (and on submit, with M2.4); `before_submit` and `before_cancel` are added in M2.4 as new default methods, which does not break existing implementations. `Operation` is `#[non_exhaustive]` for the same reason.
 - **Update sees the whole document.** Hooks and validation work on the stored values with the changes applied, not on the changes alone. A hook cannot change the naming field.
 - **Panics are not caught.** A hook is app code; a panic aborts the operation like any other panic in the caller (the transaction is rolled back when it unwinds).
-- **Delete has no actor yet.** `delete` takes no `actor` argument, so `HookContext::actor` is `None` for `Operation::Delete`; it will be filled when permissions (M3) give `delete` an actor.
+- **Delete takes an actor.** `delete` has an `actor` argument like `insert` and `update` (non-empty, no NUL; recorded, not authenticated), so `HookContext::actor` is a plain `&str` for every operation, `Operation::Delete` included. Adding it now, in 0.x, avoids a second breaking change when permissions (M3) need the actor.
 
 ## Alternatives considered
 

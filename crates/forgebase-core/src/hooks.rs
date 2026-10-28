@@ -73,7 +73,7 @@
 //! // `forgebase-db` calls the hooks; here we call one directly.
 //! let ctx = HookContext {
 //!     doctype: "customer",
-//!     actor: Some("ann"),
+//!     actor: "ann",
 //!     operation: Operation::Insert,
 //! };
 //! let mut doc = Document::default();
@@ -109,9 +109,8 @@ pub struct HookContext<'a> {
     /// The name of the DocType.
     pub doctype: &'a str,
     /// The actor of the operation, as given to `forgebase-db` (recorded, not authenticated).
-    /// `None` for [`Operation::Delete`]: `delete` takes no actor yet (it arrives with
-    /// permissions, M3).
-    pub actor: Option<&'a str>,
+    /// Set for every operation, including [`Operation::Delete`].
+    pub actor: &'a str,
     /// The operation.
     pub operation: Operation,
 }

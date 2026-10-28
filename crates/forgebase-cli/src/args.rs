@@ -82,6 +82,8 @@ pub enum DocCommand {
         version: VersionArg,
         #[command(flatten)]
         doctypes: DocTypesDir,
+        #[command(flatten)]
+        actor: ActorArg,
     },
 }
 
@@ -109,7 +111,7 @@ pub struct DataArg {
 
 #[derive(Debug, Args)]
 pub struct ActorArg {
-    /// Recorded as owner / modified_by. Not authenticated.
+    /// Recorded as owner / modified_by, and given to hooks. Not authenticated.
     #[arg(long, value_name = "NAME", default_value = "cli")]
     pub actor: String,
 }

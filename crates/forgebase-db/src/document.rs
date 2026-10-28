@@ -135,7 +135,7 @@ async fn insert_in(
     check_actor(actor)?;
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor: Some(actor),
+        actor,
         operation: Operation::Insert,
     };
     run_hooks(registry, doctype, "before_insert", |hooks| {
@@ -351,7 +351,7 @@ async fn update_in(
     }
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor: Some(actor),
+        actor,
         operation: Operation::Update,
     };
     run_hooks(registry, doctype, "validate", |hooks| {
@@ -436,7 +436,8 @@ async fn update_in(
 }
 
 /// Deletes the document with this name, and its table rows, if its current `version` equals
-/// `expected_version`.
+/// `expected_version`. The `actor` is passed to the hooks (recorded, not authenticated); an empty
+/// one is [`DbError::InvalidActor`], as for [`insert`] and [`update`].
 ///
 /// A different version is [`DbError::Conflict`] (nothing is deleted; under REPEATABLE READ or
 /// SERIALIZABLE a stale writer gets SQLSTATE 40001 as [`DbError::Postgres`] instead, see
@@ -456,10 +457,11 @@ pub async fn delete(
     doctype: &str,
     name: &str,
     expected_version: i64,
+    actor: &str,
 ) -> Result<(), DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    delete_in(&tx, registry, doctype, name, expected_version).await?;
+    delete_in(&tx, registry, doctype, name, expected_version, actor).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -470,7 +472,9 @@ async fn delete_in(
     doctype: &DocType,
     name: &str,
     expected_version: i64,
+    actor: &str,
 ) -> Result<(), DbError> {
+    check_actor(actor)?;
     let current = lock_current(
         client,
         registry,
@@ -483,7 +487,7 @@ async fn delete_in(
     let doc = as_document(&current);
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor: None,
+        actor,
         operation: Operation::Delete,
     };
     run_hooks(registry, doctype, "before_delete", |hooks| {

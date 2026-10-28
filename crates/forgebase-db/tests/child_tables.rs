@@ -881,12 +881,12 @@ async fn delete_removes_the_rows_with_the_document() {
     assert_eq!(count(&db, "doc_invoice_item").await, 3);
     // A stale delete removes nothing.
     assert!(
-        delete(&mut **client, &reg, "invoice", &a.name, 9)
+        delete(&mut **client, &reg, "invoice", &a.name, 9, "ann")
             .await
             .is_err()
     );
     assert_eq!(count(&db, "doc_invoice_item").await, 3);
-    delete(&mut **client, &reg, "invoice", &a.name, 1)
+    delete(&mut **client, &reg, "invoice", &a.name, 1, "ann")
         .await
         .unwrap();
     assert_eq!(count(&db, "doc_invoice").await, 1);
@@ -915,7 +915,7 @@ async fn a_person_linked_from_a_row_cannot_be_deleted_and_the_error_names_the_ow
     )
     .await
     .unwrap();
-    let error = delete(&mut **client, &reg, "person", &sam.name, 1)
+    let error = delete(&mut **client, &reg, "person", &sam.name, 1, "ann")
         .await
         .unwrap_err();
     assert!(
@@ -923,10 +923,10 @@ async fn a_person_linked_from_a_row_cannot_be_deleted_and_the_error_names_the_ow
         "{error}"
     );
     // Once the invoice (and so its rows) is gone, the person can be deleted.
-    delete(&mut **client, &reg, "invoice", &created.name, 1)
+    delete(&mut **client, &reg, "invoice", &created.name, 1, "ann")
         .await
         .unwrap();
-    delete(&mut **client, &reg, "person", &sam.name, 1)
+    delete(&mut **client, &reg, "person", &sam.name, 1, "ann")
         .await
         .unwrap();
 }
@@ -959,7 +959,7 @@ async fn child_doctypes_have_no_crud_of_their_own() {
         .await
         .unwrap_err();
     assert!(is_child(&error), "{error}");
-    let error = delete(&mut **client, &reg, "invoice_item", "x", 1)
+    let error = delete(&mut **client, &reg, "invoice_item", "x", 1, "ann")
         .await
         .unwrap_err();
     assert!(is_child(&error), "{error}");

@@ -399,7 +399,7 @@ async fn deleting_a_linked_document_names_the_linking_doctype() {
         .await
         .unwrap();
 
-    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 1)
+    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 1, "ann")
         .await
         .unwrap_err();
     let DbError::LinkedDocumentExists {
@@ -421,16 +421,23 @@ async fn deleting_a_linked_document_names_the_linking_doctype() {
     assert_eq!(count(&db, "doc_person").await, 1);
 
     // A stale version is reported as a conflict before anything is attempted.
-    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 7)
+    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 7, "ann")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Conflict { .. }), "{error}");
 
     // Deleting the linking document first releases the target.
-    delete(&mut **client, &reg, &order_type.name, &created.name, 1)
-        .await
-        .unwrap();
-    delete(&mut **client, &reg, &person_type.name, &boss.name, 1)
+    delete(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        1,
+        "ann",
+    )
+    .await
+    .unwrap();
+    delete(&mut **client, &reg, &person_type.name, &boss.name, 1, "ann")
         .await
         .unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
@@ -449,7 +456,7 @@ async fn a_linked_delete_in_a_transaction_fails_cleanly_and_leaves_it_usable() {
     insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
         .await
         .unwrap();
-    let error = delete(&mut tx, &reg, &person_type.name, "boss@x.y", 1)
+    let error = delete(&mut tx, &reg, &person_type.name, "boss@x.y", 1, "ann")
         .await
         .unwrap_err();
     assert!(
@@ -644,7 +651,7 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
         .unwrap();
 
     // A concurrent delete of the target waits and then times out.
-    let error = delete(&mut **second, &reg, &person_type.name, &boss.name, 1)
+    let error = delete(&mut **second, &reg, &person_type.name, &boss.name, 1, "ann")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::LockTimeout), "{error}");
@@ -654,7 +661,7 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
     tx.rollback().await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(5),
-        delete(&mut **second, &reg, &person_type.name, &boss.name, 1),
+        delete(&mut **second, &reg, &person_type.name, &boss.name, 1, "ann"),
     )
     .await
     .expect("delete should no longer wait")
