@@ -1,9 +1,10 @@
 //! Loading the DocType files of a directory into a registry.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::meta::{DefinitionError, DocType, Registry};
 
 /// Loads every `*.toml` file directly in `dir` into a registry.
 ///
@@ -14,7 +15,9 @@ use forgebase_core::meta::{DocType, Registry};
 /// is ignored. Symlinks to files are followed.
 ///
 /// Every problem is reported, each prefixed with its file name: unreadable files, invalid
-/// definitions and duplicate DocType names.
+/// definitions and duplicate DocType names. When every file loaded, Link targets are checked
+/// ([`Registry::check_references`]): a Link to a DocType that no file defines is reported with
+/// the file of the DocType that has the Link field.
 pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
     let entries = fs::read_dir(dir).map_err(|e| {
         vec![format!(
@@ -54,6 +57,7 @@ pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
     files.sort();
 
     let mut registry = Registry::new();
+    let mut defined_in: BTreeMap<String, &PathBuf> = BTreeMap::new();
     for path in &files {
         let shown = path.display();
         let text = match fs::read_to_string(path) {
@@ -66,12 +70,33 @@ pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
         match DocType::from_toml_str(&text) {
             Err(e) => problems.push(format!("{shown}: {e}")),
             Ok(doctype) => {
-                if let Err(errors) = registry.add(doctype) {
-                    for e in errors {
-                        problems.push(format!("{shown}: {e}"));
+                let name = doctype.name.clone();
+                match registry.add(doctype) {
+                    Ok(()) => {
+                        defined_in.insert(name, path);
+                    }
+                    Err(errors) => {
+                        for e in errors {
+                            problems.push(format!("{shown}: {e}"));
+                        }
                     }
                 }
             }
+        }
+    }
+    // Only when everything loaded: a Link to a DocType from a broken file would be reported twice.
+    if problems.is_empty()
+        && let Err(errors) = registry.check_references()
+    {
+        for error in errors {
+            let file = match &error {
+                DefinitionError::UnknownLinkTarget { doctype, .. } => defined_in.get(doctype),
+                _ => None,
+            };
+            problems.push(match file {
+                Some(path) => format!("{}: {error}", path.display()),
+                None => error.to_string(),
+            });
         }
     }
     if problems.is_empty() {
@@ -158,6 +183,38 @@ mod tests {
         let problems = load_dir(&dir).unwrap_err();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("link.toml"), "{problems:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn linking(name: &str, target: &str) -> String {
+        format!(
+            "name = \"{name}\"\nlabel = \"L\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"{target}\"\n"
+        )
+    }
+
+    #[test]
+    fn links_between_files_load_in_any_order_and_unknown_targets_name_the_file() {
+        let dir = scratch("links");
+        // `a` links to `b`, which is loaded later; `b` links to itself.
+        fs::write(dir.join("a.toml"), linking("a", "b")).unwrap();
+        fs::write(dir.join("b.toml"), linking("b", "b")).unwrap();
+        assert_eq!(load_dir(&dir).unwrap().len(), 2);
+
+        fs::write(dir.join("c.toml"), linking("c", "nowhere")).unwrap();
+        let problems = load_dir(&dir).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("c.toml")
+                && problems[0].contains("field `f` links to unknown doctype `nowhere`"),
+            "{problems:?}"
+        );
+
+        // A target in a file that failed to load is not reported again.
+        fs::write(dir.join("d.toml"), "name = ").unwrap();
+        fs::write(dir.join("c.toml"), linking("c", "d")).unwrap();
+        let problems = load_dir(&dir).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("d.toml"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

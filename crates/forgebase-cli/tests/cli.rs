@@ -186,6 +186,28 @@ fn version_and_usage_errors() {
     for args in [
         &["migrate"][..],
         &["doc", "get", "customer"],
+        // `update` and `delete` need --version.
+        &[
+            "doc",
+            "update",
+            "customer",
+            "x",
+            "--doctypes",
+            DOCTYPES,
+            "--data",
+            "{}",
+        ],
+        &["doc", "delete", "customer", "x", "--doctypes", DOCTYPES],
+        &[
+            "doc",
+            "delete",
+            "customer",
+            "x",
+            "--doctypes",
+            DOCTYPES,
+            "--version",
+            "abc",
+        ],
         &["bogus"],
         &[],
     ] {
@@ -228,12 +250,22 @@ fn dry_run_creates_nothing() {
     // After the framework migrations, a dry run shows the CREATE TABLE and still changes nothing.
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
-    db.exec("DROP TABLE doc_customer; DELETE FROM fb_doctype");
+    db.exec("DROP TABLE doc_customer; DELETE FROM fb_doctype WHERE name = 'customer'");
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("would apply"), "{text}");
     assert!(text.contains("CREATE TABLE \"doc_customer\""), "{text}");
+    assert!(
+        text.contains(
+            "ALTER TABLE \"doc_customer\" ADD FOREIGN KEY (\"customer_group\") REFERENCES \"doc_customer_group\" (\"id\") ON DELETE RESTRICT;"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("CREATE INDEX ON \"doc_customer\" (\"customer_group\");"),
+        "{text}"
+    );
     assert!(text.contains("dry run: nothing was changed"), "{text}");
     assert_eq!(db.scalar("SELECT to_regclass('doc_customer')::text"), None);
 }
@@ -250,6 +282,11 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
         db.scalar("SELECT to_regclass('doc_customer')::text")
             .as_deref(),
         Some("doc_customer")
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM pg_constraint WHERE contype = 'f'")
+            .as_deref(),
+        Some("1")
     );
 
     let second = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
@@ -314,6 +351,8 @@ fn insert_get_update_delete() {
             "update",
             "customer",
             "a@example.com",
+            "--version",
+            "1",
             "--doctypes",
             DOCTYPES,
             "--actor",
@@ -337,6 +376,8 @@ fn insert_get_update_delete() {
         "delete",
         "customer",
         "a@example.com",
+        "--version",
+        "2",
         "--doctypes",
         DOCTYPES,
     ]);
@@ -483,6 +524,8 @@ fn bad_input_and_unique_violations_exit_1() {
         "update",
         "customer",
         "u@example.com",
+        "--version",
+        "1",
         "--doctypes",
         DOCTYPES,
         "--data",
@@ -500,6 +543,8 @@ fn bad_input_and_unique_violations_exit_1() {
         "update",
         "customer",
         "u@example.com",
+        "--version",
+        "1",
         "--doctypes",
         DOCTYPES,
         "--data",
@@ -521,7 +566,7 @@ fn schema_conflicts_exit_1_and_change_nothing() {
         Some(0)
     );
     db.exec(
-        "DROP TABLE doc_customer; DELETE FROM fb_doctype; CREATE TABLE doc_customer (x integer)",
+        "DROP TABLE doc_customer; DELETE FROM fb_doctype WHERE name = 'customer'; CREATE TABLE doc_customer (x integer)",
     );
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(1));
@@ -565,4 +610,144 @@ fn invalid_doctype_files_exit_1_naming_the_file() {
         "{message}"
     );
     assert!(message.contains("broken.toml"), "{message}");
+}
+
+#[test]
+fn links_and_versions_end_to_end() {
+    let db = TestDb::new();
+    assert_eq!(
+        code(&db.forgebase(&["migrate", "--doctypes", DOCTYPES])),
+        Some(0)
+    );
+    let run = |args: &[&str]| {
+        let mut full = args.to_vec();
+        full.extend_from_slice(&["--doctypes", DOCTYPES]);
+        db.forgebase(&full)
+    };
+
+    // A link to a group that does not exist is a validation error naming the field.
+    let customer = r#"{"email":"l@example.com","full_name":"L","customer_group":"retail"}"#;
+    let missing = run(&["doc", "insert", "customer", "--data", customer]);
+    assert_eq!(code(&missing), Some(1));
+    assert!(
+        stderr(&missing).contains("field `customer_group`: customer_group `retail` does not exist"),
+        "{}",
+        stderr(&missing)
+    );
+
+    let group = run(&[
+        "doc",
+        "insert",
+        "customer_group",
+        "--data",
+        r#"{"title":"retail"}"#,
+    ]);
+    assert_eq!(code(&group), Some(0), "{}", stderr(&group));
+    let inserted = run(&["doc", "insert", "customer", "--data", customer]);
+    assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+    // A link is the target's name in the output.
+    assert_eq!(json(&inserted)["customer_group"], "retail");
+
+    // A linked group cannot be deleted; the message names the linking DocType.
+    let blocked = run(&[
+        "doc",
+        "delete",
+        "customer_group",
+        "retail",
+        "--version",
+        "1",
+    ]);
+    assert_eq!(code(&blocked), Some(1));
+    assert_eq!(
+        stderr(&blocked),
+        "error: customer_group `retail` cannot be deleted: it is linked from customer\n"
+    );
+
+    // A stale version is refused and reports the current one.
+    let updated = run(&[
+        "doc",
+        "update",
+        "customer",
+        "l@example.com",
+        "--version",
+        "1",
+        "--data",
+        r#"{"customer_group":null}"#,
+    ]);
+    assert_eq!(code(&updated), Some(0), "{}", stderr(&updated));
+    assert!(json(&updated)["customer_group"].is_null());
+    let stale = run(&[
+        "doc",
+        "update",
+        "customer",
+        "l@example.com",
+        "--version",
+        "1",
+        "--data",
+        r#"{"loyalty_points":1}"#,
+    ]);
+    assert_eq!(code(&stale), Some(1));
+    assert!(
+        stderr(&stale).contains("expected version 1, current version 2"),
+        "{}",
+        stderr(&stale)
+    );
+    let stale_delete = run(&[
+        "doc",
+        "delete",
+        "customer",
+        "l@example.com",
+        "--version",
+        "1",
+    ]);
+    assert_eq!(code(&stale_delete), Some(1));
+    assert!(
+        stderr(&stale_delete).contains("current version 2"),
+        "{}",
+        stderr(&stale_delete)
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM doc_customer")
+            .as_deref(),
+        Some("1")
+    );
+
+    // Now nothing links to the group any more.
+    let deleted = run(&[
+        "doc",
+        "delete",
+        "customer_group",
+        "retail",
+        "--version",
+        "1",
+    ]);
+    assert_eq!(code(&deleted), Some(0), "{}", stderr(&deleted));
+}
+
+#[test]
+fn unknown_link_targets_are_reported_with_the_file() {
+    let dir = std::env::temp_dir().join(format!("forgebase-cli-links-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(
+        dir.join("order.toml"),
+        "name = \"sales_order\"\nlabel = \"O\"\n[[fields]]\nname = \"customer\"\ntype = \"link\"\ntarget = \"customer\"\n",
+    )
+    .expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+        .args(["migrate", "--doctypes", dir.to_str().expect("utf-8 path")])
+        .env(
+            "FORGEBASE_DATABASE_URL",
+            "postgres://unused:unused@127.0.0.1:1/unused",
+        )
+        .stdin(Stdio::null())
+        .output()
+        .expect("run forgebase");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+    assert_eq!(code(&output), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("order.toml"), "{message}");
+    assert!(
+        message.contains("field `customer` links to unknown doctype `customer`"),
+        "{message}"
+    );
 }

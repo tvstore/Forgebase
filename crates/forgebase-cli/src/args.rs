@@ -55,12 +55,15 @@ pub enum DocCommand {
         #[command(flatten)]
         doctypes: DocTypesDir,
     },
-    /// Change fields of a document and print it as stored.
+    /// Change fields of a document and print it as stored. Fails if the document's version is
+    /// not the one given with --version.
     Update {
         /// DocType name.
         doctype: String,
         /// Document name.
         name: String,
+        #[command(flatten)]
+        version: VersionArg,
         #[command(flatten)]
         doctypes: DocTypesDir,
         #[command(flatten)]
@@ -68,15 +71,26 @@ pub enum DocCommand {
         #[command(flatten)]
         actor: ActorArg,
     },
-    /// Delete a document (prints nothing).
+    /// Delete a document (prints nothing). Fails if the document's version is not the one given
+    /// with --version, or if other documents still link to it.
     Delete {
         /// DocType name.
         doctype: String,
         /// Document name.
         name: String,
         #[command(flatten)]
+        version: VersionArg,
+        #[command(flatten)]
         doctypes: DocTypesDir,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct VersionArg {
+    /// The version of the document you last read (the `version` field of `doc get`). The change
+    /// is refused if someone else changed the document since.
+    #[arg(long = "version", value_name = "N")]
+    pub expected_version: i64,
 }
 
 #[derive(Debug, Args)]

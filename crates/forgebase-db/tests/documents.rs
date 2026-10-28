@@ -307,7 +307,7 @@ async fn invalid_actor_is_rejected() {
             .unwrap_err();
         assert!(matches!(error, DbError::InvalidActor), "{error}");
         let changes = BTreeMap::from([("points".to_owned(), Value::Int(1))]);
-        let error = update(&**client, &types[0], "n", &changes, actor)
+        let error = update(&**client, &types[0], "n", 1, &changes, actor)
             .await
             .unwrap_err();
         assert!(matches!(error, DbError::InvalidActor), "{error}");
@@ -342,7 +342,7 @@ async fn update_changes_values_and_bumps_version() {
         ("credit_limit".to_owned(), dec("0.5")),
         ("notes".to_owned(), Value::Null),
     ]);
-    let updated = update(&**client, customer, &created.name, &changes, "bob")
+    let updated = update(&**client, customer, &created.name, 1, &changes, "bob")
         .await
         .unwrap();
     assert_eq!(updated.version, 2);
@@ -363,7 +363,7 @@ async fn update_changes_values_and_bumps_version() {
         .unwrap()
         .unwrap();
     assert_eq!(fetched, updated);
-    let third = update(&**client, customer, &created.name, &changes, "bob")
+    let third = update(&**client, customer, &created.name, 2, &changes, "bob")
         .await
         .unwrap();
     assert_eq!(third.version, 3);
@@ -380,16 +380,23 @@ async fn update_rejects_bad_changes() {
         .unwrap();
 
     // Nothing to change.
-    let error = update(&**client, customer, &created.name, &BTreeMap::new(), "cli")
-        .await
-        .unwrap_err();
+    let error = update(
+        &**client,
+        customer,
+        &created.name,
+        1,
+        &BTreeMap::new(),
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::NoChanges), "{error}");
     // Validation (unknown field, required cleared).
     let changes = BTreeMap::from([
         ("bogus".to_owned(), Value::Int(1)),
         ("email".to_owned(), Value::Null),
     ]);
-    let error = update(&**client, customer, &created.name, &changes, "cli")
+    let error = update(&**client, customer, &created.name, 1, &changes, "cli")
         .await
         .unwrap_err();
     assert!(
@@ -403,7 +410,7 @@ async fn update_rejects_bad_changes() {
         .unwrap();
     for new in ["new", "old"] {
         let changes = BTreeMap::from([("email".to_owned(), text(new))]);
-        let error = update(&**client, account, "old", &changes, "cli")
+        let error = update(&**client, account, "old", 1, &changes, "cli")
             .await
             .unwrap_err();
         assert!(matches!(error, DbError::Naming(_)), "{error}");
@@ -415,7 +422,7 @@ async fn update_rejects_bad_changes() {
 
     // Unknown name.
     let changes = BTreeMap::from([("points".to_owned(), Value::Int(1))]);
-    let error = update(&**client, customer, "missing", &changes, "cli")
+    let error = update(&**client, customer, "missing", 1, &changes, "cli")
         .await
         .unwrap_err();
     assert!(
@@ -438,14 +445,16 @@ async fn delete_removes_the_document() {
     let stored = insert(&**client, customer, full_customer("d@example.com"), "cli")
         .await
         .unwrap();
-    delete(&**client, customer, &stored.name).await.unwrap();
+    delete(&**client, customer, &stored.name, 1).await.unwrap();
     assert!(
         get(&**client, customer, &stored.name)
             .await
             .unwrap()
             .is_none()
     );
-    let error = delete(&**client, customer, &stored.name).await.unwrap_err();
+    let error = delete(&**client, customer, &stored.name, 1)
+        .await
+        .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
 }
 
@@ -480,7 +489,7 @@ async fn duplicate_unique_values_are_unique_violations() {
     .await
     .unwrap();
     let changes = BTreeMap::from([("email".to_owned(), text("dup@example.com"))]);
-    let error = update(&**client, customer, &other.name, &changes, "cli")
+    let error = update(&**client, customer, &other.name, 1, &changes, "cli")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::UniqueViolation { .. }), "{error}");
@@ -517,14 +526,14 @@ async fn injection_like_strings_are_stored_literally() {
         assert_eq!(stored.values["notes"], text(value));
         assert_eq!(stored.owner, *value);
         let changes = BTreeMap::from([("notes".to_owned(), text(value))]);
-        let updated = update(&**client, customer, &stored.name, &changes, value)
+        let updated = update(&**client, customer, &stored.name, 1, &changes, value)
             .await
             .unwrap();
         assert_eq!(updated.modified_by, *value);
         // Looking up by a hostile name finds nothing and breaks nothing.
         assert!(get(&**client, customer, value).await.unwrap().is_none());
         assert!(matches!(
-            delete(&**client, customer, value).await,
+            delete(&**client, customer, value, 1).await,
             Err(DbError::NotFound { .. })
         ));
     }
@@ -543,7 +552,7 @@ async fn operations_in_a_rolled_back_transaction_leave_nothing() {
         .await
         .unwrap();
     let changes = BTreeMap::from([("points".to_owned(), Value::Int(9))]);
-    update(&tx, customer, &stored.name, &changes, "cli")
+    update(&tx, customer, &stored.name, 1, &changes, "cli")
         .await
         .unwrap();
     // Visible inside the transaction.

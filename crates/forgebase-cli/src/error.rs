@@ -46,6 +46,10 @@ fn describe_db(error: &DbError) -> String {
             let lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
             format!("validation failed:\n{}", bullets(&lines))
         }
+        DbError::InvalidMetadata(errors) => {
+            let lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
+            format!("invalid DocType metadata:\n{}", bullets(&lines))
+        }
         DbError::SyncConflicts(conflicts) => {
             let lines: Vec<String> = conflicts.iter().map(ToString::to_string).collect();
             format!(

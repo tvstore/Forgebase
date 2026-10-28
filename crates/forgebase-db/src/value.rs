@@ -6,6 +6,7 @@ use forgebase_core::value::Value;
 use time::{Date, OffsetDateTime, UtcOffset};
 use tokio_postgres::Row;
 use tokio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
+use uuid::Uuid;
 
 /// A [`Value`] as a query parameter.
 ///
@@ -47,6 +48,29 @@ impl ToSql for SqlValue<'_> {
     to_sql_checked!();
 }
 
+/// A query parameter of a document write: a plain [`Value`], or the resolved `id` of a Link
+/// target (`None` for no link). Link values are bound as `uuid`, never as the target name.
+#[derive(Debug)]
+pub(crate) enum SqlParam<'a> {
+    Value(SqlValue<'a>),
+    Link(Option<Uuid>),
+}
+
+impl ToSql for SqlParam<'_> {
+    fn to_sql(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
+        match self {
+            SqlParam::Value(v) => v.to_sql_checked(ty, out),
+            SqlParam::Link(id) => id.to_sql_checked(ty, out),
+        }
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    to_sql_checked!();
+}
+
 /// The SQL type a placeholder for a field of this type is cast to.
 pub(crate) fn cast_type(field_type: &FieldType) -> &'static str {
     match field_type {
@@ -57,11 +81,13 @@ pub(crate) fn cast_type(field_type: &FieldType) -> &'static str {
         FieldType::Check => "boolean",
         FieldType::Date => "date",
         FieldType::Datetime => "timestamptz",
+        FieldType::Link { .. } => "uuid",
     }
 }
 
 /// Reads column `index` of `row` as a value of the given field type (SQL NULL becomes
-/// [`Value::Null`]). A column of another type is an error, not a panic. A value the `time`
+/// [`Value::Null`]). A Link column must hold the target's `name` (as text), not its `id`: the
+/// select list resolves it, see `document::select_list`. A column of another type is an error, not a panic. A value the `time`
 /// crate cannot represent (years beyond ±9999, `infinity`) is an error too; the caller adds the
 /// field name.
 pub(crate) fn decode(
@@ -70,7 +96,10 @@ pub(crate) fn decode(
     field_type: &FieldType,
 ) -> Result<Value, tokio_postgres::Error> {
     Ok(match field_type {
-        FieldType::Data { .. } | FieldType::Text | FieldType::Select { .. } => row
+        FieldType::Data { .. }
+        | FieldType::Text
+        | FieldType::Select { .. }
+        | FieldType::Link { .. } => row
             .try_get::<_, Option<String>>(index)?
             .map_or(Value::Null, Value::Text),
         FieldType::Int => row
@@ -147,9 +176,36 @@ mod tests {
     }
 
     #[test]
+    fn link_params_bind_as_uuid_or_null() {
+        let mut out = BytesMut::new();
+        let id = Uuid::now_v7();
+        assert!(matches!(
+            SqlParam::Link(Some(id)).to_sql_checked(&Type::UUID, &mut out),
+            Ok(IsNull::No)
+        ));
+        assert_eq!(out.len(), 16);
+        assert!(matches!(
+            SqlParam::Link(None).to_sql_checked(&Type::UUID, &mut out),
+            Ok(IsNull::Yes)
+        ));
+        // A name is never bound where an id is expected.
+        assert!(
+            SqlParam::Link(Some(id))
+                .to_sql_checked(&Type::TEXT, &mut out)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn cast_types() {
         assert_eq!(cast_type(&FieldType::Data { max_length: 5 }), "varchar");
         assert_eq!(cast_type(&FieldType::Int), "bigint");
         assert_eq!(cast_type(&FieldType::Datetime), "timestamptz");
+        assert_eq!(
+            cast_type(&FieldType::Link {
+                target: "customer".to_owned()
+            }),
+            "uuid"
+        );
     }
 }

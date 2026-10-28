@@ -41,7 +41,7 @@ pub struct DocField {
     pub unique: bool,
 }
 
-/// The closed set of M1 field types. Link and Table arrive in M2.
+/// The closed set of field types. Link arrived in M2.1; Table arrives in M2.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldType {
     /// Short text with a maximum length in characters (`1..=65535`).
@@ -71,6 +71,15 @@ pub enum FieldType {
         /// The allowed values.
         options: Vec<String>,
     },
+    /// A reference to a document of another DocType (or of the same one), by document name.
+    ///
+    /// The value is [`Value::Text`](crate::value::Value::Text) holding the target document's
+    /// `name`. The database stores the target's `id` as a foreign key.
+    Link {
+        /// Name of the target DocType. It must exist in the [`Registry`] that holds this
+        /// DocType, see [`Registry::check_references`].
+        target: String,
+    },
 }
 
 impl FieldType {
@@ -85,6 +94,7 @@ impl FieldType {
             FieldType::Date => "date",
             FieldType::Datetime => "datetime",
             FieldType::Select { .. } => "select",
+            FieldType::Link { .. } => "link",
         }
     }
 }
@@ -144,7 +154,7 @@ pub enum DefinitionError {
     },
     /// The `type` value is not one of the supported field types.
     #[error(
-        "field `{field}`: unknown type `{found}` (expected one of data, text, int, decimal, check, date, datetime, select)"
+        "field `{field}`: unknown type `{found}` (expected one of data, text, int, decimal, check, date, datetime, select, link)"
     )]
     UnknownFieldType {
         /// The field.
@@ -259,11 +269,32 @@ pub enum DefinitionError {
         /// The referenced field.
         field: String,
     },
+    /// A Link field's `target` is not a valid DocType name.
+    #[error("field `{field}`: link target `{target}` {reason}")]
+    InvalidLinkTarget {
+        /// The field.
+        field: String,
+        /// The rejected target.
+        target: String,
+        /// Why it was rejected.
+        reason: IdentError,
+    },
     /// A registry already holds a DocType with this name.
     #[error("doctype `{name}` is already registered")]
     DuplicateDocType {
         /// The repeated name.
         name: String,
+    },
+    /// A Link field refers to a DocType that is not in the registry
+    /// ([`Registry::check_references`]).
+    #[error("doctype `{doctype}`: field `{field}` links to unknown doctype `{target}`")]
+    UnknownLinkTarget {
+        /// The DocType that has the Link field.
+        doctype: String,
+        /// The field.
+        field: String,
+        /// The missing target DocType.
+        target: String,
     },
 }
 
@@ -440,6 +471,15 @@ impl DocField {
                     }
                 }
             }
+            FieldType::Link { target } => {
+                if let Err(reason) = ident::validate_doctype_name(target) {
+                    errors.push(DefinitionError::InvalidLinkTarget {
+                        field: field(),
+                        target: target.clone(),
+                        reason,
+                    });
+                }
+            }
             FieldType::Text
             | FieldType::Int
             | FieldType::Check
@@ -464,6 +504,10 @@ impl Registry {
     /// Validates and adds a DocType. Fails with every definition problem found
     /// ([`DocType::validate`]), or with [`DefinitionError::DuplicateDocType`] if one with the
     /// same name is already present. The registry therefore only holds valid DocTypes.
+    ///
+    /// Only the DocType itself is checked: a Link field may name a DocType that is added later
+    /// (definition files are loaded in any order). **Call [`Registry::check_references`] after
+    /// the last DocType has been added.**
     pub fn add(&mut self, doctype: DocType) -> Result<(), Vec<DefinitionError>> {
         doctype.validate()?;
         if self.doctypes.contains_key(&doctype.name) {
@@ -473,6 +517,33 @@ impl Registry {
         }
         self.doctypes.insert(doctype.name.clone(), doctype);
         Ok(())
+    }
+
+    /// Checks that every Link field refers to a DocType in this registry (a DocType may link to
+    /// itself). Returns every unknown target.
+    ///
+    /// [`Registry::add`] cannot do this because DocTypes arrive one at a time. Call it once
+    /// after all DocTypes are loaded; `forgebase-db`'s `sync` and the CLI loader do.
+    pub fn check_references(&self) -> Result<(), Vec<DefinitionError>> {
+        let mut errors = Vec::new();
+        for doctype in self.doctypes.values() {
+            for field in &doctype.fields {
+                if let FieldType::Link { target } = &field.field_type
+                    && !self.doctypes.contains_key(target)
+                {
+                    errors.push(DefinitionError::UnknownLinkTarget {
+                        doctype: doctype.name.clone(),
+                        field: field.name.clone(),
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Looks up a DocType by name.
@@ -808,6 +879,77 @@ mod tests {
             }])
         );
         assert!(registry.is_empty());
+    }
+
+    fn link(name: &str, target: &str) -> DocField {
+        field(
+            name,
+            FieldType::Link {
+                target: target.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn link_target_must_be_a_valid_doctype_name() {
+        assert_eq!(doctype(vec![link("c", "customer")]).validate(), Ok(()));
+        for bad in ["Customer", "", "x\"; drop table y; --", "9a"] {
+            let errors = errors_of(&doctype(vec![link("c", bad)]));
+            assert!(
+                matches!(errors.as_slice(), [DefinitionError::InvalidLinkTarget { target, .. }] if target == bad),
+                "{bad:?}: {errors:?}"
+            );
+        }
+        let too_long = "a".repeat(ident::MAX_DOCTYPE_NAME_LEN + 1);
+        assert_eq!(errors_of(&doctype(vec![link("c", &too_long)])).len(), 1);
+    }
+
+    #[test]
+    fn check_references_reports_unknown_targets() {
+        let mut registry = Registry::new();
+        let mut order = doctype(vec![
+            link("customer", "customer"),
+            link("owner_group", "grp"),
+        ]);
+        order.name = "order".into();
+        registry.add(order).unwrap();
+        assert_eq!(
+            registry.check_references(),
+            Err(vec![
+                DefinitionError::UnknownLinkTarget {
+                    doctype: "order".into(),
+                    field: "customer".into(),
+                    target: "customer".into()
+                },
+                DefinitionError::UnknownLinkTarget {
+                    doctype: "order".into(),
+                    field: "owner_group".into(),
+                    target: "grp".into()
+                },
+            ])
+        );
+        let mut customer = doctype(vec![]);
+        customer.name = "customer".into();
+        registry.add(customer).unwrap();
+        let mut grp = doctype(vec![]);
+        grp.name = "grp".into();
+        registry.add(grp).unwrap();
+        // A target added after the DocType that links to it is fine.
+        assert_eq!(registry.check_references(), Ok(()));
+        assert_eq!(
+            Registry::new().check_references(),
+            Ok(()),
+            "an empty registry has no references"
+        );
+    }
+
+    #[test]
+    fn self_link_is_allowed() {
+        let mut registry = Registry::new();
+        let mut tree = doctype(vec![link("parent", "tree")]);
+        tree.name = "tree".into();
+        registry.add(tree).unwrap();
+        assert_eq!(registry.check_references(), Ok(()));
     }
 
     #[test]

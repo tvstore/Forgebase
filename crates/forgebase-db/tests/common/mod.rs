@@ -221,3 +221,37 @@ name = "tier"
 type = "select"
 options = ["gold", "silver"]
 "#;
+
+/// A DocType named by its `email`, a typical Link target.
+pub const PERSON: &str = r#"
+name = "person"
+label = "Person"
+naming = { field = "email" }
+[[fields]]
+name = "email"
+type = "data"
+required = true
+unique = true
+"#;
+
+/// Links to `person` (optional) and to itself (optional); `approver` is a required link.
+pub const SALES_ORDER: &str = r#"
+name = "sales_order"
+label = "Sales Order"
+[[fields]]
+name = "title"
+type = "data"
+[[fields]]
+name = "customer"
+type = "link"
+target = "person"
+[[fields]]
+name = "follows"
+type = "link"
+target = "sales_order"
+[[fields]]
+name = "approver"
+type = "link"
+target = "person"
+required = true
+"#;

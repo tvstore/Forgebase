@@ -85,6 +85,34 @@ pub enum ValidationError {
         /// Allowed integer digits (`precision - scale`).
         max: u8,
     },
+    /// A Link value names a document that does not exist. Not produced by [`validate`] (which
+    /// does no I/O): `forgebase-db` reports it when it resolves the link.
+    #[error("field `{field}`: {target} `{name}` does not exist")]
+    LinkNotFound {
+        /// The field.
+        field: String,
+        /// The target DocType.
+        target: String,
+        /// The document name that was not found.
+        name: String,
+    },
+}
+
+impl ValidationError {
+    /// The field this problem is about.
+    pub fn field(&self) -> &str {
+        match self {
+            ValidationError::UnknownField { field }
+            | ValidationError::Required { field }
+            | ValidationError::TypeMismatch { field, .. }
+            | ValidationError::TooLong { field, .. }
+            | ValidationError::InvalidOption { field, .. }
+            | ValidationError::ContainsNul { field }
+            | ValidationError::DecimalScale { field, .. }
+            | ValidationError::DecimalPrecision { field, .. }
+            | ValidationError::LinkNotFound { field, .. } => field,
+        }
+    }
 }
 
 /// Validates a complete document for insert.
@@ -92,8 +120,9 @@ pub enum ValidationError {
 /// Reports every problem: unknown fields, missing or null required fields, wrong value kinds
 /// and constraint violations. `doc.name` is not checked.
 ///
-/// A required Text, Data or Select field counts as missing when it is absent, null, or an
-/// empty or whitespace-only string. Text, Data and Select values must not contain NUL.
+/// A required Text, Data, Select or Link field counts as missing when it is absent, null, or
+/// an empty or whitespace-only string. Text, Data, Select and Link values must not contain NUL.
+/// Whether a Link target exists is not checked here (no I/O); `forgebase-db` does that.
 ///
 /// `doctype` must be valid ([`DocType::validate`]); a [`Registry`](crate::meta::Registry)
 /// only holds valid DocTypes. The result for an invalid DocType is unspecified (but never a panic).
@@ -114,8 +143,8 @@ pub fn validate(doctype: &DocType, doc: &Document) -> Result<(), Vec<ValidationE
 /// Validates a partial update: only the given fields are checked.
 ///
 /// Fields that are not in `changes` are left alone, so required fields need not be present,
-/// but a required field may not be set to [`Value::Null`] or, for Text, Data and Select, to an
-/// empty or whitespace-only string (see [`validate`]).
+/// but a required field may not be set to [`Value::Null`] or, for Text, Data, Select and Link,
+/// to an empty or whitespace-only string (see [`validate`]).
 ///
 /// `doctype` must be valid ([`DocType::validate`]); a [`Registry`](crate::meta::Registry)
 /// only holds valid DocTypes.
@@ -159,8 +188,13 @@ fn check_value(field: &DocField, value: &Value, errors: &mut Vec<ValidationError
         }
         return;
     }
-    if let (FieldType::Data { .. } | FieldType::Text | FieldType::Select { .. }, Value::Text(s)) =
-        (&field.field_type, value)
+    if let (
+        FieldType::Data { .. }
+        | FieldType::Text
+        | FieldType::Select { .. }
+        | FieldType::Link { .. },
+        Value::Text(s),
+    ) = (&field.field_type, value)
     {
         if s.contains('\0') {
             errors.push(ValidationError::ContainsNul { field: name() });
@@ -216,7 +250,7 @@ fn check_value(field: &DocField, value: &Value, errors: &mut Vec<ValidationError
                 }
             }
         }
-        (FieldType::Text, Value::Text(_))
+        (FieldType::Text | FieldType::Link { .. }, Value::Text(_))
         | (FieldType::Int, Value::Int(_))
         | (FieldType::Check, Value::Bool(_))
         | (FieldType::Date, Value::Date(_))
@@ -231,7 +265,10 @@ fn check_value(field: &DocField, value: &Value, errors: &mut Vec<ValidationError
 
 fn expected_kind(field_type: &FieldType) -> &'static str {
     match field_type {
-        FieldType::Data { .. } | FieldType::Text | FieldType::Select { .. } => "text",
+        FieldType::Data { .. }
+        | FieldType::Text
+        | FieldType::Select { .. }
+        | FieldType::Link { .. } => "text",
         FieldType::Int => "int",
         FieldType::Decimal { .. } => "decimal",
         FieldType::Check => "bool",
@@ -294,6 +331,13 @@ mod tests {
                     "kind",
                     FieldType::Select {
                         options: vec!["a".into(), "b".into()],
+                    },
+                    false,
+                ),
+                f(
+                    "owner_ref",
+                    FieldType::Link {
+                        target: "person".into(),
                     },
                     false,
                 ),
@@ -431,6 +475,64 @@ mod tests {
         let changes = BTreeMap::from([("amount".to_string(), dec("0.001"))]);
         // The result is unspecified for an invalid DocType; it must only not panic.
         let _ = validate_update(&dt, &changes);
+    }
+
+    #[test]
+    fn link_values_are_text_checked_like_data() {
+        // The target name is any non-blank text; existence is checked by forgebase-db.
+        assert_eq!(
+            validate(
+                &doctype(),
+                &doc(vec![("owner_ref", text("ann@example.com"))])
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            errs(&doc(vec![("owner_ref", Value::Int(1))])),
+            vec![ValidationError::TypeMismatch {
+                field: "owner_ref".into(),
+                expected: "text",
+                found: "int"
+            }]
+        );
+        assert_eq!(
+            errs(&doc(vec![("owner_ref", text("a\0b"))])),
+            vec![ValidationError::ContainsNul {
+                field: "owner_ref".into()
+            }]
+        );
+        let mut dt = doctype();
+        dt.fields.push(f(
+            "must_link",
+            FieldType::Link {
+                target: "person".into(),
+            },
+            true,
+        ));
+        for blank in ["", "  \t"] {
+            let mut d = doc(vec![("must_link", text(blank))]);
+            assert_eq!(
+                validate(&dt, &d),
+                Err(vec![ValidationError::Required {
+                    field: "must_link".into()
+                }]),
+                "{blank:?}"
+            );
+            d.values.insert("must_link".into(), Value::Null);
+            assert_eq!(validate(&dt, &d).unwrap_err().len(), 1);
+        }
+        // Optional links may be cleared.
+        let changes = BTreeMap::from([("owner_ref".to_string(), Value::Null)]);
+        assert_eq!(validate_update(&doctype(), &changes), Ok(()));
+        assert_eq!(
+            ValidationError::LinkNotFound {
+                field: "owner_ref".into(),
+                target: "person".into(),
+                name: "x".into()
+            }
+            .field(),
+            "owner_ref"
+        );
     }
 
     #[test]
