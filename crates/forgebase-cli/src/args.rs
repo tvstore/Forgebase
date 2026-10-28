@@ -111,7 +111,8 @@ pub struct DataArg {
 
 #[derive(Debug, Args)]
 pub struct ActorArg {
-    /// Recorded as owner / modified_by, and given to hooks. Not authenticated.
+    /// Recorded as owner / modified_by on insert and update; given to hooks (on delete it is only
+    /// given to hooks, not stored). Not authenticated.
     #[arg(long, value_name = "NAME", default_value = "cli")]
     pub actor: String,
 }

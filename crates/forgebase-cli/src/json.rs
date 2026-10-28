@@ -4,7 +4,7 @@
 //! |---|---|
 //! | Data, Text, Select | string |
 //! | Link | string: the `name` of the target document (the database stores its id) |
-//! | Table | array of row objects in order, each mapped like a document (no nested Table); `null` means no rows; in an update the array replaces all rows |
+//! | Table | array of row objects in order, each mapped like a document (no nested Table); `null` means no rows; in an update the array replaces the rows |
 //! | Int | integer (a float, or an integer outside the `i64` range, is rejected) |
 //! | Decimal | **string**, for example `"1234.50"` (a JSON number is rejected so no precision is lost to floats); every form `rust_decimal` parses is accepted with its exact value, for example `"1e3"`, `"+12.5"`, `".5"` |
 //! | Check | `true` / `false` |

@@ -108,8 +108,9 @@ pub enum Operation {
 pub struct HookContext<'a> {
     /// The name of the DocType.
     pub doctype: &'a str,
-    /// The actor of the operation, as given to `forgebase-db` (recorded, not authenticated).
-    /// Set for every operation, including [`Operation::Delete`].
+    /// The actor of the operation, as given to `forgebase-db` (not authenticated). Set for every
+    /// operation, including [`Operation::Delete`]; insert and update also store it, delete only
+    /// gives it to the hooks (there is no audit trail yet).
     pub actor: &'a str,
     /// The operation.
     pub operation: Operation,
@@ -165,7 +166,12 @@ pub trait DocTypeHooks: Send + Sync {
     /// `doc.name` is the stored name; changing the naming field is rejected afterwards. A value
     /// a hook removes from `doc.values` is cleared (as on insert, an absent value is null); to
     /// remove all rows of a table set an empty list, because a table key that is removed from
-    /// `doc.tables` keeps the stored rows.
+    /// `doc.tables` keeps the stored rows. (The exception: for a required Table field the
+    /// framework validation then reports `Required`, since the document has no rows for it.)
+    ///
+    /// Changing `doc.name` is ignored on update (the stored name is kept; the naming field is
+    /// checked as said above). On insert the name is decided by the naming rule afterwards, and
+    /// a `doc.name` that does not agree with it is rejected with `Naming`.
     fn validate(&self, ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
         let _ = (ctx, doc);
         Ok(())

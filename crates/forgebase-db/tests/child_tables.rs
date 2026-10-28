@@ -704,7 +704,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
     assert_eq!(v2.values["title"], text("INV"));
     assert_eq!(descriptions(&v2.tables["items"]), ["z", "y"]);
     assert_eq!(count(&db, "doc_invoice_item").await, 2);
-    // Row ids change on every save: the old rows were deleted and new ones inserted.
+    // The rows differ, so the old rows were deleted and new ones inserted (new ids).
     let new_ids = db
         .rows("SELECT id::text FROM doc_invoice_item ORDER BY idx")
         .await;

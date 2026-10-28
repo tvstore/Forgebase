@@ -6,6 +6,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use common::{TestDb, registry};
 use forgebase_core::document::{Changes, Document, Row, ValidationError};
@@ -654,6 +655,187 @@ async fn a_hook_error_leaves_the_callers_transaction_usable() {
     tx.commit().await.unwrap();
     assert_eq!(count(&db, "doc_invoice").await, 2);
     assert_eq!(count(&db, "doc_invoice_item").await, 1);
+}
+
+#[tokio::test]
+async fn update_and_delete_hook_errors_leave_the_callers_transaction_usable() {
+    let (db, _) = setup().await;
+    let (ok_reg, _) = recording(None);
+    let (bad_update, _) = recording(Some(("validate", Operation::Update)));
+    let (bad_delete, _) = recording(Some(("before_delete", Operation::Delete)));
+    let mut client = db.pool.get().await.unwrap();
+    let raw: &mut forgebase_db::Client = &mut client;
+
+    let mut tx = raw.transaction().await.unwrap();
+    let doc = insert(
+        &mut tx,
+        &ok_reg,
+        "invoice",
+        invoice("kept", vec![item(1, "a")]),
+        "ann",
+    )
+    .await
+    .unwrap();
+    let doc_name = doc.name.as_str();
+
+    let error = update(
+        &mut tx,
+        &bad_update,
+        "invoice",
+        doc_name,
+        1,
+        &set("title", text("lost")),
+        "ann",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, DbError::Hook { .. }), "{error}");
+    let error = delete(&mut tx, &bad_delete, "invoice", doc_name, 1, "ann")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Hook { .. }), "{error}");
+
+    // The transaction still holds the insert, unchanged, and accepts more work.
+    let still = get(&mut tx, &ok_reg, "invoice", doc_name)
+        .await
+        .unwrap()
+        .expect("kept");
+    assert_eq!(
+        (still.version, still.values["title"].clone()),
+        (1, text("kept"))
+    );
+    let updated = update(
+        &mut tx,
+        &ok_reg,
+        "invoice",
+        doc_name,
+        1,
+        &set("title", text("changed")),
+        "ann",
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.version, 2);
+    delete(&mut tx, &ok_reg, "invoice", doc_name, 2, "ann")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(count(&db, "doc_invoice").await, 0);
+    assert_eq!(count(&db, "doc_invoice_item").await, 0);
+}
+
+#[tokio::test]
+async fn an_update_in_progress_does_not_block_a_concurrent_link_to_the_document() {
+    const NOTE: &str = r#"
+name = "note"
+label = "Note"
+[[fields]]
+name = "account"
+type = "link"
+target = "account"
+"#;
+    let db = TestDb::migrated().await;
+    let reg = registry(&[ACCOUNT, NOTE]);
+    db.sync(&reg).await.expect("sync");
+    let account = {
+        let mut client = db.pool.get().await.unwrap();
+        let doc = Document {
+            name: None,
+            values: BTreeMap::from([("email".to_owned(), text("a@x.y"))]),
+            tables: BTreeMap::new(),
+        };
+        insert(&mut **client, &reg, "account", doc, "ann")
+            .await
+            .unwrap()
+    };
+    let mut first = db.pool.get().await.unwrap();
+    let mut second = db.pool.get().await.unwrap();
+    second
+        .batch_execute("SET lock_timeout = '300ms'")
+        .await
+        .unwrap();
+
+    // The first transaction updates the account and keeps its row lock (not committed).
+    let raw: &mut forgebase_db::Client = &mut first;
+    let mut tx = raw.transaction().await.unwrap();
+    update(
+        &mut tx,
+        &reg,
+        "account",
+        &account.name,
+        1,
+        &set("points", Value::Int(5)),
+        "ann",
+    )
+    .await
+    .unwrap();
+
+    // A concurrent insert of a document that links to the account is not blocked: the lookup
+    // takes FOR KEY SHARE, which FOR NO KEY UPDATE does not conflict with.
+    let linked = Document {
+        name: None,
+        values: BTreeMap::from([("account".to_owned(), text("a@x.y"))]),
+        tables: BTreeMap::new(),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        insert(&mut **second, &reg, "note", linked, "bob"),
+    )
+    .await
+    .expect("the insert should not wait for the update")
+    .expect("insert");
+    assert_eq!(count(&db, "doc_note").await, 1);
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_update_keeps_the_row_ids_of_a_table_with_identical_rows_and_replaces_changed_ones() {
+    let (db, reg) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    let rows = vec![item(1, "a"), item(2, "b")];
+    let doc = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        invoice("t", rows.clone()),
+        "ann",
+    )
+    .await
+    .unwrap();
+    let ids = item_ids(&db).await;
+    assert_eq!(ids.len(), 2);
+
+    // The changes name the table with the rows it already has: same ids, version still bumped.
+    let same = Changes {
+        values: BTreeMap::from([("title".to_owned(), text("t2"))]),
+        tables: BTreeMap::from([("items".to_owned(), rows)]),
+    };
+    let v2 = update(&mut **client, &reg, "invoice", &doc.name, 1, &same, "ann")
+        .await
+        .unwrap();
+    assert_eq!(v2.version, 2);
+    assert_eq!(item_ids(&db).await, ids);
+
+    // Changed rows replace the old ones: new ids.
+    let changed = Changes {
+        values: BTreeMap::new(),
+        tables: BTreeMap::from([("items".to_owned(), vec![item(1, "a"), item(3, "c")])]),
+    };
+    let v3 = update(
+        &mut **client,
+        &reg,
+        "invoice",
+        &doc.name,
+        2,
+        &changed,
+        "ann",
+    )
+    .await
+    .unwrap();
+    assert_eq!(v3.tables["items"].len(), 2);
+    let new_ids = item_ids(&db).await;
+    assert_eq!(new_ids.len(), 2);
+    assert!(new_ids.iter().all(|id| !ids.contains(id)));
 }
 
 #[tokio::test]

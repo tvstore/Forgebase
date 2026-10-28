@@ -1432,15 +1432,16 @@ mod tests {
         assert!(registry.get("other").is_none());
         assert_eq!(registry.iter().count(), 1);
     }
-    /// Records its name in a shared log when called, to see the registration order.
-    struct Named(&'static str, std::sync::Mutex<Vec<&'static str>>);
+
+    /// A hook set that does nothing; tests tell registered sets apart by allocation.
+    struct Named;
 
     impl DocTypeHooks for Named {}
 
     #[test]
     fn hooks_are_kept_in_registration_order() {
-        let first = Arc::new(Named("first", Default::default()));
-        let second = Arc::new(Named("second", Default::default()));
+        let first = Arc::new(Named);
+        let second = Arc::new(Named);
         let mut registry = Registry::new();
         registry.add(doctype(vec![])).unwrap();
         assert!(registry.hooks("thing").is_empty());
@@ -1457,8 +1458,6 @@ mod tests {
             Arc::as_ptr(&hooks[1]).cast::<()>(),
             Arc::as_ptr(&second).cast::<()>()
         ));
-        assert_eq!((first.0, second.0), ("first", "second"));
-        assert!(first.1.lock().unwrap().is_empty());
         // A clone shares the hooks.
         assert_eq!(registry.clone().hooks("thing").len(), 2);
         assert!(registry.hooks("other").is_empty());
@@ -1472,7 +1471,7 @@ mod tests {
         child.name = "row".into();
         child.is_child = true;
         registry.add(child).unwrap();
-        let hooks: Arc<dyn DocTypeHooks> = Arc::new(Named("x", Default::default()));
+        let hooks: Arc<dyn DocTypeHooks> = Arc::new(Named);
         assert_eq!(
             registry.add_hooks("nope", hooks.clone()),
             Err(DefinitionError::UnknownHooksDocType {
@@ -1492,12 +1491,8 @@ mod tests {
     fn registry_debug_shows_hook_counts() {
         let mut registry = Registry::new();
         registry.add(doctype(vec![])).unwrap();
-        registry
-            .add_hooks("thing", Arc::new(Named("a", Default::default())))
-            .unwrap();
-        registry
-            .add_hooks("thing", Arc::new(Named("b", Default::default())))
-            .unwrap();
+        registry.add_hooks("thing", Arc::new(Named)).unwrap();
+        registry.add_hooks("thing", Arc::new(Named)).unwrap();
         let text = format!("{registry:?}");
         assert!(text.contains("hooks: {\"thing\": 2}"), "{text}");
         assert!(text.contains("doctypes:"), "{text}");

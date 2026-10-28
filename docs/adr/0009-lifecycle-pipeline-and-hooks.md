@@ -22,7 +22,7 @@ Before this ADR, `forgebase-db` validated and wrote a document in a fixed order 
 - **Hooks run before framework validation**, so they may see invalid input and must be defensive; the framework validates again after them, so a hook cannot leave an invalid document behind. `validate` hooks run on insert and update (and on submit, with M2.4); `before_submit` and `before_cancel` are added in M2.4 as new default methods, which does not break existing implementations. `Operation` is `#[non_exhaustive]` for the same reason.
 - **Update sees the whole document.** Hooks and validation work on the stored values with the changes applied, not on the changes alone. A hook cannot change the naming field.
 - **Panics are not caught.** A hook is app code; a panic aborts the operation like any other panic in the caller (the transaction is rolled back when it unwinds).
-- **Delete takes an actor.** `delete` has an `actor` argument like `insert` and `update` (non-empty, no NUL; recorded, not authenticated), so `HookContext::actor` is a plain `&str` for every operation, `Operation::Delete` included. Adding it now, in 0.x, avoids a second breaking change when permissions (M3) need the actor.
+- **Delete takes an actor.** `delete` has an `actor` argument like `insert` and `update` (non-empty, no NUL; given to the hooks, not stored since there is no audit yet, and not authenticated), so `HookContext::actor` is a plain `&str` for every operation, `Operation::Delete` included. Adding it now, in 0.x, avoids a second breaking change when permissions (M3) need the actor.
 
 ## Alternatives considered
 
@@ -36,5 +36,6 @@ Before this ADR, `forgebase-db` validated and wrote a document in a fixed order 
 
 - Hooks cannot read other documents yet. Hooks that read the database, and effects after commit, need a new ADR that supersedes or extends this one; the outbox arrives in M5.
 - **Behaviour change of `update`** (0.x): it reads the document first (a `FOR NO KEY UPDATE` lock), validates the whole merged document, writes every column field, and replaces only tables whose rows differ. A stale update with invalid changes now reports `Conflict`, not the validation errors. An update always bumps `version`, even when nothing differs (an explicit save). `delete` also reads the document first, for `before_delete`.
+- **Lock choice.** `update` locks with `FOR NO KEY UPDATE`: it is the lock the UPDATE itself takes, it serializes with other updates and deletes, and it leaves Link lookups (`FOR KEY SHARE`) and foreign key checks unblocked (PostgreSQL upgrades it to `FOR UPDATE` when a unique (key) column changes). `delete` locks with `FOR UPDATE`, so concurrent linkers wait and `before_delete` hooks do not run for a delete that would then be refused.
 - A hook runs while the document row is locked, so it must be quick; a hook error or panic undoes the whole operation.
 - One registration point (`Registry`) and one trait keep the extension surface small; adding a hook point later is an additive change.

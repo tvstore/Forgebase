@@ -72,8 +72,8 @@ pub struct StoredDocument {
     pub values: BTreeMap<String, Value>,
     /// One entry per Table field of the DocType (an empty list when there are no rows): the rows
     /// in order, each with one entry per field of the child DocType. Row ids and positions are
-    /// not exposed: the position is the place in the list, and the ids change on every save
-    /// (see [`update`]).
+    /// not exposed: the position is the place in the list, and the ids change when a table's rows
+    /// are replaced (see [`update`]).
     pub tables: BTreeMap<String, Vec<Row>>,
 }
 
@@ -250,8 +250,9 @@ async fn get_in(
 /// Changes the given fields of an existing document and returns it as stored.
 ///
 /// Only the fields in `changes.values` change (a [`Value::Null`] clears one); a Table field in
-/// `changes.tables` **replaces all its rows** (an empty list removes every row), so a Table field
-/// that is not mentioned keeps its rows. Changing the naming field is rejected
+/// `changes.tables` replaces its rows when they differ from the stored ones (an empty list removes
+/// every row; identical rows are left alone and keep their ids), and a Table field that is not
+/// mentioned keeps its rows. Changing the naming field is rejected
 /// ([`DbError::Naming`]): renames are not supported yet. Empty `changes` are
 /// [`DbError::NoChanges`]; changes to tables only are fine. `modified_at` is set to the
 /// database's `now()`, `modified_by` to `actor`, and `version` is incremented; `created_at` and
@@ -274,7 +275,7 @@ async fn get_in(
 ///    leave an invalid document;
 /// 6. Links are resolved, then **every column field** of the merged document is written, and
 ///    the rows of every Table field whose rows differ from the stored ones (given in `changes` or
-///    modified by a hook) are replaced, so row ids change on every save of a table. `version`
+///    modified by a hook) are replaced, so row ids change only for a table whose rows changed. `version`
 ///    is incremented in the same statement as the document row, which comes first.
 ///
 /// An update is an explicit save: it increments `version` and sets `modified_at` even when the
@@ -329,6 +330,9 @@ async fn update_in(
     if changes.is_empty() {
         return Err(DbError::NoChanges);
     }
+    // `FOR NO KEY UPDATE` is the lock the UPDATE itself takes: it serializes with other updates
+    // and deletes but leaves Link lookups (`FOR KEY SHARE`) and foreign key checks unblocked.
+    // PostgreSQL upgrades it to `FOR UPDATE` when a unique (key) column changes.
     let current = lock_current(
         client,
         registry,
@@ -436,7 +440,8 @@ async fn update_in(
 }
 
 /// Deletes the document with this name, and its table rows, if its current `version` equals
-/// `expected_version`. The `actor` is passed to the hooks (recorded, not authenticated); an empty
+/// `expected_version`. The `actor` is passed to the hooks (not stored, as there is no audit yet,
+/// and not authenticated); an empty
 /// one is [`DbError::InvalidActor`], as for [`insert`] and [`update`].
 ///
 /// A different version is [`DbError::Conflict`] (nothing is deleted; under REPEATABLE READ or
@@ -475,6 +480,8 @@ async fn delete_in(
     actor: &str,
 ) -> Result<(), DbError> {
     check_actor(actor)?;
+    // `FOR UPDATE` makes concurrent linkers (`FOR KEY SHARE`) wait, so `before_delete` hooks do
+    // not run for a delete that a new link would then refuse.
     let current = lock_current(
         client,
         registry,
