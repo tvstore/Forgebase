@@ -38,3 +38,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0006](0006-extension-model.md) | Extension model: compile-time apps | Accepted |
 | [0007](0007-license-mit.md) | License: MIT | Accepted by owner |
 | [0008](0008-model-selection-policy.md) | Model selection policy for the agent workflow | Accepted by owner |
+| [0009](0009-lifecycle-pipeline-and-hooks.md) | Lifecycle pipeline and hooks | Accepted |

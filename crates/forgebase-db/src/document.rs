@@ -12,12 +12,16 @@
 //! Link fields hold the target's `id` in the database; this module resolves the target `name` to
 //! the `id` on the way in and back to the `name` on the way out (see [`insert`]). Table fields
 //! are rows of a child DocType's table, see [`insert`] and [`update`].
+//!
+//! The app's lifecycle hooks ([`forgebase_core::hooks::DocTypeHooks`], registered in the
+//! [`Registry`]) run inside the same transaction at fixed points: the order of every operation
+//! is listed in the documentation of [`insert`], [`update`] and [`delete`]. A hook error rolls
+//! everything back ([`DbError::Hook`]). Hooks cannot reach the database.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use forgebase_core::document::{
-    Changes, Document, Row, ValidationError, validate, validate_update,
-};
+use forgebase_core::document::{Changes, Document, Row, ValidationError, validate};
+use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError, Operation};
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
 use forgebase_core::value::Value;
@@ -90,6 +94,13 @@ pub struct StoredDocument {
 /// **Atomicity.** Everything runs in `client.transaction()` (see the module documentation): the
 /// document and all its rows are written, or nothing is. That holds on a pooled connection too.
 ///
+/// **Pipeline.** In this order: the DocType must not be a child DocType; the registered
+/// `before_insert` hooks run on `doc` (in registration order, and they may modify it); the
+/// `validate` hooks run; the framework validates the result ([`forgebase_core::document::validate`]);
+/// Links are resolved; the name is chosen; the document and its rows are written. The hooks see
+/// the document **before** framework validation, so it may be invalid, but the validation runs
+/// again after them. A hook error is [`DbError::Hook`] and nothing is written.
+///
 /// **Links.** A non-null Link value, in the document or in a row, is the `name` of a document of
 /// the target DocType. Each one is looked up with `SELECT "id" ... FOR KEY SHARE` on the same
 /// transaction, which locks the target against a concurrent delete until the transaction ends
@@ -118,10 +129,21 @@ async fn insert_in(
     client: &impl GenericClient,
     registry: &Registry,
     doctype: &DocType,
-    doc: Document,
+    mut doc: Document,
     actor: &str,
 ) -> Result<StoredDocument, DbError> {
     check_actor(actor)?;
+    let ctx = HookContext {
+        doctype: &doctype.name,
+        actor: Some(actor),
+        operation: Operation::Insert,
+    };
+    run_hooks(registry, doctype, "before_insert", |hooks| {
+        hooks.before_insert(&ctx, &mut doc)
+    })?;
+    run_hooks(registry, doctype, "validate", |hooks| {
+        hooks.validate(&ctx, &mut doc)
+    })?;
     let mut errors = validate(registry, doctype, &doc).err().unwrap_or_default();
     let (links, writes) = resolve(
         client,
@@ -227,29 +249,48 @@ async fn get_in(
 
 /// Changes the given fields of an existing document and returns it as stored.
 ///
-/// Only the fields in `changes.values` are written (a [`Value::Null`] clears one); a Table field
-/// in `changes.tables` **replaces all its rows**: the old rows are deleted and the given ones
-/// inserted in order (an empty list removes every row), so row ids change on every save and a
-/// Table field that is not mentioned keeps its rows. `changes` is checked with
-/// [`forgebase_core::document::validate_update`]. Changing the naming field is rejected
+/// Only the fields in `changes.values` change (a [`Value::Null`] clears one); a Table field in
+/// `changes.tables` **replaces all its rows** (an empty list removes every row), so a Table field
+/// that is not mentioned keeps its rows. Changing the naming field is rejected
 /// ([`DbError::Naming`]): renames are not supported yet. Empty `changes` are
 /// [`DbError::NoChanges`]; changes to tables only are fine. `modified_at` is set to the
-/// database's `now()`, `modified_by` to `actor`, and `version` is incremented (also when only
-/// rows changed); `created_at` and `owner` stay.
+/// database's `now()`, `modified_by` to `actor`, and `version` is incremented; `created_at` and
+/// `owner` stay.
 ///
-/// The DocType rules, the transaction and the Link handling are those of [`insert`]; the
-/// document row is updated before its rows, so its row lock keeps other writers away from them.
+/// **Pipeline.** The hooks and the validation see the **whole** document, not only the changes.
+/// In this order:
+///
+/// 1. the stored document and its rows are read with a row lock (`FOR NO KEY UPDATE`): an
+///    unknown name is [`DbError::NotFound`] and a `version` other than `expected_version` is
+///    [`DbError::Conflict`], both before any hook runs;
+/// 2. the changes are merged into it: the stored values overlaid with `changes.values`, and the
+///    rows of a Table field from `changes.tables` when given, else the stored rows;
+/// 3. a change to the naming field is rejected;
+/// 4. the registered `validate` hooks run on the merged document (in registration order, and
+///    they may modify it; the naming field must stay as it is);
+/// 5. the framework validates the whole merged document
+///    ([`forgebase_core::document::validate`]), so a stored value that is not valid any more (a
+///    required field that is null in the row, for example) is reported too, and a hook cannot
+///    leave an invalid document;
+/// 6. Links are resolved, then **every column field** of the merged document is written, and
+///    the rows of every Table field whose rows differ from the stored ones (given in `changes` or
+///    modified by a hook) are replaced, so row ids change on every save of a table. `version`
+///    is incremented in the same statement as the document row, which comes first.
+///
+/// An update is an explicit save: it increments `version` and sets `modified_at` even when the
+/// merged document equals the stored one (for example when the changes repeat the stored values
+/// and the hooks change nothing). Every change to child rows bumps the version.
+///
+/// A hook error is [`DbError::Hook`] and nothing is written. The DocType rules, the transaction
+/// and the Link handling are those of [`insert`].
 ///
 /// **Optimistic concurrency.** The update is applied only if the document's current `version`
-/// equals `expected_version` (the version the caller read). Otherwise nothing is written and the
-/// result is [`DbError::Conflict`] with the current version; an unknown name is
-/// [`DbError::NotFound`]. Of two concurrent updates with the same `expected_version`, exactly
-/// one succeeds.
-///
-/// Conflict detection assumes READ COMMITTED, the PostgreSQL default: the second writer waits
-/// for the row lock and then re-checks the version. In a caller-owned transaction at REPEATABLE
-/// READ or SERIALIZABLE the losing writer instead gets a serialization failure (SQLSTATE
-/// 40001, [`DbError::Postgres`], not `Conflict`); retry the whole transaction.
+/// equals `expected_version` (the version the caller read). Of two concurrent updates with the
+/// same `expected_version`, exactly one succeeds. Conflict detection assumes READ COMMITTED, the
+/// PostgreSQL default: the second writer waits for the row lock and then re-checks the
+/// version. In a caller-owned transaction at REPEATABLE READ or SERIALIZABLE the losing writer
+/// instead gets a serialization failure (SQLSTATE 40001, [`DbError::Postgres`], not
+/// `Conflict`); retry the whole transaction.
 pub async fn update(
     client: &mut impl GenericClient,
     registry: &Registry,
@@ -288,21 +329,19 @@ async fn update_in(
     if changes.is_empty() {
         return Err(DbError::NoChanges);
     }
-    let mut errors = validate_update(registry, doctype, changes)
-        .err()
-        .unwrap_or_default();
-    let (links, writes) = resolve(
+    let current = lock_current(
         client,
         registry,
         doctype,
-        &changes.values,
-        &changes.tables,
-        &mut errors,
+        name,
+        expected_version,
+        "FOR NO KEY UPDATE",
     )
     .await?;
-    if !errors.is_empty() {
-        return Err(DbError::Validation(errors));
-    }
+    let mut doc = as_document(&current);
+    doc.values.extend(changes.values.clone());
+    doc.tables.extend(changes.tables.clone());
+
     if let Naming::Field(field) = &doctype.naming
         && changes.values.contains_key(field)
     {
@@ -310,13 +349,59 @@ async fn update_in(
             "field `{field}` gives the document its name and cannot be changed (renames are not supported yet)"
         )));
     }
+    let ctx = HookContext {
+        doctype: &doctype.name,
+        actor: Some(actor),
+        operation: Operation::Update,
+    };
+    run_hooks(registry, doctype, "validate", |hooks| {
+        hooks.validate(&ctx, &mut doc)
+    })?;
+    if let Naming::Field(field) = &doctype.naming
+        && doc.values.get(field) != Some(&Value::Text(current.name.clone()))
+    {
+        return Err(DbError::Naming(format!(
+            "field `{field}` gives the document its name and cannot be changed, also not by a hook (renames are not supported yet)"
+        )));
+    }
+    let mut errors = validate(registry, doctype, &doc).err().unwrap_or_default();
 
-    let sql = update_sql(doctype, &changes.values);
-    let bound: Vec<SqlParam<'_>> = changes
-        .values
+    // Every column field is written (a value a hook removed is cleared); of the tables only
+    // those whose rows differ from the stored ones.
+    let null = Value::Null;
+    let columns: BTreeMap<String, Value> = doctype
+        .column_fields()
+        .map(|field| {
+            (
+                field.name.clone(),
+                doc.values.get(&field.name).unwrap_or(&null).clone(),
+            )
+        })
+        .collect();
+    let changed_tables: BTreeMap<String, Vec<Row>> = doc
+        .tables
+        .iter()
+        .filter(|(field, rows)| current.tables.get(*field) != Some(*rows))
+        .map(|(field, rows)| (field.clone(), rows.clone()))
+        .collect();
+    let (links, writes) = resolve(
+        client,
+        registry,
+        doctype,
+        &columns,
+        &changed_tables,
+        &mut errors,
+    )
+    .await?;
+    if !errors.is_empty() {
+        return Err(DbError::Validation(errors));
+    }
+
+    let sql = update_sql(doctype, &columns);
+    let bound: Vec<SqlParam<'_>> = columns
         .iter()
         .map(|(field, value)| {
-            // Validation passed, so every key is a field; the fallback is never used.
+            // `columns` holds column fields only, so every key is a field; the fallback is never used.
             let field_type = doctype.field(field).map(|f| &f.field_type);
             field_type.map_or(SqlParam::Value(SqlValue(value)), |t| {
                 sql_param(t, &links, field, value)
@@ -333,6 +418,7 @@ async fn update_in(
         .query_opt(&sql, &params)
         .await
         .map_err(|e| DbError::from_write(e, doctype))?;
+    // The row is locked and its version was checked, so it matches; this is only a safeguard.
     let Some(row) = row else {
         return Err(stale_or_missing(client, doctype, name, expected_version).await?);
     };
@@ -359,6 +445,11 @@ async fn update_in(
 /// to cannot be deleted: [`DbError::LinkedDocumentExists`] names the linking DocType (the
 /// links are `ON DELETE RESTRICT`; for a link in a table row, the DocType that owns the row). A
 /// failed delete leaves a caller-owned transaction usable (the call ran in a savepoint).
+///
+/// **Pipeline.** In this order: the stored document and its rows are read with a row lock
+/// (`FOR UPDATE`; an unknown name or another version is reported here, before any hook runs);
+/// the registered `before_delete` hooks run with the stored document, rows included (a hook error
+/// is [`DbError::Hook`] and nothing is deleted); the document is deleted.
 pub async fn delete(
     client: &mut impl GenericClient,
     registry: &Registry,
@@ -380,6 +471,24 @@ async fn delete_in(
     name: &str,
     expected_version: i64,
 ) -> Result<(), DbError> {
+    let current = lock_current(
+        client,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        "FOR UPDATE",
+    )
+    .await?;
+    let doc = as_document(&current);
+    let ctx = HookContext {
+        doctype: &doctype.name,
+        actor: None,
+        operation: Operation::Delete,
+    };
+    run_hooks(registry, doctype, "before_delete", |hooks| {
+        hooks.before_delete(&ctx, &doc)
+    })?;
     let sql = format!(
         "DELETE FROM {} WHERE \"name\" = $1::text AND \"version\" = $2::bigint",
         quote_ident(&table_name(&doctype.name))
@@ -403,6 +512,66 @@ async fn delete_in(
         return Err(stale_or_missing(client, doctype, name, expected_version).await?);
     }
     Ok(())
+}
+
+/// Calls `call` for every hook set registered for the DocType, in registration order, and stops
+/// at the first error, which becomes [`DbError::Hook`] naming `hook`.
+fn run_hooks(
+    registry: &Registry,
+    doctype: &DocType,
+    hook: &'static str,
+    mut call: impl FnMut(&dyn DocTypeHooks) -> Result<(), HookError>,
+) -> Result<(), DbError> {
+    for hooks in registry.hooks(&doctype.name) {
+        call(hooks.as_ref()).map_err(|error| DbError::Hook {
+            doctype: doctype.name.clone(),
+            hook,
+            message: error.message().to_owned(),
+        })?;
+    }
+    Ok(())
+}
+
+/// The stored document as the [`Document`] hooks and validation work on.
+fn as_document(stored: &StoredDocument) -> Document {
+    Document {
+        name: Some(stored.name.clone()),
+        values: stored.values.clone(),
+        tables: stored.tables.clone(),
+    }
+}
+
+/// Reads the document with this name and its rows, locking the document row with `lock` (a
+/// fixed `FOR ...` clause) until the transaction ends. An unknown name is
+/// [`DbError::NotFound`], a version other than `expected_version` is [`DbError::Conflict`];
+/// nothing else has been done at that point. Writers of the rows take this lock first, so the
+/// rows read here cannot change under the caller.
+async fn lock_current(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    name: &str,
+    expected_version: i64,
+    lock: &'static str,
+) -> Result<StoredDocument, DbError> {
+    let sql = format!("{} {lock}", get_sql(doctype));
+    let Some(row) = client.query_opt(&sql, &[&name]).await? else {
+        return Err(DbError::NotFound {
+            doctype: doctype.name.clone(),
+            name: name.to_owned(),
+        });
+    };
+    let mut stored = decode_row(doctype, &row)?;
+    if stored.version != expected_version {
+        return Err(DbError::Conflict {
+            doctype: doctype.name.clone(),
+            name: name.to_owned(),
+            expected: expected_version,
+            current: stored.version,
+        });
+    }
+    stored.tables = load_tables(client, registry, doctype, stored.id).await?;
+    Ok(stored)
 }
 
 /// For a link from a child table row, the DocType that owns the row; any other name unchanged.

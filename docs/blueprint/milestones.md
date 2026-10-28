@@ -28,7 +28,7 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 
 ## M2 Relationships and lifecycle
 
-- **Status:** In progress (Stage 1 plan approved by the owner 2026-10-28; owner decisions in [architecture, section 3](architecture.md#m2-owner-decisions-2026-10-28-accepted)). Delivered as four PRs: M2.1 Link fields and optimistic concurrency (implemented; in review), M2.2 child tables (implemented; in review), M2.3 lifecycle pipeline and hooks (with ADR 0009), M2.4 docstatus and naming series. Done when M2.4 is merged.
+- **Status:** In progress (Stage 1 plan approved by the owner 2026-10-28; owner decisions in [architecture, section 3](architecture.md#m2-owner-decisions-2026-10-28-accepted)). Delivered as four PRs: M2.1 Link fields and optimistic concurrency (implemented; in review), M2.2 child tables (implemented; in review), M2.3 lifecycle pipeline and hooks (with [ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md); implemented; in review), M2.4 docstatus and naming series. Done when M2.4 is merged.
 - **Scope:** Link foreign keys; child tables; the fixed lifecycle pipeline with hooks; docstatus and amend; optimistic concurrency; naming series. Specifies the exact pipeline order.
 - **Exit criteria:** lifecycle-order tests and rollback tests.
 - **Non-goals:** Dynamic Link, single DocTypes (still Undecided), workflow, permissions (M3).

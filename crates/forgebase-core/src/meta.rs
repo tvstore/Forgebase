@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
+use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
 
 /// Default `max_length` of a Data field.
@@ -334,6 +336,21 @@ pub enum DefinitionError {
         /// The repeated name.
         name: String,
     },
+    /// Hooks were registered for a DocType that is not in the registry
+    /// ([`Registry::add_hooks`]).
+    #[error("cannot register hooks: unknown doctype `{name}`")]
+    UnknownHooksDocType {
+        /// The DocType name that was given.
+        name: String,
+    },
+    /// Hooks were registered for a child DocType ([`Registry::add_hooks`]).
+    #[error(
+        "cannot register hooks for child doctype `{doctype}`: register them on its parent, whose hooks see the rows"
+    )]
+    HooksOnChildDocType {
+        /// The child DocType.
+        doctype: String,
+    },
     /// A Link field refers to a DocType that is not in the registry
     /// ([`Registry::check_references`]).
     #[error("doctype `{doctype}`: field `{field}` links to unknown doctype `{target}`")]
@@ -634,10 +651,30 @@ impl DocField {
     }
 }
 
-/// A set of DocTypes keyed by name.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A set of DocTypes keyed by name, and the lifecycle hooks the app registered for them.
+///
+/// Cloning is cheap for the hooks (they are shared). A registry is not comparable: hook sets
+/// are trait objects.
+#[derive(Clone, Default)]
 pub struct Registry {
     doctypes: BTreeMap<String, DocType>,
+    hooks: BTreeMap<String, Vec<Arc<dyn DocTypeHooks>>>,
+}
+
+impl fmt::Debug for Registry {
+    /// Prints the DocTypes and the number of hook sets per DocType (the hooks themselves have
+    /// no `Debug`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hook_counts: BTreeMap<&str, usize> = self
+            .hooks
+            .iter()
+            .map(|(name, hooks)| (name.as_str(), hooks.len()))
+            .collect();
+        f.debug_struct("Registry")
+            .field("doctypes", &self.doctypes)
+            .field("hooks", &hook_counts)
+            .finish()
+    }
 }
 
 impl Registry {
@@ -662,6 +699,42 @@ impl Registry {
         }
         self.doctypes.insert(doctype.name.clone(), doctype);
         Ok(())
+    }
+
+    /// Registers a hook set for a DocType. The DocType must already be in the registry
+    /// ([`DefinitionError::UnknownHooksDocType`]) and must not be a child DocType
+    /// ([`DefinitionError::HooksOnChildDocType`]: a child table has no lifecycle of its own, the
+    /// hooks of its parent see its rows).
+    ///
+    /// Several hook sets may be registered for one DocType; they run in registration order
+    /// (see [`DocTypeHooks`] for the pipeline). Registration is explicit and happens at startup
+    /// (ADR 0006, ADR 0009).
+    pub fn add_hooks(
+        &mut self,
+        doctype: &str,
+        hooks: Arc<dyn DocTypeHooks>,
+    ) -> Result<(), DefinitionError> {
+        match self.doctypes.get(doctype) {
+            None => Err(DefinitionError::UnknownHooksDocType {
+                name: doctype.to_owned(),
+            }),
+            Some(found) if found.is_child => Err(DefinitionError::HooksOnChildDocType {
+                doctype: doctype.to_owned(),
+            }),
+            Some(_) => {
+                self.hooks
+                    .entry(doctype.to_owned())
+                    .or_default()
+                    .push(hooks);
+                Ok(())
+            }
+        }
+    }
+
+    /// The hook sets registered for a DocType, in registration order (empty when there are
+    /// none or the DocType is unknown).
+    pub fn hooks(&self, doctype: &str) -> &[Arc<dyn DocTypeHooks>] {
+        self.hooks.get(doctype).map_or(&[], Vec::as_slice)
     }
 
     /// Checks that the DocTypes of this registry fit together. Returns every problem found:
@@ -1358,5 +1431,75 @@ mod tests {
         assert!(registry.get("thing").is_some());
         assert!(registry.get("other").is_none());
         assert_eq!(registry.iter().count(), 1);
+    }
+    /// Records its name in a shared log when called, to see the registration order.
+    struct Named(&'static str, std::sync::Mutex<Vec<&'static str>>);
+
+    impl DocTypeHooks for Named {}
+
+    #[test]
+    fn hooks_are_kept_in_registration_order() {
+        let first = Arc::new(Named("first", Default::default()));
+        let second = Arc::new(Named("second", Default::default()));
+        let mut registry = Registry::new();
+        registry.add(doctype(vec![])).unwrap();
+        assert!(registry.hooks("thing").is_empty());
+        registry.add_hooks("thing", first.clone()).unwrap();
+        registry.add_hooks("thing", second.clone()).unwrap();
+        let hooks = registry.hooks("thing");
+        assert_eq!(hooks.len(), 2);
+        // Same allocations, same order (compare data pointers).
+        assert!(std::ptr::eq(
+            Arc::as_ptr(&hooks[0]).cast::<()>(),
+            Arc::as_ptr(&first).cast::<()>()
+        ));
+        assert!(std::ptr::eq(
+            Arc::as_ptr(&hooks[1]).cast::<()>(),
+            Arc::as_ptr(&second).cast::<()>()
+        ));
+        assert_eq!((first.0, second.0), ("first", "second"));
+        assert!(first.1.lock().unwrap().is_empty());
+        // A clone shares the hooks.
+        assert_eq!(registry.clone().hooks("thing").len(), 2);
+        assert!(registry.hooks("other").is_empty());
+    }
+
+    #[test]
+    fn hooks_need_a_known_parent_doctype() {
+        let mut registry = Registry::new();
+        registry.add(doctype(vec![])).unwrap();
+        let mut child = doctype(vec![]);
+        child.name = "row".into();
+        child.is_child = true;
+        registry.add(child).unwrap();
+        let hooks: Arc<dyn DocTypeHooks> = Arc::new(Named("x", Default::default()));
+        assert_eq!(
+            registry.add_hooks("nope", hooks.clone()),
+            Err(DefinitionError::UnknownHooksDocType {
+                name: "nope".into()
+            })
+        );
+        assert_eq!(
+            registry.add_hooks("row", hooks),
+            Err(DefinitionError::HooksOnChildDocType {
+                doctype: "row".into()
+            })
+        );
+        assert!(registry.hooks("nope").is_empty() && registry.hooks("row").is_empty());
+    }
+
+    #[test]
+    fn registry_debug_shows_hook_counts() {
+        let mut registry = Registry::new();
+        registry.add(doctype(vec![])).unwrap();
+        registry
+            .add_hooks("thing", Arc::new(Named("a", Default::default())))
+            .unwrap();
+        registry
+            .add_hooks("thing", Arc::new(Named("b", Default::default())))
+            .unwrap();
+        let text = format!("{registry:?}");
+        assert!(text.contains("hooks: {\"thing\": 2}"), "{text}");
+        assert!(text.contains("doctypes:"), "{text}");
     }
 }
