@@ -130,7 +130,7 @@ Trade-off: the whole stack is tied to the tokio ecosystem and its release cadenc
 | argh | 12 | BSD-3-Clause; 0.1.x for years (Unverified). |
 | lexopt | 2 | Minimal; every subcommand and help text is hand-written. |
 
-**Recommendation (Proposed): clap (derive).** Hand-written parsing would cost more than 17 maintained transitive crates for a many-subcommand CLI. Alternative: lexopt if the CLI stays under about 5 commands.
+**Recommendation (Accepted, owner decision 2026-10-28): clap (derive).** Hand-written parsing would cost more than 17 maintained transitive crates for a many-subcommand CLI. Alternative: lexopt if the CLI stays under about 5 commands.
 
 ### 4. Database access
 
@@ -186,6 +186,20 @@ Limitations: one timing run; runtime performance, statement caching and pool con
 
 - **Decimal:** `rust_decimal` (1.43.0, MIT), mapped to PostgreSQL `numeric`. In `forgebase-core` it is used without database features. Precision is limited to 28 digits, which bounds the Decimal field `precision`.
 - **Date/time:** `time` (0.3.55, MIT OR Apache-2.0, MSRV 1.88) with only the features needed. `Date` maps to `date`, `OffsetDateTime` to `timestamptz`. chrono and jiff were not chosen.
+
+#### Admission notes for M1.3 (2026-10-28)
+
+Added in the M1.3 PR; licenses were checked with `cargo deny` (all MIT or Apache-2.0).
+
+| Dependency | Where | Need | Alternatives considered | Maintenance, weight |
+|---|---|---|---|---|
+| `uuid` 1.29 (`std`, `v7`), plus tokio-postgres `with-uuid-1` | `forgebase-db` | UUID v7 `id` generated in the application (owner decision 2026-10-28) and the `uuid` column type. MSRV 1.89 (below the project MSRV 1.97). | Hand-written UUID v7: more code to own, no gain. | Widely used, rust-random organisation. Adds `uuid` to `Cargo.lock`; its random source (`getrandom`) was already in the tree. |
+| `bytes` 1 | `forgebase-db` | The signature of `ToSql::to_sql` (the `SqlValue` newtype) names `BytesMut`. Already in the tree through tokio-postgres. | None (the trait requires it). | Already a transitive dependency; no new package. |
+| `serde_json` 1.0.154 (`std`) | `forgebase-cli` | Parsing `--data` and printing documents as JSON. The evaluation above already recommended serde + serde_json. | Hand-written JSON: not reasonable. | Very widely used, maintained by the serde authors. Already in `Cargo.lock`; now also a direct dependency of the CLI. |
+| `clap` 4.6.7 (`std`, `derive`, `help`, `usage`, `error-context`) | `forgebase-cli` | Subcommands, help and usage errors (exit code 2). Accepted by the owner in the M1 plan (clap derive). | `lexopt` (hand-written help and subcommands), `argh`; see section 3. | Stable 4.x. Default features such as colour and suggestions are off. Adds `clap`, `clap_builder`, `clap_derive`, `clap_lex`, `anstyle` and `heck` to `Cargo.lock`. |
+| `tokio` (CLI) | `forgebase-cli` | `#[tokio::main]` for the async database calls; features `rt-multi-thread`, `macros` only. | A current-thread runtime would need fewer features but the owner plan names these. | Already used by `forgebase-db` tests and tokio-postgres. |
+
+Feature changes without new packages: `tokio-postgres` `with-time-0_3` (`time` values as `date` and `timestamptz`), `rust_decimal` `db-tokio-postgres` (in `forgebase-db` only; `forgebase-core` still has no database features), and `time` `parsing` and `formatting` in the CLI manifest only (RFC 3339 and `YYYY-MM-DD`). Packages new to `Cargo.lock` in this PR: `anstyle`, `clap`, `clap_builder`, `clap_derive`, `clap_lex`, `heck`, `uuid` and `time-macros` (a lock entry only, not built). `cargo tree -p forgebase-cli -e normal` lists 98 packages (94 external, 4 workspace crates).
 
 ### 5. Migrations
 
@@ -255,7 +269,7 @@ Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 
 |---|---|---|
 | HTTP | axum (+ tower-http as needed) (Accepted) | actix-web |
 | Runtime | tokio (explicit features) (Accepted) | none realistic (ecosystem tie-in accepted) |
-| CLI | clap (derive) | lexopt |
+| CLI | clap (derive) (Accepted 2026-10-28) | lexopt |
 | DB | tokio-postgres + deadpool-postgres + in-house SQL/DDL builder (Accepted; confirmed by the M1 spike, see the spike result subsection) | sqlx (macros off); sea-query as builder |
 | Framework migrations | custom embedded runner (Accepted with the DB direction) | sqlx migrate (if sqlx) |
 | Serialization / validation | serde + serde_json; runtime metadata validator | garde for fixed structs |

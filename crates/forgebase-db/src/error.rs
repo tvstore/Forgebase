@@ -5,6 +5,8 @@ use std::fmt::Write as _;
 
 use tokio_postgres::error::SqlState;
 
+use forgebase_core::document::ValidationError;
+
 use crate::plan::Conflict;
 
 /// Everything that can go wrong in `forgebase-db`.
@@ -55,6 +57,45 @@ pub enum DbError {
     /// The metadata cannot be applied without a destructive or risky change; nothing was applied.
     #[error("schema sync refused, {} conflict(s): {}", .0.len(), join(.0))]
     SyncConflicts(Vec<Conflict>),
+    /// The document or the changes break the DocType's rules; every problem is listed.
+    #[error("validation failed: {}", join(.0))]
+    Validation(Vec<ValidationError>),
+    /// No document of this DocType has this name.
+    #[error("{doctype} `{name}` not found")]
+    NotFound {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+    },
+    /// A unique constraint (a `unique` field or the document name) was violated (SQLSTATE 23505).
+    /// The message is the server's, including the constraint name and the conflicting key.
+    #[error("{message}")]
+    UniqueViolation {
+        /// The server's message and detail.
+        message: String,
+    },
+    /// The actor (user name recorded in `owner` and `modified_by`) is empty or contains NUL.
+    #[error("actor must be a non-empty string without NUL characters")]
+    InvalidActor,
+    /// The document name conflicts with the DocType's naming rule, or an update would change it.
+    #[error("{0}")]
+    Naming(String),
+    /// A stored value could not be read. Only another writer (for example `psql`) can produce
+    /// such a value: dates and datetimes outside the years supported by the `time` crate (beyond
+    /// ±9999), `infinity` and numeric `NaN` cannot be decoded.
+    #[error("cannot read field `{field}` (column \"{field}\") of DocType `{doctype}`: {message}")]
+    Decode {
+        /// DocType name.
+        doctype: String,
+        /// Field name (also the column name).
+        field: String,
+        /// The decoder's message.
+        message: String,
+    },
+    /// An update was called without any change.
+    #[error("update needs at least one changed field")]
+    NoChanges,
 }
 
 impl From<tokio_postgres::Error> for DbError {
@@ -79,8 +120,33 @@ impl From<deadpool_postgres::PoolError> for DbError {
     }
 }
 
-fn join(conflicts: &[Conflict]) -> String {
-    let parts: Vec<String> = conflicts.iter().map(ToString::to_string).collect();
+impl DbError {
+    /// Converts an error of an `INSERT` or `UPDATE` on a DocType table: a unique violation
+    /// (SQLSTATE 23505) becomes [`DbError::UniqueViolation`].
+    pub(crate) fn from_write(error: tokio_postgres::Error) -> Self {
+        if error.code() == Some(&SqlState::UNIQUE_VIOLATION) {
+            DbError::UniqueViolation {
+                message: describe(&error),
+            }
+        } else {
+            error.into()
+        }
+    }
+}
+
+impl DbError {
+    /// A field value that cannot be decoded.
+    pub(crate) fn decode(doctype: &str, field: &str, error: &tokio_postgres::Error) -> Self {
+        DbError::Decode {
+            doctype: doctype.to_owned(),
+            field: field.to_owned(),
+            message: describe(error),
+        }
+    }
+}
+
+fn join<T: ToString>(items: &[T]) -> String {
+    let parts: Vec<String> = items.iter().map(ToString::to_string).collect();
     parts.join("; ")
 }
 

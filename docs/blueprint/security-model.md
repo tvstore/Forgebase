@@ -1,6 +1,6 @@
 # Security model
 
-Status: **Proposed** unless stated; nothing is implemented. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
+Status: **Proposed** unless stated; of the sections below only identifier and value handling in `forgebase-db` (M1.2, M1.3) and the trust note for the command-line tool are implemented. Authentication, authorization and multi-site isolation are not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
 
 ## Principles
 
@@ -37,6 +37,7 @@ JWT for first-party browser sessions is avoided (revocation complexity).
 - SQL identifiers come only from validated metadata, are matched against a strict pattern and are always quoted.
 - Values are always bound parameters. Generated DDL (schema sync) contains no values at all: only validated, quoted identifiers and numeric type parameters (`varchar(n)`, `numeric(p,s)`) taken from validated metadata; settings such as `lock_timeout` are passed as bound parameters.
 - Identifiers are validated twice: by `forgebase-core` when metadata is loaded, and quoted by `forgebase_db::quote_ident` (doubling any `"`) at every use in generated SQL (implemented in M1.2).
+- Document values and the actor are bound parameters, with an explicit cast per field type; a document write never interpolates a value into SQL. Document names are bound too (implemented in M1.3, tests store injection-like strings literally).
 - Database connections do not use TLS yet (M1.2); connect over a local or private network until rustls support is added.
 - List filters are parsed into a typed AST, never string-concatenated.
 - Reports (later) run with a read-only DB role.
@@ -48,6 +49,10 @@ Options, lean (database-per-site) and the day-one site/pool context constraint a
 ## Secrets
 
 Config file and environment variables only; never in DB metadata or logs. Session tokens and API secrets are stored hashed.
+
+## The command-line tool (M1.3)
+
+`forgebase` is a **trusted local tool**: whoever can run it with a database URL has full access to that database. It has no authentication and no permission checks (those arrive with M3 in the HTTP layer), and `--actor` is only recorded in `owner` / `modified_by`; it is not verified and must not be treated as an identity. The database URL (with its password) is read from the `FORGEBASE_DATABASE_URL` environment variable, never from a command-line argument, and is not printed. Input is checked before any SQL runs (JSON mapping, then core validation), and a datetime whose UTC instant is outside the supported range is an error, not a panic.
 
 ## Audit
 

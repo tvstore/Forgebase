@@ -23,7 +23,7 @@ cargo deny --locked check                              # needs network for advis
 
 ## PostgreSQL for tests
 
-The `forgebase-db` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end.
+The `forgebase-db` and `forgebase-cli` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end. The `forgebase-cli` tests run the built `forgebase` binary against such a database (they set `FORGEBASE_DATABASE_URL` for it themselves).
 
 ```sh
 docker run -d --name forgebase-pg -p 5432:5432 -e POSTGRES_USER=forgebase -e POSTGRES_PASSWORD=forgebase postgres:16
