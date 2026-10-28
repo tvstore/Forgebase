@@ -34,7 +34,7 @@ SemVer once published; 0.x until the API stabilizes. `CHANGELOG.md` in Keep a Ch
 | Area | Approach |
 |---|---|
 | `forgebase-core` | Unit tests (pure), table-driven; property tests only where cheap value (for example identifier validation). |
-| `forgebase-db`, `forgebase-http` | Integration tests against a real PostgreSQL (no mocks); each test in its own transaction or fresh database; CI uses a Postgres service container. Supported Postgres major pinned (for example 15 or later; exact floor Undecided, decided when the related milestone is planned). |
+| `forgebase-db`, `forgebase-http` | Integration tests against a real PostgreSQL (no mocks); each test in its own transaction or fresh database; CI uses a Postgres service container. Supported PostgreSQL floor: 16 (Accepted, owner decision 2026-10-28). |
 | Security | Explicit negative tests for every permission rule and for injection attempts in filters and identifiers ([security-model](security-model.md#required-negative-tests)). |
 | Frontend (from M4) | Component tests with a light runner (Vitest) plus a few end-to-end smoke tests; tooling decided in M4. |
 | Coverage | No percentage targets; risk-based coverage. |

@@ -1,6 +1,6 @@
 # Architecture
 
-Nothing here is implemented. Sections and statements marked Accepted are owner-accepted ADRs; the rest is a design proposal. Workflow and approval rules: [AGENTS.md](../../AGENTS.md).
+Only the M1.1 metadata model and document validation in `forgebase-core` are implemented. Sections and statements marked Accepted are owner-accepted ADRs or owner decisions recorded in these docs; the rest is a design proposal. Workflow and approval rules: [AGENTS.md](../../AGENTS.md).
 
 **Status vocabulary**
 
@@ -8,9 +8,9 @@ Nothing here is implemented. Sections and statements marked Accepted are owner-a
 |---|---|
 | Accepted | Confirmed by the owner, or a process decision recorded as Accepted (an ADR marked "Accepted by owner" is an Accepted decision the owner made or provided). |
 | Proposed | Recommendation, awaiting owner decision. |
-| Undecided | Options listed; decision deferred. The deciding milestone is named where the approved plan ties it (for example file format: M1, UI library: M4, multi-site: before the multi-site milestone); otherwise: decide when the related milestone is planned. |
+| Undecided | Options listed; decision deferred. The deciding milestone is named where the approved plan ties it (for example UI library: M4, multi-site: before the multi-site milestone); otherwise: decide when the related milestone is planned. |
 
-Accepted so far: ADR 0001 (record decisions as ADRs), ADRs 0002-0006 (accepted by the owner on 2026-10-28: modular monolith and workspace layout, PostgreSQL only, database access layer direction, HTTP stack, extension model), MIT license (ADR 0007), English docs, the four-stage workflow and the Model Selection Policy (ADR 0008), the Toolchain/MSRV policy (owner decision 2026-10-28, see [maintenance-policy](maintenance-policy.md#toolchain-and-msrv)). **Everything else below is Proposed or Undecided.** The ADR 0004 direction is conditional on the M1 spike: if the spike contradicts it, a new ADR supersedes ADR 0004. Decisions are recorded in [docs/adr](../adr/README.md). Frappe behavior referenced here is labelled in the [feature matrix](feature-matrix.md).
+Accepted so far: ADR 0001 (record decisions as ADRs), ADRs 0002-0006 (accepted by the owner on 2026-10-28: modular monolith and workspace layout, PostgreSQL only, database access layer direction, HTTP stack, extension model), MIT license (ADR 0007), English docs, the four-stage workflow and the Model Selection Policy (ADR 0008), the Toolchain/MSRV policy (owner decision 2026-10-28, see [maintenance-policy](maintenance-policy.md#toolchain-and-msrv)), and the M1 owner decisions of 2026-10-28 (TOML metadata files, UUID v7 generated in the application, `time`, `rust_decimal`, PostgreSQL 16 as the version floor, DocType `name` with a separate `label`; see section 3 and [dependency-evaluation](dependency-evaluation.md)). **Everything else below is Proposed or Undecided.** The M1 spike confirmed the ADR 0004 direction (no superseding ADR; see [dependency-evaluation](dependency-evaluation.md#m1-spike-result-adr-0004-checkpoint)). Decisions are recorded in [docs/adr](../adr/README.md). Frappe behavior referenced here is labelled in the [feature matrix](feature-matrix.md).
 
 ## 1. Shape: modular monolith (Accepted, [ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md))
 
@@ -48,12 +48,45 @@ A Forgebase "app" is a Rust crate compiled into the user's binary. The user's `m
 
 ## 3. Metadata (DocType) model (Proposed)
 
-- **Schema-as-code.** DocTypes are defined in files inside the app crate (versioned in git) and loaded at startup; the DB holds a synced copy for introspection and admin. Single direction of truth: files to DB. File format: **Undecided** (TOML vs JSON), decided in M1; lean TOML for hand editing and comments.
+**Owner decisions, 2026-10-28 (Accepted)**, for M1; the remaining items in this section keep their stated status:
+
+- Metadata file format: **TOML**.
+- `id` is a **UUID v7 generated in the application**.
+- A DocType `name` is a snake_case identifier with a separate `label`; the label is not derived automatically.
+- `required` is enforced by application validation, not by a database `NOT NULL`, in M1.
+- M1 field types: Data, Text, Int, Decimal, Check, Date, Datetime, Select (Link and Table arrive in M2).
+
+**Proposed (implementation choice, pending owner confirmation):** Int maps to PostgreSQL `bigint` (spike lesson: an `int` column decodes as `i32`, while `Value::Int` is `i64`); Data fields default to `max_length` 140; a required Data, Text or Select field treats an empty or whitespace-only string as missing; Decimal values with more decimal places than the field's scale are rejected rather than rounded.
+
+- **Schema-as-code.** DocTypes are defined in files inside the app crate (versioned in git) and loaded at startup; the DB holds a synced copy for introspection and admin. Single direction of truth: files to DB. File format: TOML (Accepted, see above).
 - **Field types.** Small closed set first: Data (text with max length), Text, Int, Decimal (Postgres `numeric`; Float only if justified), Check (bool), Date, Datetime (`timestamptz`), Select, Link, Table (child). Layout-only types (section/column breaks) stay out of the data field list; UI layout is a separate optional section. Other types (Attach, JSON, Dynamic Link, Currency, ...) are added one at a time with a reason.
-- **Standard columns.** `id` (UUID surrogate PK; version, for example v7, decided in M1), `name` (unique human-facing identifier), `owner`, `created_at`, `modified_at`, `modified_by`, `version` (int, optimistic concurrency), `docstatus` (smallint, submittable types). A surrogate PK separate from `name` is an intentional difference (Frappe uses `name` as PK) so renames do not cascade. Confirm in M1.
+- **Standard columns.** `id` (UUID surrogate PK; v7, generated in the application, Accepted), `name` (unique human-facing identifier), `owner`, `created_at`, `modified_at`, `modified_by`, `version` (int, optimistic concurrency), `docstatus` (smallint, submittable types). A surrogate PK separate from `name` is an intentional difference (Frappe uses `name` as PK) so renames do not cascade. The surrogate key itself is confirmed in M1.
 - **Table naming.** Deterministic, validated snake_case identifiers derived from DocType names (for example `doc_sales_order`), always quoted; never interpolated from unvalidated input. PostgreSQL truncates identifiers at 63 bytes, so the limit applies to the full table name including the `doc_` prefix (and to index and constraint names).
 - **Naming strategies, initially.** Random/hash; naming series (gap-tolerant, via Postgres sequence or counter row); field-based. Others deferred.
 - **Single DocTypes (settings): Undecided** (decide when the related milestone is planned). Simplest option is a regular one-row table rather than a key-value `singles` table.
+
+### DocType file format (M1)
+
+One TOML file per DocType; unknown keys are rejected. Loaded with `DocType::from_toml_str`; an example is `crates/forgebase-core/tests/fixtures/customer.toml`.
+
+Top-level keys:
+
+- `name` (required): snake_case identifier, `^[a-z][a-z0-9_]*$`, at most 59 bytes.
+- `label` (required): human-readable name, not derived from `name`.
+- `naming` (optional): `"random"` (default) or `{ field = "<fieldname>" }`; the named field must be a required, unique Data field.
+- `[[fields]]`: the field list, in order.
+
+Field keys (`[[fields]]`):
+
+- `name` (required): snake_case identifier, at most 63 bytes, not a reserved standard column (`id`, `name`, `owner`, `created_at`, `modified_at`, `modified_by`, `version`, `docstatus`, `idx`, `parent_id`) or a PostgreSQL system column (`tableoid`, `xmin`, `xmax`, `cmin`, `cmax`, `ctid`).
+- `label` (optional): defaults to the field `name`.
+- `type` (required): `data`, `text`, `int`, `decimal`, `check`, `date`, `datetime` or `select`.
+- `required`, `unique` (optional, default `false`). `required` is enforced by application validation; for Text, Data and Select an empty or whitespace-only string counts as missing.
+- `max_length` (`data` only): `1..=65535`, default 140.
+- `precision` (`1..=28`) and `scale` (`<= precision`), both required for `decimal`. Strict rule: a value with more decimal places than `scale` is rejected, not rounded (trailing zeros are ignored).
+- `options` (`select` only, required): non-empty list of unique, non-empty strings.
+
+Text, Data and Select values and Select options must not contain NUL (`\0`), which PostgreSQL text cannot store.
 
 ## 4. Relationships (Proposed)
 
@@ -121,7 +154,7 @@ Custom fields and property setters: when added, a small explicit per-site overla
 
 | Challenge | Approach |
 |---|---|
-| Tables and columns come from runtime metadata, so static ORMs do not fit | Small in-house SQL layer for DocType DDL/CRUD with strict identifier validation, quoting and bound parameters ([dependency-evaluation](dependency-evaluation.md)). Accepted direction ([ADR 0004](../adr/0004-database-access-layer.md)); the M1 spike remains a required checkpoint. |
+| Tables and columns come from runtime metadata, so static ORMs do not fit | Small in-house SQL layer for DocType DDL/CRUD with strict identifier validation, quoting and bound parameters ([dependency-evaluation](dependency-evaluation.md)). Accepted direction ([ADR 0004](../adr/0004-database-access-layer.md)), confirmed by the M1 spike. |
 | Schema drift and risky migrations | Additive-only auto-sync, explicit files for destructive changes, `--dry-run`, transactional DDL. |
 | Hook order and partial commits. Frappe's docs may list hook order inconsistently (Unverified; search summaries suggest the hook table and the Document API page differ, see [feature matrix](feature-matrix.md)); partial commits from user-code `commit()` are our own analysis (opinion, not documented fact) | One fixed pipeline, one transaction per request, hooks cannot commit, outbox for side effects. |
 | Permission complexity | One evaluator in `forgebase-core`; all reads go through a permission-filtered query path; exhaustive negative tests ([security-model](security-model.md)). |

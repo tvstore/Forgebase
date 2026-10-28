@@ -6,7 +6,7 @@ Forgebase is a Rust framework for building business applications, inspired by th
 
 ## Status
 
-**M0 Foundations in progress (workspace skeleton, no features).** The workspace has four empty crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
+**M0 Foundations done; M1 Metadata and storage in progress (M1.1: DocType metadata model and document validation in `forgebase-core`, no database yet).** The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
 
 The repository is currently **private**. It is intended to be open source under the MIT license; it is not open source yet.
 
