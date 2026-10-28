@@ -1,6 +1,6 @@
 # Dependency evaluation
 
-Condensed from research done on 2026-10-28; sources are given inline. **Versions, licenses and MSRVs are as of 2026-10-28**; re-run `cargo info` at decision time. Recommendations are **Proposed** unless marked Accepted: the axum, tokio and tokio-postgres + deadpool-postgres (with the custom migration runner) directions are Accepted by the owner (ADRs 0004 and 0005, 2026-10-28; ADR 0004 is conditional on the M1 spike), as are React + TypeScript for the desk (ADR 0002) and TLS termination at a reverse proxy (ADR 0005); everything not marked Accepted is not decided. Admission rules: [maintenance-policy](maintenance-policy.md). Related decisions: [ADR 0004](../adr/0004-database-access-layer.md), [ADR 0005](../adr/0005-http-stack.md).
+Condensed from research done on 2026-10-28; sources are given inline. **Versions, licenses and MSRVs are as of 2026-10-28**; re-run `cargo info` at decision time. Recommendations are **Proposed** unless marked Accepted (the `time` and `rust_decimal` choices below were Accepted by the owner on 2026-10-28): the axum, tokio and tokio-postgres + deadpool-postgres (with the custom migration runner) directions are Accepted by the owner (ADRs 0004 and 0005, 2026-10-28; ADR 0004 confirmed by the M1 spike, see below), as are React + TypeScript for the desk (ADR 0002) and TLS termination at a reverse proxy (ADR 0005); everything not marked Accepted is not decided. Admission rules: [maintenance-policy](maintenance-policy.md). Related decisions: [ADR 0004](../adr/0004-database-access-layer.md), [ADR 0005](../adr/0005-http-stack.md).
 
 Selection criteria, in priority order: long-term maintenance cost, simplicity, small dependency count, then fit with runtime-metadata DocTypes (tables and columns created from metadata at runtime; documents cross the boundary as validated maps/JSON). Popularity is not a criterion.
 
@@ -152,7 +152,40 @@ Other facts:
 - sea-query 1.0.2 as a query/DDL builder only (backend-postgres) adds 1 package; optional later behind an internal trait.
 
 **Recommendation (Accepted direction, [ADR 0004](../adr/0004-database-access-layer.md)): tokio-postgres + deadpool-postgres + small in-house SQL/DDL layer** (strict identifier pattern such as `^[a-z][a-z0-9_]{0,58}$` for the DocType part (the 63-byte PostgreSQL limit applies to the full name including the 4-byte `doc_` prefix, so at most 59 bytes remain; derived index and constraint names such as `doc_<name>_parent_id_idx` can exceed 63 bytes and need their own bounded naming scheme, decided in M1) and always double-quoted; values only as bound parameters; Postgres-to-field-type mapping).
-Close alternative: sqlx with `default-features = false`, features `postgres, runtime-tokio, migrate, json`, macros off: better if built-in migrations and pooling in one crate are worth about 40-60 extra packages, MSRV 1.94 and the governance transition. Not recommended: diesel, sea-orm. **The M1 spike remains a required checkpoint; if it contradicts this direction, a new ADR supersedes ADR 0004** (see [ADR 0004](../adr/0004-database-access-layer.md)).
+Close alternative: sqlx with `default-features = false`, features `postgres, runtime-tokio, migrate, json`, macros off: better if built-in migrations and pooling in one crate are worth about 40-60 extra packages, MSRV 1.94 and the governance transition. Not recommended: diesel, sea-orm. The M1 spike (the required checkpoint for [ADR 0004](../adr/0004-database-access-layer.md)) confirmed this direction; see the spike result below.
+
+#### M1 spike result (ADR 0004 checkpoint)
+
+Evidence from a throwaway spike that is not kept in the repository (single run on PostgreSQL 16.15, 4 cores). Both stacks implemented the same scenario end to end: create a table from metadata, insert/get/update/delete with a dynamic `Value` enum, and an injection string stored literally.
+
+| Metric | A: tokio-postgres 0.7.18 + deadpool-postgres 0.14.2 | B: sqlx 0.9.0 (no macros, no TLS) |
+|---|---|---|
+| Unique packages (`cargo tree -e normal`, incl. spike crate) | 93 | 154 |
+| Clean release build | ~30 s | ~54 s |
+| Clean debug build | ~19 s | ~33 s |
+| Spike LOC (excl. metadata) | 169 | 167 |
+| Builds on MSRV 1.97 | yes | yes |
+| cargo-deny licenses | ok | ok |
+
+- Dynamic parameters: A implements `ToSql for Value` once and passes `&[&(dyn ToSql + Sync)]`; NULL needs no type. B needs a by-value bind chain, a typed `None` per field type, and `sqlx::AssertSqlSafe` around every runtime query.
+- Transactions: A `let mut c = pool.get().await?; let tx = c.transaction().await?; ... tx.commit().await?` (needs a `mut` pooled client; dropping `tx` without commit rolls back). B `pool.begin().await?` then `.execute(&mut *tx)` and `tx.commit()`. Both are acceptable.
+- Decoding and type mappings (numeric to `rust_decimal`, date to `time::Date`, timestamptz to `OffsetDateTime`) worked in both. A's error `Display` is only "db error" (the server message is in `as_db_error()`); B includes the server message.
+
+**Decision: the ADR 0004 direction is confirmed; no superseding ADR.** B's advantages (error text, built-in pool and migrations) do not outweigh +61 packages, about 1.8x build time, per-query `AssertSqlSafe`, typed-NULL binding, MSRV 1.94 and the governance transition.
+
+Lessons carried into M1:
+
+- Map Int to PostgreSQL `bigint` (decode as `i64`); an `int` column decodes as `i32`.
+- Generated SQL uses explicit parameter casts (`$n::bigint`, `$n::numeric`, ...).
+- Wrap database errors in a Forgebase error type that carries the server message and SQLSTATE code.
+- `impl ToSql for Value` needs the `bytes` crate (`BytesMut` in the trait signature).
+
+Limitations: one timing run; runtime performance, statement caching and pool contention were not measured.
+
+#### Decimal and date/time types (Accepted, owner decision 2026-10-28)
+
+- **Decimal:** `rust_decimal` (1.43.0, MIT), mapped to PostgreSQL `numeric`. In `forgebase-core` it is used without database features. Precision is limited to 28 digits, which bounds the Decimal field `precision`.
+- **Date/time:** `time` (0.3.55, MIT OR Apache-2.0, MSRV 1.88) with only the features needed. `Date` maps to `date`, `OffsetDateTime` to `timestamptz`. chrono and jiff were not chosen.
 
 ### 5. Migrations
 
@@ -164,7 +197,7 @@ Two problems: (1) framework-internal ordered SQL migrations; (2) DocType schema 
 | refinery 0.10.0 | MSRV 1.92; 110 packages; only 0.8.x from 2024 seen in search, so 0.10 history unconfirmed. |
 | Custom runner | `forgebase_migrations(id, checksum, applied_at)`, `pg_advisory_xact_lock`, embedded SQL via `include_str!`, checksum verification; about 100-200 lines (Unverified estimate). |
 
-**Recommendation (custom runner Accepted with [ADR 0004](../adr/0004-database-access-layer.md), conditional on the M1 spike; the rest Proposed):** custom runner if tokio-postgres; `sqlx::migrate!` if sqlx. Schema sync is always framework code, transactional, destructive changes explicit. Avoid refinery.
+**Recommendation (custom runner Accepted with [ADR 0004](../adr/0004-database-access-layer.md), confirmed by the M1 spike, see the spike result above; the rest Proposed):** custom runner if tokio-postgres; `sqlx::migrate!` if sqlx. Schema sync is always framework code, transactional, destructive changes explicit. Avoid refinery.
 
 ### 6. Serialization and validation
 
@@ -223,9 +256,11 @@ Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 
 | HTTP | axum (+ tower-http as needed) (Accepted) | actix-web |
 | Runtime | tokio (explicit features) (Accepted) | none realistic (ecosystem tie-in accepted) |
 | CLI | clap (derive) | lexopt |
-| DB | tokio-postgres + deadpool-postgres + in-house SQL/DDL builder (Accepted; conditional on the M1 spike) | sqlx (macros off); sea-query as builder |
+| DB | tokio-postgres + deadpool-postgres + in-house SQL/DDL builder (Accepted; confirmed by the M1 spike, see the spike result subsection) | sqlx (macros off); sea-query as builder |
 | Framework migrations | custom embedded runner (Accepted with the DB direction) | sqlx migrate (if sqlx) |
 | Serialization / validation | serde + serde_json; runtime metadata validator | garde for fixed structs |
+| Metadata file parsing | toml + serde (parse only, in `forgebase-core`) (format Accepted 2026-10-28) | JSON |
+| Decimal, date/time | `rust_decimal`, `time` (Accepted 2026-10-28) | chrono, jiff |
 | Errors / logging | thiserror, anyhow, tracing | snafu, eyre, log + env_logger (not evaluated) |
 | Auth | argon2 + opaque DB-backed sessions | tower-sessions with own store |
 | Jobs | custom Postgres SKIP LOCKED queue | apalis (if sqlx, after maturing) |
@@ -258,7 +293,7 @@ Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md
 
 ## Open questions
 
-1. DB layer: is sqlx convenience worth +43 packages, MSRV 1.94 and the governance transition? Prototype one DocType CRUD path with both (M1 spike).
+1. ~~DB layer: is sqlx convenience worth +43 packages, MSRV 1.94 and the governance transition?~~ Resolved by the M1 spike (2026-10-28): no; ADR 0004 direction confirmed.
 2. tokio-postgres bus factor: contributor distribution and PR latency.
 3. sqlx under transact-rs: maintainer list and post-move cadence.
 4. ring 0.17.14 license file: need for a `deny.toml` clarify entry.
@@ -267,7 +302,7 @@ Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md
 7. apalis-postgres: missing license metadata and maturity.
 8. axum: any announced 0.9 plans; tokio's current LTS line.
 9. argon2 0.6: API changes, audit status, current OWASP Argon2id parameters.
-10. Decimal and date/time types: `rust_decimal` vs Postgres `numeric` via `arbitrary_precision`; chrono vs time vs jiff (not evaluated; affects field types and wire format).
+10. ~~Decimal and date/time types~~ Resolved (Accepted, owner decision 2026-10-28): `rust_decimal` and `time`, see the section in 4. Database access.
 11. serde_json `preserve_order` / `arbitrary_precision` workspace-wide implications.
 12. Session token hashing: `sha2` weight and license; cookie handling via `cookie`/`axum-extra` vs hand-written.
 13. MSRV-aware resolver (resolver "3") behavior with the pinned toolchain.

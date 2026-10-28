@@ -14,14 +14,15 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 
 ## M0 Foundations
 
-- **Status:** In progress (Stage 1 plan approved by the owner 2026-10-28).
+- **Status:** Done (merged 2026-10-28).
 - **Scope:** workspace skeleton with 4 empty crates; CI (fmt, `clippy -D warnings`, test, build, cargo-deny); toolchain pin; contribution docs.
 - **Exit criteria:** green CI on the empty skeleton.
 - **Non-goals:** any feature code; database access; frontend.
 
 ## M1 Metadata and storage
 
-- **Scope:** DocType definition loading and validation; additive schema sync with dry-run; insert/get/update/delete of simple documents via library API and CLI; framework migrations. Includes the DB-layer spike (tokio-postgres vs sqlx) that is the required checkpoint for [ADR 0004](../adr/0004-database-access-layer.md); if the spike contradicts the accepted direction, a new ADR supersedes it. Also decides the metadata file format (TOML vs JSON) and confirms the surrogate-UUID primary key.
+- **Status:** In progress (Stage 1 plan approved by the owner 2026-10-28). Delivered as three PRs: M1.1 metadata model and DB-layer spike, M1.2 `forgebase-db` and schema sync, M1.3 documents CRUD and CLI.
+- **Scope:** DocType definition loading and validation; additive schema sync with dry-run; insert/get/update/delete of simple documents via library API and CLI; framework migrations. Included the DB-layer spike (tokio-postgres vs sqlx), the required checkpoint for [ADR 0004](../adr/0004-database-access-layer.md); it confirmed the accepted direction (2026-10-28). The metadata file format is decided (TOML, Accepted 2026-10-28). Also confirms the surrogate-UUID primary key.
 - **Exit criteria:** integration tests against a real PostgreSQL (CI service container).
 - **Non-goals:** links, child tables, lifecycle hooks, HTTP API, authentication, permissions, jobs, multi-site.
 
