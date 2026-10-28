@@ -4,12 +4,15 @@
 //! then its own implicit transaction) or inside a [`Transaction`](tokio_postgres::Transaction)
 //! that the caller owns and commits. SQL is built only from validated, quoted identifiers and
 //! numeric placeholders with explicit casts; values are always bound parameters.
+//!
+//! Link fields hold the target's `id` in the database; this module resolves the target `name` to
+//! the `id` on the way in and back to the `name` on the way out (see [`insert`]).
 
 use std::collections::BTreeMap;
 
-use forgebase_core::document::{Document, validate, validate_update};
+use forgebase_core::document::{Document, ValidationError, validate, validate_update};
 use forgebase_core::ident::table_name;
-use forgebase_core::meta::{DocType, Naming};
+use forgebase_core::meta::{DocType, FieldType, Naming};
 use forgebase_core::value::Value;
 use time::OffsetDateTime;
 use tokio_postgres::GenericClient;
@@ -19,7 +22,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::ident::quote_ident;
-use crate::value::{SqlValue, cast_type, decode};
+use crate::value::{SqlParam, SqlValue, cast_type, decode};
 
 /// The standard columns, in the order they are selected (see `plan.rs`: the DDL has the same).
 const STANDARD_COLUMNS: [&str; 7] = [
@@ -49,7 +52,8 @@ pub struct StoredDocument {
     pub modified_by: String,
     /// Starts at 1 and is incremented by every update.
     pub version: i64,
-    /// One entry per field of the DocType, in field-name order; [`Value::Null`] when absent.
+    /// One entry per field of the DocType, in field-name order; [`Value::Null`] when absent. A
+    /// Link field holds the target document's `name` as [`Value::Text`].
     pub values: BTreeMap<String, Value>,
 }
 
@@ -63,6 +67,15 @@ pub struct StoredDocument {
 /// recorded as `owner` and `modified_by`; it is not authenticated here. `created_at` and
 /// `modified_at` come from the database's `now()`, and `version` is 1. A duplicate value in a
 /// `unique` field or a duplicate name is [`DbError::UniqueViolation`].
+///
+/// **Links.** A non-null Link value is the `name` of a document of the target DocType. Each one
+/// is looked up with `SELECT "id" ... FOR KEY SHARE` on the same client, which also locks the
+/// target against a concurrent delete until the transaction ends; a name that does not exist
+/// is a [`ValidationError::LinkNotFound`] in [`DbError::Validation`], together with the other
+/// problems. Pass a [`Transaction`](tokio_postgres::Transaction) for that lock to cover the
+/// insert: on a pooled client each statement is its own transaction, and a target deleted
+/// between the lookup and the insert then fails the insert on the foreign key (SQLSTATE 23503,
+/// [`DbError::Postgres`]) instead of being reported as a missing link.
 pub async fn insert(
     client: &impl GenericClient,
     doctype: &DocType,
@@ -70,7 +83,11 @@ pub async fn insert(
     actor: &str,
 ) -> Result<StoredDocument, DbError> {
     check_actor(actor)?;
-    validate(doctype, &doc).map_err(DbError::Validation)?;
+    let mut errors = validate(doctype, &doc).err().unwrap_or_default();
+    let links = resolve_links(client, doctype, &doc.values, &mut errors).await?;
+    if !errors.is_empty() {
+        return Err(DbError::Validation(errors));
+    }
     let id = Uuid::now_v7();
     let name = new_name(doctype, &doc, id)?;
 
@@ -78,21 +95,28 @@ pub async fn insert(
     let (id_value, name_value, actor_value) = (id, name, actor);
     let mut params: Vec<&(dyn ToSql + Sync)> = vec![&id_value, &name_value, &actor_value];
     let null = Value::Null;
-    let bound: Vec<SqlValue<'_>> = doctype
+    let bound: Vec<SqlParam<'_>> = doctype
         .fields
         .iter()
-        .map(|field| SqlValue(doc.values.get(&field.name).unwrap_or(&null)))
+        .map(|field| {
+            sql_param(
+                &field.field_type,
+                &links,
+                &field.name,
+                doc.values.get(&field.name).unwrap_or(&null),
+            )
+        })
         .collect();
     params.extend(bound.iter().map(|v| v as &(dyn ToSql + Sync)));
 
     let row = client
         .query_one(&sql, &params)
         .await
-        .map_err(DbError::from_write)?;
+        .map_err(|e| DbError::from_write(e, doctype))?;
     decode_row(doctype, &row)
 }
 
-/// Returns the document with this name, or `None`.
+/// Returns the document with this name, or `None`. Link values are the target documents' names.
 pub async fn get(
     client: &impl GenericClient,
     doctype: &DocType,
@@ -108,13 +132,25 @@ pub async fn get(
 /// with [`forgebase_core::document::validate_update`]. Changing the naming field is rejected
 /// ([`DbError::Naming`]): renames are not supported yet. Empty `changes` are
 /// [`DbError::NoChanges`]. `modified_at` is set to the database's `now()`, `modified_by` to
-/// `actor`, and `version` is incremented; `created_at` and `owner` stay. There is no
-/// optimistic concurrency check yet: the last writer wins. An unknown name is
-/// [`DbError::NotFound`].
+/// `actor`, and `version` is incremented; `created_at` and `owner` stay.
+///
+/// **Optimistic concurrency.** The update is applied only if the document's current `version`
+/// equals `expected_version` (the version the caller read). Otherwise nothing is written and the
+/// result is [`DbError::Conflict`] with the current version; an unknown name is
+/// [`DbError::NotFound`]. Of two concurrent updates with the same `expected_version`, exactly
+/// one succeeds.
+///
+/// Conflict detection assumes READ COMMITTED, the PostgreSQL default: the second writer waits
+/// for the row lock and then re-checks the version. In a caller-owned transaction at REPEATABLE
+/// READ or SERIALIZABLE the losing writer instead gets a serialization failure (SQLSTATE
+/// 40001, [`DbError::Postgres`], not `Conflict`); retry the whole transaction.
+///
+/// Link values are resolved as in [`insert`] (including the lock and the pooled-client caveat).
 pub async fn update(
     client: &impl GenericClient,
     doctype: &DocType,
     name: &str,
+    expected_version: i64,
     changes: &BTreeMap<String, Value>,
     actor: &str,
 ) -> Result<StoredDocument, DbError> {
@@ -122,7 +158,11 @@ pub async fn update(
     if changes.is_empty() {
         return Err(DbError::NoChanges);
     }
-    validate_update(doctype, changes).map_err(DbError::Validation)?;
+    let mut errors = validate_update(doctype, changes).err().unwrap_or_default();
+    let links = resolve_links(client, doctype, changes, &mut errors).await?;
+    if !errors.is_empty() {
+        return Err(DbError::Validation(errors));
+    }
     if let Naming::Field(field) = &doctype.naming
         && changes.contains_key(field)
     {
@@ -132,42 +172,135 @@ pub async fn update(
     }
 
     let sql = update_sql(doctype, changes);
-    let bound: Vec<SqlValue<'_>> = changes.values().map(SqlValue).collect();
+    let bound: Vec<SqlParam<'_>> = changes
+        .iter()
+        .map(|(field, value)| {
+            // Validation passed, so every key is a field; the fallback is never used.
+            let field_type = doctype.field(field).map(|f| &f.field_type);
+            field_type.map_or(SqlParam::Value(SqlValue(value)), |t| {
+                sql_param(t, &links, field, value)
+            })
+        })
+        .collect();
     let mut params: Vec<&(dyn ToSql + Sync)> =
         bound.iter().map(|v| v as &(dyn ToSql + Sync)).collect();
     params.push(&actor);
     params.push(&name);
+    params.push(&expected_version);
 
     let row = client
         .query_opt(&sql, &params)
         .await
-        .map_err(DbError::from_write)?;
+        .map_err(|e| DbError::from_write(e, doctype))?;
     match row {
         Some(row) => decode_row(doctype, &row),
-        None => Err(not_found(doctype, name)),
+        None => Err(stale_or_missing(client, doctype, name, expected_version).await?),
     }
 }
 
-/// Deletes the document with this name. An unknown name is [`DbError::NotFound`].
+/// Deletes the document with this name if its current `version` equals `expected_version`.
+///
+/// A different version is [`DbError::Conflict`] (nothing is deleted; under REPEATABLE READ or
+/// SERIALIZABLE a stale writer gets SQLSTATE 40001 as [`DbError::Postgres`] instead, see
+/// [`update`]); an unknown name is
+/// [`DbError::NotFound`]. A document that other documents still link to cannot be deleted:
+/// [`DbError::LinkedDocumentExists`] names the linking DocType (the links are
+/// `ON DELETE RESTRICT`). Inside a caller-owned transaction that error, like any failed
+/// statement, leaves the transaction aborted: roll it back.
 pub async fn delete(
     client: &impl GenericClient,
     doctype: &DocType,
     name: &str,
+    expected_version: i64,
 ) -> Result<(), DbError> {
     let sql = format!(
-        "DELETE FROM {} WHERE \"name\" = $1::text",
+        "DELETE FROM {} WHERE \"name\" = $1::text AND \"version\" = $2::bigint",
         quote_ident(&table_name(&doctype.name))
     );
-    if client.execute(&sql, &[&name]).await? == 0 {
-        return Err(not_found(doctype, name));
+    let deleted = client
+        .execute(&sql, &[&name, &expected_version])
+        .await
+        .map_err(|e| DbError::from_delete(e, &doctype.name, name))?;
+    if deleted == 0 {
+        return Err(stale_or_missing(client, doctype, name, expected_version).await?);
     }
     Ok(())
 }
 
-fn not_found(doctype: &DocType, name: &str) -> DbError {
-    DbError::NotFound {
-        doctype: doctype.name.clone(),
-        name: name.to_owned(),
+/// Why a write that matched no row (`name` and `version`) did nothing: the document does not
+/// exist ([`DbError::NotFound`]) or has another version ([`DbError::Conflict`]).
+async fn stale_or_missing(
+    client: &impl GenericClient,
+    doctype: &DocType,
+    name: &str,
+    expected_version: i64,
+) -> Result<DbError, DbError> {
+    let sql = format!(
+        "SELECT \"version\" FROM {} WHERE \"name\" = $1::text",
+        quote_ident(&table_name(&doctype.name))
+    );
+    Ok(match client.query_opt(&sql, &[&name]).await? {
+        None => DbError::NotFound {
+            doctype: doctype.name.clone(),
+            name: name.to_owned(),
+        },
+        Some(row) => DbError::Conflict {
+            doctype: doctype.name.clone(),
+            name: name.to_owned(),
+            expected: expected_version,
+            current: row.try_get(0)?,
+        },
+    })
+}
+
+/// Resolves the Link values in `values` (name -> target `id`), locking each target row against
+/// deletion. A name that does not exist is added to `errors` as
+/// [`ValidationError::LinkNotFound`]. Fields that already have a validation error are skipped
+/// (their value may not even be sendable to the database, for example text with NUL).
+async fn resolve_links(
+    client: &impl GenericClient,
+    doctype: &DocType,
+    values: &BTreeMap<String, Value>,
+    errors: &mut Vec<ValidationError>,
+) -> Result<BTreeMap<String, Uuid>, DbError> {
+    let mut ids = BTreeMap::new();
+    for (field, value) in values {
+        let (Some(FieldType::Link { target }), Value::Text(target_name)) =
+            (doctype.field(field).map(|f| &f.field_type), value)
+        else {
+            continue;
+        };
+        if errors.iter().any(|e| e.field() == field) {
+            continue;
+        }
+        let sql = format!(
+            "SELECT \"id\" FROM {} WHERE \"name\" = $1::text FOR KEY SHARE",
+            quote_ident(&table_name(target))
+        );
+        match client.query_opt(&sql, &[target_name]).await? {
+            Some(row) => {
+                ids.insert(field.clone(), row.try_get::<_, Uuid>(0)?);
+            }
+            None => errors.push(ValidationError::LinkNotFound {
+                field: field.clone(),
+                target: target.clone(),
+                name: target_name.clone(),
+            }),
+        }
+    }
+    Ok(ids)
+}
+
+/// The bound parameter for one field: the resolved `id` for a Link, else the value itself.
+fn sql_param<'a>(
+    field_type: &FieldType,
+    links: &BTreeMap<String, Uuid>,
+    field: &str,
+    value: &'a Value,
+) -> SqlParam<'a> {
+    match field_type {
+        FieldType::Link { .. } => SqlParam::Link(links.get(field).copied()),
+        _ => SqlParam::Value(SqlValue(value)),
     }
 }
 
@@ -206,7 +339,7 @@ fn new_name(doctype: &DocType, doc: &Document, id: Uuid) -> Result<String, DbErr
     }
 }
 
-/// `"id", "name", ..., "<field>", ...`: the columns every statement returns, in decode order.
+/// `"id", "name", ..., "<field>", ...`: the columns of the table, in decode order.
 fn column_list(doctype: &DocType) -> String {
     STANDARD_COLUMNS
         .iter()
@@ -217,10 +350,29 @@ fn column_list(doctype: &DocType) -> String {
         .join(", ")
 }
 
+/// What every statement returns, in decode order: like [`column_list`], but a Link column is
+/// replaced by the target document's `name` (a scalar subquery on the target's `id`, aliased to
+/// the field name; the outer column is qualified with the table name so a self-link resolves).
+fn select_list(doctype: &DocType) -> String {
+    let table = quote_ident(&table_name(&doctype.name));
+    let mut items: Vec<String> = STANDARD_COLUMNS.iter().copied().map(quote_ident).collect();
+    items.extend(doctype.fields.iter().map(|field| {
+        let column = quote_ident(&field.name);
+        match &field.field_type {
+            FieldType::Link { target } => format!(
+                "(SELECT t.\"name\" FROM {} t WHERE t.\"id\" = {table}.{column}) AS {column}",
+                quote_ident(&table_name(target))
+            ),
+            _ => column,
+        }
+    }));
+    items.join(", ")
+}
+
 fn get_sql(doctype: &DocType) -> String {
     format!(
         "SELECT {} FROM {} WHERE \"name\" = $1::text",
-        column_list(doctype),
+        select_list(doctype),
         quote_ident(&table_name(&doctype.name))
     )
 }
@@ -244,11 +396,12 @@ fn insert_sql(doctype: &DocType) -> String {
         quote_ident(&table_name(&doctype.name)),
         column_list(doctype),
         values.join(", "),
-        column_list(doctype)
+        select_list(doctype)
     )
 }
 
-/// Placeholders `$1..$n` for the changes (in key order), `$n+1` actor, `$n+2` name.
+/// Placeholders `$1..$n` for the changes (in key order), `$n+1` actor, `$n+2` name,
+/// `$n+3` expected version.
 /// `changes` has passed validation, so every key is a field of the DocType (the `text` fallback
 /// cast is unreachable; an unknown column would be rejected by the database, never interpolated).
 fn update_sql(doctype: &DocType, changes: &BTreeMap<String, Value>) -> String {
@@ -264,11 +417,12 @@ fn update_sql(doctype: &DocType, changes: &BTreeMap<String, Value>) -> String {
     sets.push(format!("\"modified_by\" = ${}::text", n + 1));
     sets.push("\"version\" = \"version\" + 1".to_owned());
     format!(
-        "UPDATE {} SET {} WHERE \"name\" = ${}::text RETURNING {}",
+        "UPDATE {} SET {} WHERE \"name\" = ${}::text AND \"version\" = ${}::bigint RETURNING {}",
         quote_ident(&table_name(&doctype.name)),
         sets.join(", "),
         n + 2,
-        column_list(doctype)
+        n + 3,
+        select_list(doctype)
     )
 }
 
@@ -325,8 +479,39 @@ mod tests {
         assert!(sql.starts_with(
             "UPDATE \"doc_customer\" SET \"email\" = $1::varchar, \"points\" = $2::bigint, \
              \"modified_at\" = now(), \"modified_by\" = $3::text, \"version\" = \"version\" + 1 \
-             WHERE \"name\" = $4::text RETURNING "
+             WHERE \"name\" = $4::text AND \"version\" = $5::bigint RETURNING "
         ));
+    }
+
+    fn order() -> DocType {
+        DocType::from_toml_str(
+            "name = \"order\"\nlabel = \"O\"\n\
+             [[fields]]\nname = \"customer\"\ntype = \"link\"\ntarget = \"customer\"\n\
+             [[fields]]\nname = \"parent\"\ntype = \"link\"\ntarget = \"order\"\n",
+        )
+        .expect("valid DocType")
+    }
+
+    #[test]
+    fn links_are_written_as_uuid_and_read_back_as_names() {
+        let sql = insert_sql(&order());
+        assert!(
+            sql.contains("$4::uuid, $5::uuid) RETURNING"),
+            "bound as ids: {sql}"
+        );
+        // The INSERT column list is plain; only RETURNING resolves names.
+        assert!(
+            sql.contains("\"version\", \"customer\", \"parent\") VALUES"),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(
+                "\"version\", (SELECT t.\"name\" FROM \"doc_customer\" t WHERE t.\"id\" = \"doc_order\".\"customer\") AS \"customer\", \
+                 (SELECT t.\"name\" FROM \"doc_order\" t WHERE t.\"id\" = \"doc_order\".\"parent\") AS \"parent\""
+            ),
+            "{sql}"
+        );
+        assert!(get_sql(&order()).contains("AS \"customer\""));
     }
 
     #[test]

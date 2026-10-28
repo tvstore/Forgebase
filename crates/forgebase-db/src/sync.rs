@@ -8,7 +8,7 @@ use tokio_postgres::{Client, Transaction};
 
 use crate::error::DbError;
 use crate::ident::quote_ident;
-use crate::plan::{Catalog, Column, Step, Warning, plan};
+use crate::plan::{Catalog, Column, ForeignKey, Step, Warning, plan};
 
 /// Advisory lock key serializing schema syncs (transaction-level lock).
 const SYNC_LOCK_KEY: i64 = 0x4642_5359_4e43_0001;
@@ -50,7 +50,12 @@ pub struct SyncReport {
 /// advisory lock, then introspects the connection's current schema (so concurrent syncs see
 /// each other's result), plans, and applies. Conflicts ([`DbError::SyncConflicts`]) refuse the
 /// whole sync and nothing is applied. No destructive DDL is generated. Index creation is plain
-/// `CREATE INDEX`, which blocks writes on that table while it builds.
+/// `CREATE INDEX`, which blocks writes on that table while it builds. Adding a foreign key
+/// takes a lock on both tables and validates the existing rows.
+///
+/// A Link field whose target DocType is not in `registry` is refused first
+/// ([`DbError::InvalidMetadata`], from [`Registry::check_references`]), before anything touches
+/// the database.
 ///
 /// The framework migrations must have been applied ([`DbError::FrameworkNotMigrated`]).
 pub async fn sync(
@@ -58,6 +63,9 @@ pub async fn sync(
     registry: &Registry,
     options: &SyncOptions,
 ) -> Result<SyncReport, DbError> {
+    registry
+        .check_references()
+        .map_err(DbError::InvalidMetadata)?;
     let tx = client.transaction().await?;
     let timeout_ms = options
         .lock_timeout
@@ -86,7 +94,7 @@ pub async fn sync(
         return Err(DbError::FrameworkNotMigrated);
     }
 
-    let catalog = load_catalog(&tx, registry, &doctype_table).await?;
+    let catalog = load_catalog(&tx, registry, &doctype_table, &schema).await?;
     let plan = plan(registry, &catalog);
     if !plan.conflicts.is_empty() {
         tx.rollback().await?;
@@ -111,8 +119,10 @@ async fn apply(tx: &Transaction<'_>, step: &Step, doctype_table: &str) -> Result
     match step {
         Step::CreateTable { sql, .. }
         | Step::AddKeys { sql, .. }
+        | Step::AddForeignKeys { sql, .. }
         | Step::AddColumn { sql, .. }
-        | Step::CreateUniqueIndex { sql, .. } => tx.batch_execute(sql).await?,
+        | Step::CreateUniqueIndex { sql, .. }
+        | Step::CreateIndex { sql, .. } => tx.batch_execute(sql).await?,
         Step::RegisterDocType { doctype } => {
             tx.execute(
                 &format!(
@@ -133,6 +143,7 @@ async fn load_catalog(
     tx: &Transaction<'_>,
     registry: &Registry,
     doctype_table: &str,
+    schema: &str,
 ) -> Result<Catalog, DbError> {
     let tables: Vec<String> = registry.iter().map(|d| table_name(&d.name)).collect();
     let mut catalog = Catalog::default();
@@ -177,23 +188,63 @@ async fn load_catalog(
 
     let rows = tx
         .query(
-            "SELECT c.relname::text, a.attname::text, i.indisprimary \
+            "SELECT c.relname::text, a.attname::text, i.indisprimary, i.indisunique \
              FROM pg_index i \
              JOIN pg_class c ON c.oid = i.indrelid \
              JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0] \
              WHERE c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema()) \
                AND c.relname = ANY($1::text[]) \
-               AND i.indisunique AND i.indisvalid AND i.indnatts = 1 AND i.indpred IS NULL",
+               AND i.indisvalid AND i.indnatts = 1 AND i.indpred IS NULL",
             &[&tables],
         )
         .await?;
     for row in &rows {
         let key = (row.try_get::<_, String>(0)?, row.try_get::<_, String>(1)?);
+        catalog.indexed.insert(key.clone());
         if row.try_get::<_, bool>(2)? {
             catalog.primary.insert(key);
-        } else {
+        } else if row.try_get::<_, bool>(3)? {
             catalog.unique.insert(key);
         }
+    }
+
+    // Single-column foreign keys. `confdeltype` is of the type "char"; it is cast for reading.
+    let rows = tx
+        .query(
+            "SELECT c.relname::text, a.attname::text, rn.nspname::text, rt.relname::text, \
+                    ra.attname::text, con.confdeltype::text, con.convalidated \
+             FROM pg_constraint con \
+             JOIN pg_class c ON c.oid = con.conrelid \
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = con.conkey[1] \
+             JOIN pg_class rt ON rt.oid = con.confrelid \
+             JOIN pg_namespace rn ON rn.oid = rt.relnamespace \
+             JOIN pg_attribute ra ON ra.attrelid = rt.oid AND ra.attnum = con.confkey[1] \
+             WHERE con.contype = 'f' AND array_length(con.conkey, 1) = 1 \
+               AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema()) \
+               AND c.relname = ANY($1::text[])",
+            &[&tables],
+        )
+        .await?;
+    for row in &rows {
+        let key = (row.try_get::<_, String>(0)?, row.try_get::<_, String>(1)?);
+        let (referenced_schema, referenced_table): (String, String) =
+            (row.try_get(2)?, row.try_get(3)?);
+        let table = if referenced_schema == schema {
+            referenced_table
+        } else {
+            format!("{referenced_schema}.{referenced_table}")
+        };
+        let rule: String = row.try_get(5)?;
+        catalog
+            .foreign_keys
+            .entry(key)
+            .or_default()
+            .push(ForeignKey {
+                table,
+                column: row.try_get(4)?,
+                on_delete: rule.chars().next().unwrap_or('?'),
+                validated: row.try_get(6)?,
+            });
     }
 
     let rows = tx

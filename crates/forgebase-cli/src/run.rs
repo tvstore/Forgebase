@@ -55,12 +55,14 @@ enum Operation {
     Update {
         doctype: DocType,
         name: String,
+        expected_version: i64,
         changes: BTreeMap<String, Value>,
         actor: String,
     },
     Delete {
         doctype: DocType,
         name: String,
+        expected_version: i64,
     },
 }
 
@@ -91,6 +93,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
         DocCommand::Update {
             doctype,
             name,
+            version,
             doctypes,
             data,
             actor,
@@ -100,6 +103,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             Operation::Update {
                 doctype,
                 name,
+                expected_version: version.expected_version,
                 changes,
                 actor: actor.actor,
             }
@@ -107,10 +111,12 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
         DocCommand::Delete {
             doctype,
             name,
+            version,
             doctypes,
         } => Operation::Delete {
             doctype: find_doctype(&doctypes, &doctype)?,
             name,
+            expected_version: version.expected_version,
         },
     })
 }
@@ -137,11 +143,19 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
         Operation::Update {
             doctype,
             name,
+            expected_version,
             changes,
             actor,
-        } => forgebase_db::update(client, &doctype, &name, &changes, &actor).await?,
-        Operation::Delete { doctype, name } => {
-            return Ok(forgebase_db::delete(client, &doctype, &name).await?);
+        } => {
+            forgebase_db::update(client, &doctype, &name, expected_version, &changes, &actor)
+                .await?
+        }
+        Operation::Delete {
+            doctype,
+            name,
+            expected_version,
+        } => {
+            return Ok(forgebase_db::delete(client, &doctype, &name, expected_version).await?);
         }
     };
     print_document(&stored)

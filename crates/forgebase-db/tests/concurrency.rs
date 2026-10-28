@@ -1,0 +1,292 @@
+//! Optimistic concurrency: `expected_version` on update and delete (see `common`).
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use common::{CUSTOMER, TestDb, registry};
+use forgebase_core::document::Document;
+use forgebase_core::meta::DocType;
+use forgebase_core::value::Value;
+use forgebase_db::{DbError, delete, get, insert, update};
+
+async fn setup() -> (TestDb, DocType) {
+    let db = TestDb::migrated().await;
+    let registry = registry(&[CUSTOMER]);
+    db.sync(&registry).await.expect("sync");
+    let customer = registry.get("customer").expect("customer").clone();
+    (db, customer)
+}
+
+fn customer(email: &str) -> Document {
+    Document {
+        name: None,
+        values: BTreeMap::from([("email".to_owned(), Value::Text(email.to_owned()))]),
+    }
+}
+
+fn points(n: i64) -> BTreeMap<String, Value> {
+    BTreeMap::from([("points".to_owned(), Value::Int(n))])
+}
+
+#[tokio::test]
+async fn update_with_a_stale_version_is_a_conflict_and_changes_nothing() {
+    let (db, customer_type) = setup().await;
+    let client = db.pool.get().await.unwrap();
+    let created = insert(&**client, &customer_type, customer("a@x.y"), "cli")
+        .await
+        .unwrap();
+    let v2 = update(
+        &**client,
+        &customer_type,
+        &created.name,
+        1,
+        &points(1),
+        "cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(v2.version, 2);
+
+    // Reusing the old version fails and reports the current one.
+    let error = update(
+        &**client,
+        &customer_type,
+        &created.name,
+        1,
+        &points(2),
+        "cli",
+    )
+    .await
+    .unwrap_err();
+    let DbError::Conflict {
+        doctype,
+        name,
+        expected,
+        current,
+    } = &error
+    else {
+        panic!("expected Conflict, got {error}");
+    };
+    assert_eq!(
+        (doctype.as_str(), name.as_str(), *expected, *current),
+        ("customer", created.name.as_str(), 1, 2)
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "customer `{}` was changed by someone else: expected version 1, current version 2",
+            created.name
+        )
+    );
+    // A version from the future is a conflict too.
+    let error = update(
+        &**client,
+        &customer_type,
+        &created.name,
+        9,
+        &points(2),
+        "cli",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::Conflict {
+                expected: 9,
+                current: 2,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let unchanged = get(&**client, &customer_type, &created.name)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged, v2);
+}
+
+#[tokio::test]
+async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
+    let (db, customer_type) = setup().await;
+    let client = db.pool.get().await.unwrap();
+    let created = insert(&**client, &customer_type, customer("d@x.y"), "cli")
+        .await
+        .unwrap();
+    update(
+        &**client,
+        &customer_type,
+        &created.name,
+        1,
+        &points(1),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let error = delete(&**client, &customer_type, &created.name, 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::Conflict {
+                expected: 1,
+                current: 2,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(
+        get(&**client, &customer_type, &created.name)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    delete(&**client, &customer_type, &created.name, 2)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_missing_document_is_not_found_not_a_conflict() {
+    let (db, customer_type) = setup().await;
+    let client = db.pool.get().await.unwrap();
+    let error = update(&**client, &customer_type, "nobody", 1, &points(1), "cli")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::NotFound { .. }), "{error}");
+    let error = delete(&**client, &customer_type, "nobody", 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::NotFound { .. }), "{error}");
+}
+
+#[tokio::test]
+async fn a_conflict_inside_a_transaction_does_not_abort_it() {
+    let (db, customer_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    let raw: &mut forgebase_db::Client = &mut client;
+    let tx = raw.transaction().await.unwrap();
+    let created = insert(&tx, &customer_type, customer("t@x.y"), "cli")
+        .await
+        .unwrap();
+    // The failed update is a plain no-row result, so the transaction stays usable.
+    let error = update(&tx, &customer_type, &created.name, 5, &points(1), "cli")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict { .. }), "{error}");
+    update(&tx, &customer_type, &created.name, 1, &points(1), "cli")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_second_writer_waits_then_gets_a_conflict() {
+    let (db, customer_type) = setup().await;
+    let first = db.pool.get().await.unwrap();
+    let second = db.pool.get().await.unwrap();
+    let created = insert(&**first, &customer_type, customer("c@x.y"), "cli")
+        .await
+        .unwrap();
+
+    // The first writer updates inside a transaction and has not committed yet.
+    let mut first = first;
+    let raw: &mut forgebase_db::Client = &mut first;
+    let tx = raw.transaction().await.unwrap();
+    update(&tx, &customer_type, &created.name, 1, &points(1), "one")
+        .await
+        .unwrap();
+
+    // The second writer, holding the same version, blocks on the row lock ...
+    let two = points(2);
+    let late = update(&**second, &customer_type, &created.name, 1, &two, "two");
+    tokio::pin!(late);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut late)
+            .await
+            .is_err(),
+        "the second update should wait for the first transaction"
+    );
+    // ... and once the first commits, the version no longer matches.
+    tx.commit().await.unwrap();
+    let error = late.await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::Conflict {
+                expected: 1,
+                current: 2,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let stored = get(&**second, &customer_type, &created.name)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.version, 2);
+    assert_eq!(stored.modified_by, "one");
+    assert_eq!(stored.values["points"], Value::Int(1));
+}
+
+#[tokio::test]
+async fn racing_updates_with_the_same_version_succeed_exactly_once() {
+    let (db, customer_type) = setup().await;
+    for round in 0..10 {
+        let email = format!("race{round}@x.y");
+        let created = {
+            let client = db.pool.get().await.unwrap();
+            insert(&**client, &customer_type, customer(&email), "cli")
+                .await
+                .unwrap()
+        };
+        let (a, b) = (db.pool.get().await.unwrap(), db.pool.get().await.unwrap());
+        let (one, two) = (points(1), points(2));
+        let (ra, rb) = tokio::join!(
+            update(&**a, &customer_type, &created.name, 1, &one, "a"),
+            update(&**b, &customer_type, &created.name, 1, &two, "b"),
+        );
+        let outcomes = [ra, rb];
+        let ok = outcomes.iter().filter(|r| r.is_ok()).count();
+        let conflicts = outcomes
+            .iter()
+            .filter(|r| matches!(r, Err(DbError::Conflict { current: 2, .. })))
+            .count();
+        assert_eq!((ok, conflicts), (1, 1), "round {round}: {outcomes:?}");
+        let stored = get(&**a, &customer_type, &created.name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.version, 2, "round {round}");
+    }
+}
+
+#[tokio::test]
+async fn racing_delete_and_update_with_the_same_version_succeed_exactly_once() {
+    let (db, customer_type) = setup().await;
+    let created = {
+        let client = db.pool.get().await.unwrap();
+        insert(&**client, &customer_type, customer("dr@x.y"), "cli")
+            .await
+            .unwrap()
+    };
+    let (a, b) = (db.pool.get().await.unwrap(), db.pool.get().await.unwrap());
+    let one = points(1);
+    let (updated, deleted) = tokio::join!(
+        update(&**a, &customer_type, &created.name, 1, &one, "a"),
+        delete(&**b, &customer_type, &created.name, 1),
+    );
+    // Either the update won (the delete then sees version 2) or the delete won (the update then
+    // finds nothing); never both.
+    match (&updated, &deleted) {
+        (Ok(_), Err(DbError::Conflict { current: 2, .. }))
+        | (Err(DbError::NotFound { .. }), Ok(())) => {}
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}

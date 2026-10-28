@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{CUSTOMER, TestDb, registry};
+use common::{CUSTOMER, PERSON, SALES_ORDER, TestDb, registry};
 use forgebase_db::{Conflict, DbError, Step, SyncOptions, Warning, migrate, sync};
 
 #[tokio::test]
@@ -679,4 +679,379 @@ async fn schema_names_needing_quotes_are_handled_by_name() {
             assert_eq!(others[0].get::<_, String>(0), "3", "decoy untouched");
         }
     }
+}
+
+/// The foreign keys of a table as `pg_get_constraintdef` text, sorted.
+async fn foreign_keys(db: &TestDb, table: &str) -> Vec<String> {
+    db.rows(&format!(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+         WHERE conrelid = '{table}'::regclass AND contype = 'f' ORDER BY 1"
+    ))
+    .await
+    .into_iter()
+    .map(|mut r| r.remove(0))
+    .collect()
+}
+
+/// Names of single-column indexes of a table, as `column (unique|plain)`.
+async fn indexed_columns(db: &TestDb, table: &str) -> Vec<String> {
+    db.rows(&format!(
+        "SELECT a.attname::text || CASE WHEN i.indisunique THEN ' (unique)' ELSE ' (plain)' END \
+         FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
+         WHERE i.indrelid = '{table}'::regclass AND i.indnatts = 1 ORDER BY 1"
+    ))
+    .await
+    .into_iter()
+    .map(|mut r| r.remove(0))
+    .collect()
+}
+
+#[tokio::test]
+async fn link_columns_get_a_foreign_key_and_an_index() {
+    let db = TestDb::migrated().await;
+    let report = db.sync(&registry(&[SALES_ORDER, PERSON])).await.unwrap();
+    // Foreign keys come after the keys of every new table; indexes after the foreign keys.
+    let kinds: Vec<&str> = report
+        .steps
+        .iter()
+        .map(|s| match s {
+            Step::CreateTable { .. } => "table",
+            Step::AddKeys { .. } => "keys",
+            Step::AddForeignKeys { .. } => "fks",
+            Step::CreateIndex { .. } => "index",
+            Step::RegisterDocType { .. } => "register",
+            other => panic!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "table", "table", "keys", "keys", "fks", "index", "index", "index", "register",
+            "register"
+        ]
+    );
+    assert_eq!(
+        db.columns("doc_sales_order")
+            .await
+            .into_iter()
+            .filter(|(c, _)| ["customer", "follows", "approver"].contains(&c.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("customer".to_owned(), "uuid/YES".to_owned()),
+            ("follows".to_owned(), "uuid/YES".to_owned()),
+            ("approver".to_owned(), "uuid/YES".to_owned()),
+        ]
+    );
+    assert_eq!(
+        foreign_keys(&db, "doc_sales_order").await,
+        [
+            "FOREIGN KEY (approver) REFERENCES doc_person(id) ON DELETE RESTRICT",
+            "FOREIGN KEY (customer) REFERENCES doc_person(id) ON DELETE RESTRICT",
+            "FOREIGN KEY (follows) REFERENCES doc_sales_order(id) ON DELETE RESTRICT",
+        ]
+    );
+    assert_eq!(
+        indexed_columns(&db, "doc_sales_order").await,
+        [
+            "approver (plain)",
+            "customer (plain)",
+            "follows (plain)",
+            "id (unique)",
+            "name (unique)"
+        ]
+    );
+    assert!(foreign_keys(&db, "doc_person").await.is_empty());
+}
+
+#[tokio::test]
+async fn doctypes_linking_each_other_and_themselves_sync_in_one_run() {
+    let db = TestDb::migrated().await;
+    let a = "name = \"alpha\"\nlabel = \"A\"\n[[fields]]\nname = \"beta\"\ntype = \"link\"\ntarget = \"beta\"\n\
+             [[fields]]\nname = \"me\"\ntype = \"link\"\ntarget = \"alpha\"\n";
+    let b = "name = \"beta\"\nlabel = \"B\"\n[[fields]]\nname = \"alpha\"\ntype = \"link\"\ntarget = \"alpha\"\nunique = true\n";
+    let registry = registry(&[a, b]);
+    db.sync(&registry).await.unwrap();
+    assert_eq!(
+        foreign_keys(&db, "doc_alpha").await,
+        [
+            "FOREIGN KEY (beta) REFERENCES doc_beta(id) ON DELETE RESTRICT",
+            "FOREIGN KEY (me) REFERENCES doc_alpha(id) ON DELETE RESTRICT",
+        ]
+    );
+    assert_eq!(
+        foreign_keys(&db, "doc_beta").await,
+        ["FOREIGN KEY (alpha) REFERENCES doc_alpha(id) ON DELETE RESTRICT"]
+    );
+    // A unique Link field is indexed by its unique constraint only.
+    assert_eq!(
+        indexed_columns(&db, "doc_beta").await,
+        ["alpha (unique)", "id (unique)", "name (unique)"]
+    );
+    let again = db.sync(&registry).await.unwrap();
+    assert!(
+        again.steps.is_empty() && again.warnings.is_empty(),
+        "{again:?}"
+    );
+}
+
+#[tokio::test]
+async fn resync_with_links_is_a_no_op() {
+    let db = TestDb::migrated().await;
+    let registry = registry(&[SALES_ORDER, PERSON]);
+    db.sync(&registry).await.unwrap();
+    let again = db.sync(&registry).await.unwrap();
+    assert!(
+        again.steps.is_empty() && again.warnings.is_empty(),
+        "{again:?}"
+    );
+}
+
+#[tokio::test]
+async fn link_column_added_later_gets_a_foreign_key_and_an_index() {
+    let db = TestDb::migrated().await;
+    let without_link =
+        "name = \"sales_order\"\nlabel = \"S\"\n[[fields]]\nname = \"title\"\ntype = \"data\"\n";
+    db.sync(&registry(&[PERSON, without_link])).await.unwrap();
+    db.exec("INSERT INTO doc_sales_order (id, name, owner, created_at, modified_at, modified_by, version, title) \
+             VALUES (gen_random_uuid(), 'old', 'x', now(), now(), 'x', 1, 't')")
+        .await;
+
+    let with_link = "name = \"sales_order\"\nlabel = \"S\"\n[[fields]]\nname = \"title\"\ntype = \"data\"\n\
+                     [[fields]]\nname = \"customer\"\ntype = \"link\"\ntarget = \"person\"\n";
+    let report = db.sync(&registry(&[PERSON, with_link])).await.unwrap();
+    let sql: Vec<String> = report.steps.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        sql,
+        [
+            "ALTER TABLE \"doc_sales_order\" ADD COLUMN \"customer\" uuid;",
+            "ALTER TABLE \"doc_sales_order\" ADD FOREIGN KEY (\"customer\") REFERENCES \"doc_person\" (\"id\") ON DELETE RESTRICT;",
+            "CREATE INDEX ON \"doc_sales_order\" (\"customer\");",
+        ]
+    );
+    assert_eq!(
+        foreign_keys(&db, "doc_sales_order").await,
+        ["FOREIGN KEY (customer) REFERENCES doc_person(id) ON DELETE RESTRICT"]
+    );
+    assert!(
+        indexed_columns(&db, "doc_sales_order")
+            .await
+            .contains(&"customer (plain)".to_owned())
+    );
+    // The existing row stays (its new link is NULL), and a re-sync changes nothing.
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM doc_sales_order WHERE customer IS NULL")
+            .await[0][0],
+        "1"
+    );
+    let again = db.sync(&registry(&[PERSON, with_link])).await.unwrap();
+    assert!(again.steps.is_empty(), "{again:?}");
+}
+
+async fn synced_with_links() -> TestDb {
+    let db = TestDb::migrated().await;
+    db.sync(&registry(&[SALES_ORDER, PERSON])).await.unwrap();
+    db
+}
+
+fn conflict_texts(error: DbError) -> Vec<String> {
+    match error {
+        DbError::SyncConflicts(conflicts) => conflicts.iter().map(ToString::to_string).collect(),
+        other => panic!("expected conflicts, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn a_dropped_foreign_key_is_a_conflict() {
+    let db = synced_with_links().await;
+    db.exec("ALTER TABLE doc_sales_order DROP CONSTRAINT doc_sales_order_customer_fkey")
+        .await;
+    let error = db
+        .sync(&registry(&[SALES_ORDER, PERSON]))
+        .await
+        .unwrap_err();
+    let texts = conflict_texts(error);
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(
+        texts[0].contains("doc_sales_order.customer is missing")
+            && texts[0].contains("REFERENCES \"doc_person\" (\"id\") ON DELETE RESTRICT"),
+        "{texts:?}"
+    );
+    // Nothing was repaired behind the user's back.
+    assert_eq!(foreign_keys(&db, "doc_sales_order").await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_not_validated_foreign_key_is_a_conflict() {
+    let db = synced_with_links().await;
+    db.exec(
+        "ALTER TABLE doc_sales_order DROP CONSTRAINT doc_sales_order_customer_fkey; \
+         ALTER TABLE doc_sales_order ADD FOREIGN KEY (customer) REFERENCES doc_person (id) \
+         ON DELETE RESTRICT NOT VALID",
+    )
+    .await;
+    let texts = conflict_texts(
+        db.sync(&registry(&[SALES_ORDER, PERSON]))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(
+        texts[0].contains("doc_sales_order.customer") && texts[0].contains("not validated"),
+        "{texts:?}"
+    );
+    // Nothing was applied or repaired.
+    assert_eq!(foreign_keys(&db, "doc_sales_order").await.len(), 3);
+}
+
+#[tokio::test]
+async fn a_cascade_foreign_key_is_a_conflict() {
+    let db = synced_with_links().await;
+    db.exec(
+        "ALTER TABLE doc_sales_order DROP CONSTRAINT doc_sales_order_customer_fkey; \
+         ALTER TABLE doc_sales_order ADD FOREIGN KEY (customer) REFERENCES doc_person (id) ON DELETE CASCADE",
+    )
+    .await;
+    let texts = conflict_texts(
+        db.sync(&registry(&[SALES_ORDER, PERSON]))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].contains("ON DELETE CASCADE"), "{texts:?}");
+    // The default rule (NO ACTION) is not RESTRICT either.
+    db.exec(
+        "ALTER TABLE doc_sales_order DROP CONSTRAINT doc_sales_order_customer_fkey; \
+         ALTER TABLE doc_sales_order ADD FOREIGN KEY (customer) REFERENCES doc_person (id)",
+    )
+    .await;
+    let texts = conflict_texts(
+        db.sync(&registry(&[SALES_ORDER, PERSON]))
+            .await
+            .unwrap_err(),
+    );
+    assert!(texts[0].contains("ON DELETE NO ACTION"), "{texts:?}");
+}
+
+#[tokio::test]
+async fn a_foreign_key_to_the_wrong_table_is_a_conflict() {
+    let db = synced_with_links().await;
+    db.exec(
+        "ALTER TABLE doc_sales_order DROP CONSTRAINT doc_sales_order_customer_fkey; \
+         ALTER TABLE doc_sales_order ADD FOREIGN KEY (customer) REFERENCES doc_sales_order (id) ON DELETE RESTRICT",
+    )
+    .await;
+    let texts = conflict_texts(
+        db.sync(&registry(&[SALES_ORDER, PERSON]))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(
+        texts[0].contains("REFERENCES \"doc_sales_order\" (\"id\")"),
+        "{texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_foreign_key_on_a_column_that_is_not_a_link_is_a_conflict() {
+    let db = synced_with_links().await;
+    // Give a plain text column a foreign key by hand (to a unique text column of another table).
+    let with_extra = SALES_ORDER.replace(
+        "[[fields]]\nname = \"title\"",
+        "[[fields]]\nname = \"extra\"\ntype = \"text\"\n[[fields]]\nname = \"title\"",
+    );
+    // Without a foreign key the extra field is just added.
+    db.sync(&registry(&[&with_extra, PERSON])).await.unwrap();
+    db.exec(
+        "ALTER TABLE doc_person ADD COLUMN ref text UNIQUE; \
+             ALTER TABLE doc_sales_order ADD FOREIGN KEY (extra) REFERENCES doc_person (ref)",
+    )
+    .await;
+    let texts = conflict_texts(
+        db.sync(&registry(&[&with_extra, PERSON]))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(
+        texts[0].contains("doc_sales_order.extra") && texts[0].contains("requires no foreign key"),
+        "{texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_link_index_is_added() {
+    let db = synced_with_links().await;
+    let index = db
+        .rows(
+            "SELECT i.indexrelid::regclass::text FROM pg_index i \
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
+             WHERE i.indrelid = 'doc_sales_order'::regclass AND a.attname = 'customer'",
+        )
+        .await[0][0]
+        .clone();
+    db.exec(&format!("DROP INDEX {index}")).await;
+    let report = db.sync(&registry(&[SALES_ORDER, PERSON])).await.unwrap();
+    assert!(
+        matches!(&report.steps[..], [Step::CreateIndex { column, sql, .. }]
+            if column == "customer" && sql == "CREATE INDEX ON \"doc_sales_order\" (\"customer\")"),
+        "{:?}",
+        report.steps
+    );
+    assert!(
+        indexed_columns(&db, "doc_sales_order")
+            .await
+            .contains(&"customer (plain)".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_link_target_is_refused_before_the_database_is_touched() {
+    let db = TestDb::migrated().await;
+    // `person` is not in the registry.
+    let error = db.sync(&registry(&[SALES_ORDER])).await.unwrap_err();
+    let DbError::InvalidMetadata(errors) = &error else {
+        panic!("expected InvalidMetadata, got {error}");
+    };
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(
+        error
+            .to_string()
+            .contains("doctype `sales_order`: field `customer` links to unknown doctype `person`"),
+        "{error}"
+    );
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM fb_doctype").await[0][0],
+        "0"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_shows_the_foreign_key_sql_and_keeps_nothing() {
+    let db = TestDb::migrated().await;
+    let mut client = db.pool.get().await.unwrap();
+    let options = SyncOptions {
+        dry_run: true,
+        ..SyncOptions::default()
+    };
+    let report = sync(&mut client, &registry(&[SALES_ORDER, PERSON]), &options)
+        .await
+        .unwrap();
+    let text: Vec<String> = report.steps.iter().map(ToString::to_string).collect();
+    assert!(
+        text.contains(
+            &"ALTER TABLE \"doc_sales_order\" ADD FOREIGN KEY (\"customer\") REFERENCES \"doc_person\" (\"id\") ON DELETE RESTRICT, \
+              ADD FOREIGN KEY (\"follows\") REFERENCES \"doc_sales_order\" (\"id\") ON DELETE RESTRICT, \
+              ADD FOREIGN KEY (\"approver\") REFERENCES \"doc_person\" (\"id\") ON DELETE RESTRICT;"
+                .to_owned()
+        ),
+        "{text:#?}"
+    );
+    assert!(text.contains(&"CREATE INDEX ON \"doc_sales_order\" (\"customer\");".to_owned()));
+    drop(client);
+    assert_eq!(
+        db.rows("SELECT coalesce(to_regclass('doc_sales_order')::text, 'none')")
+            .await[0][0],
+        "none"
+    );
 }

@@ -1,7 +1,7 @@
 //! The `forgebase` command-line binary.
 //!
 //! Commands: `migrate` (framework migrations and DocType schema sync) and `doc`
-//! (`insert`, `get`, `update`, `delete` of single documents). The binary is a trusted local
+//! (`insert`, `get`, `update`, `delete` of single documents; `update` and `delete` need `--version`). The binary is a trusted local
 //! tool: it has no authentication or permissions, and `--actor` is only recorded. See
 //! `docs/blueprint/architecture.md` and ADR 0002.
 //!

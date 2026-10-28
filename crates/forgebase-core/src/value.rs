@@ -5,10 +5,11 @@ use time::{Date, OffsetDateTime};
 
 /// A single field value in a [`Document`](crate::document::Document).
 ///
-/// `Select` fields hold their value as [`Value::Text`].
+/// `Select` fields hold their value as [`Value::Text`]; so do Link fields, which hold the
+/// `name` of the target document.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    /// Text, used by Data, Text and Select fields.
+    /// Text, used by Data, Text, Select and Link fields.
     Text(String),
     /// A 64-bit integer (Int fields).
     Int(i64),

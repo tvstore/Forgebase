@@ -3,6 +3,7 @@
 //! | Field type | JSON |
 //! |---|---|
 //! | Data, Text, Select | string |
+//! | Link | string: the `name` of the target document (the database stores its id) |
 //! | Int | integer (a float, or an integer outside the `i64` range, is rejected) |
 //! | Decimal | **string**, for example `"1234.50"` (a JSON number is rejected so no precision is lost to floats); every form `rust_decimal` parses is accepted with its exact value, for example `"1e3"`, `"+12.5"`, `".5"` |
 //! | Check | `true` / `false` |
@@ -93,7 +94,10 @@ fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, Js
     }
     let expected = |what: &str| bad(name, format!("expected {what}, found {}", kind(json)));
     match field_type {
-        FieldType::Data { .. } | FieldType::Text | FieldType::Select { .. } => json
+        FieldType::Data { .. }
+        | FieldType::Text
+        | FieldType::Select { .. }
+        | FieldType::Link { .. } => json
             .as_str()
             .map(|s| Value::Text(s.to_owned()))
             .ok_or_else(|| expected("a string")),
@@ -259,6 +263,10 @@ type = "datetime"
 name = "s"
 type = "select"
 options = ["a", "b"]
+[[fields]]
+name = "l"
+type = "link"
+target = "other"
 "#,
         )
         .expect("valid DocType")
@@ -293,6 +301,25 @@ options = ["a", "b"]
             OffsetDateTime::parse("2024-03-15T03:20:30.5Z", &Rfc3339).unwrap()
         );
         assert_eq!(values["s"], Value::Text("a".into()));
+    }
+
+    #[test]
+    fn links_are_target_names() {
+        let values = one(r#"{"l":"ann@example.com"}"#).unwrap();
+        assert_eq!(values["l"], Value::Text("ann@example.com".into()));
+        assert!(message(r#"{"l":5}"#).contains("expected a string, found a number"));
+        assert_eq!(one(r#"{"l":null}"#).unwrap()["l"], Value::Null);
+        let doc = StoredDocument {
+            id: "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b".parse().unwrap(),
+            name: "n".into(),
+            owner: "o".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            modified_at: OffsetDateTime::UNIX_EPOCH,
+            modified_by: "m".into(),
+            version: 1,
+            values: BTreeMap::from([("l".to_owned(), Value::Text("ann@example.com".into()))]),
+        };
+        assert_eq!(document_to_json(&doc).unwrap()["l"], "ann@example.com");
     }
 
     #[test]

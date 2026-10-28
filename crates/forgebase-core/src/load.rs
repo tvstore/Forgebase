@@ -56,6 +56,7 @@ struct RawField {
     precision: Option<u8>,
     scale: Option<u8>,
     options: Option<Vec<String>>,
+    target: Option<String>,
 }
 
 pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
@@ -112,6 +113,7 @@ fn convert_type(f: &RawField) -> Result<FieldType, Vec<DefinitionError>> {
         "datetime" => (Some(FieldType::Datetime), &[]),
         "decimal" => (None, &["precision", "scale"]),
         "select" => (None, &["options"]),
+        "link" => (None, &["target"]),
         _ => {
             return Err(vec![DefinitionError::UnknownFieldType {
                 field: f.name.clone(),
@@ -126,6 +128,7 @@ fn convert_type(f: &RawField) -> Result<FieldType, Vec<DefinitionError>> {
         ("precision", f.precision.is_some()),
         ("scale", f.scale.is_some()),
         ("options", f.options.is_some()),
+        ("target", f.target.is_some()),
     ];
     for (param, is_present) in present {
         if is_present && !allowed.contains(&param) {
@@ -166,6 +169,19 @@ fn convert_type(f: &RawField) -> Result<FieldType, Vec<DefinitionError>> {
                     field: f.name.clone(),
                     field_type: "select",
                     param: "options",
+                });
+                None
+            }
+        },
+        (None, "link") => match &f.target {
+            Some(target) => Some(FieldType::Link {
+                target: target.clone(),
+            }),
+            None => {
+                errors.push(DefinitionError::MissingParam {
+                    field: f.name.clone(),
+                    field_type: "link",
+                    param: "target",
                 });
                 None
             }
@@ -264,6 +280,56 @@ scale = 2
             let d = from_toml_str(&doc_with_field(&format!("type = \"{t}\""))).unwrap();
             assert_eq!(d.fields[0].field_type.name(), t);
         }
+    }
+
+    #[test]
+    fn parses_link_fields() {
+        let d = from_toml_str(&doc_with_field("type = \"link\"\ntarget = \"customer\"")).unwrap();
+        assert_eq!(
+            d.fields[0].field_type,
+            FieldType::Link {
+                target: "customer".into()
+            }
+        );
+        assert_eq!(d.fields[0].field_type.name(), "link");
+    }
+
+    #[test]
+    fn link_parameter_errors() {
+        assert_eq!(
+            invalid(&doc_with_field("type = \"link\"")),
+            vec![DefinitionError::MissingParam {
+                field: "f".into(),
+                field_type: "link",
+                param: "target",
+            }]
+        );
+        assert_eq!(
+            invalid(&doc_with_field("type = \"int\"\ntarget = \"customer\"")),
+            vec![DefinitionError::UnexpectedParam {
+                field: "f".into(),
+                field_type: "int".into(),
+                param: "target",
+            }]
+        );
+        assert_eq!(
+            invalid(&doc_with_field(
+                "type = \"link\"\ntarget = \"customer\"\nmax_length = 5"
+            )),
+            vec![DefinitionError::UnexpectedParam {
+                field: "f".into(),
+                field_type: "link".into(),
+                param: "max_length",
+            }]
+        );
+        let errors = invalid(&doc_with_field("type = \"link\"\ntarget = \"Bad Target\""));
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [DefinitionError::InvalidLinkTarget { target, .. }] if target == "Bad Target"
+            ),
+            "{errors:?}"
+        );
     }
 
     #[test]

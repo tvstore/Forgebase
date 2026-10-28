@@ -1,6 +1,6 @@
 # Security model
 
-Status: **Proposed** unless stated; of the sections below only identifier and value handling in `forgebase-db` (M1.2, M1.3) and the trust note for the command-line tool are implemented. Authentication, authorization and multi-site isolation are not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
+Status: **Proposed** unless stated; of the sections below only identifier and value handling in `forgebase-db` (M1.2, M1.3, M2.1) and the trust note for the command-line tool are implemented. Authentication, authorization and multi-site isolation are not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
 
 ## Principles
 
@@ -38,6 +38,7 @@ JWT for first-party browser sessions is avoided (revocation complexity).
 - Values are always bound parameters. Generated DDL (schema sync) contains no values at all: only validated, quoted identifiers and numeric type parameters (`varchar(n)`, `numeric(p,s)`) taken from validated metadata; settings such as `lock_timeout` are passed as bound parameters.
 - Identifiers are validated twice: by `forgebase-core` when metadata is loaded, and quoted by `forgebase_db::quote_ident` (doubling any `"`) at every use in generated SQL (implemented in M1.2).
 - Document values and the actor are bound parameters, with an explicit cast per field type; a document write never interpolates a value into SQL. Document names are bound too (implemented in M1.3, tests store injection-like strings literally).
+- Link fields (M2.1): the target `name` is a bound parameter of the lookup (`SELECT "id" FROM "doc_<target>" WHERE "name" = $1::text FOR KEY SHARE`) and the resolved `id` is bound as `uuid`; the target table name comes from validated metadata (`Link { target }` is checked as a DocType name when the definition is loaded) and is quoted. Generated DDL for Link fields (foreign keys, indexes) contains identifiers only. Tests store injection-like names literally. The foreign key (`ON DELETE RESTRICT`) is the integrity guarantee; the `FOR KEY SHARE` lock narrows the race between the lookup and the write. Conflicting versions (`expected_version`) are checked in the `WHERE` clause of the write itself, not in a separate read.
 - Database connections do not use TLS yet (M1.2); connect over a local or private network until rustls support is added.
 - List filters are parsed into a typed AST, never string-concatenated.
 - Reports (later) run with a read-only DB role.
@@ -71,7 +72,8 @@ Not decided; each needs an answer in the M3 plan:
 - CORS policy when cookies are used (CORS middleware is planned in [ADR 0005](../adr/0005-http-stack.md)).
 - `Host` header validation in single-site mode (today it appears only under multi-site).
 - Argon2id parameters (see [dependency-evaluation, open question 9](dependency-evaluation.md#open-questions)).
-- Permission-aware Link name resolution: the API resolves a target `name` to `id` internally, so foreign key or lookup errors must not reveal whether a document the user cannot read exists.
+- Permission-aware Link name resolution: the API resolves a target `name` to `id` internally, so foreign key or lookup errors must not reveal whether a document the user cannot read exists. M2.1 resolves names without any permission check (the command-line tool is trusted); its `LinkNotFound` and `LinkedDocumentExists` errors confirm that a document does or does not exist, and the referencing DocType is named. M3 must decide what an unprivileged caller may learn from them.
+- Link lookups take `FOR KEY SHARE` on the target row, which PostgreSQL allows only to a role with `UPDATE` privilege on the target table. A read-only database role (planned for M3) therefore cannot write documents that have Link fields unless it also gets that privilege or the lookup changes.
 
 ## Required negative tests
 
