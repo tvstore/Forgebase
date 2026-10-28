@@ -2,7 +2,7 @@
 //!
 //! Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestone M1.2):
+//! Implemented so far (milestones M1.2 and M1.3):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -10,20 +10,25 @@
 //! - [`sync`]: additive DocType schema sync with dry-run, conflict refusal and `lock_timeout`.
 //! - [`migrate`]: both of the above in order.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
+//! - [`insert`], [`get`], [`update`], [`delete`]: one document at a time, on a pooled client or a
+//!   caller-owned [`Transaction`]. No permissions, no concurrency check and no renames yet.
 
+mod document;
 mod error;
 mod ident;
 mod migrate;
 mod plan;
 mod sync;
+mod value;
 
 pub use deadpool_postgres::Pool;
+pub use document::{StoredDocument, delete, get, insert, update};
 pub use error::DbError;
 pub use ident::quote_ident;
 pub use migrate::{MIGRATIONS, Migration, migrate_framework};
 pub use plan::{Conflict, Step, Warning};
 pub use sync::{SyncOptions, SyncReport, sync};
-pub use tokio_postgres::Client;
+pub use tokio_postgres::{Client, GenericClient, Transaction};
 
 use deadpool_postgres::Runtime;
 use forgebase_core::meta::Registry;

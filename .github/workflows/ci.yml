@@ -23,7 +23,7 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # forgebase-db integration tests need PostgreSQL (they create and drop fb_test_* databases).
+    # The forgebase-db and forgebase-cli integration tests need PostgreSQL (they create and drop fb_test_* databases).
     services:
       postgres:
         image: postgres:16
