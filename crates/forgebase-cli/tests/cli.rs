@@ -14,6 +14,10 @@ use serde_json::Value as Json;
 const ENV_VAR: &str = "FORGEBASE_TEST_DATABASE_URL";
 const DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/doctypes");
 
+/// Removes `customer` and the example DocTypes that depend on it, as if they had never been synced.
+const DROP_CUSTOMER: &str = "DROP TABLE doc_sales_order_item, doc_sales_order, doc_customer; \
+     DELETE FROM fb_doctype WHERE name IN ('customer', 'sales_order', 'sales_order_item')";
+
 fn admin_url() -> String {
     match std::env::var(ENV_VAR) {
         Ok(url) if !url.is_empty() => url,
@@ -250,7 +254,7 @@ fn dry_run_creates_nothing() {
     // After the framework migrations, a dry run shows the CREATE TABLE and still changes nothing.
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
-    db.exec("DROP TABLE doc_customer; DELETE FROM fb_doctype WHERE name = 'customer'");
+    db.exec(DROP_CUSTOMER);
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
@@ -286,7 +290,8 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     assert_eq!(
         db.scalar("SELECT count(*)::text FROM pg_constraint WHERE contype = 'f'")
             .as_deref(),
-        Some("1")
+        // customer -> customer_group, sales_order -> customer, sales_order_item -> sales_order
+        Some("3")
     );
 
     let second = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
@@ -565,9 +570,9 @@ fn schema_conflicts_exit_1_and_change_nothing() {
         code(&db.forgebase(&["migrate", "--doctypes", DOCTYPES])),
         Some(0)
     );
-    db.exec(
-        "DROP TABLE doc_customer; DELETE FROM fb_doctype WHERE name = 'customer'; CREATE TABLE doc_customer (x integer)",
-    );
+    db.exec(&format!(
+        "{DROP_CUSTOMER}; CREATE TABLE doc_customer (x integer)"
+    ));
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(1));
     assert!(stdout(&output).is_empty());
@@ -749,5 +754,167 @@ fn unknown_link_targets_are_reported_with_the_file() {
     assert!(
         message.contains("field `customer` links to unknown doctype `customer`"),
         "{message}"
+    );
+}
+
+#[test]
+fn child_tables_end_to_end() {
+    let db = TestDb::new();
+    let migrate = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrate), Some(0), "{}", stderr(&migrate));
+    assert!(
+        stdout(&migrate).contains("CREATE TABLE \"doc_sales_order_item\""),
+        "{}",
+        stdout(&migrate)
+    );
+    let run = |args: &[&str]| {
+        let mut full = args.to_vec();
+        full.extend_from_slice(&["--doctypes", DOCTYPES]);
+        db.forgebase(&full)
+    };
+    let customer = run(&[
+        "doc",
+        "insert",
+        "customer",
+        "--data",
+        r#"{"email":"c@example.com","full_name":"C"}"#,
+    ]);
+    assert_eq!(code(&customer), Some(0), "{}", stderr(&customer));
+
+    // Insert with rows: the output has the rows in order, with their fields.
+    let data = r#"{"customer":"c@example.com","order_date":"2026-10-28","items":[
+        {"description":"Widget","qty":2,"rate":"9.50"},
+        {"description":"Gadget","qty":1}]}"#;
+    let inserted = run(&["doc", "insert", "sales_order", "--data", data]);
+    assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+    let order = json(&inserted);
+    let name = order["name"].as_str().expect("name").to_owned();
+    assert_eq!(order["version"], 1);
+    assert_eq!(order["customer"], "c@example.com");
+    assert!(order.get("items").is_some_and(Json::is_array));
+    assert_eq!(
+        order["items"],
+        serde_json::json!([
+            {"description": "Widget", "qty": 2, "rate": "9.50"},
+            {"description": "Gadget", "qty": 1, "rate": null},
+        ])
+    );
+    let fetched = json(&run(&["doc", "get", "sales_order", &name]));
+    assert_eq!(fetched, order);
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM doc_sales_order_item")
+            .as_deref(),
+        Some("2")
+    );
+
+    // An update that leaves `items` out keeps the rows; one that has it replaces them all.
+    let kept = run(&[
+        "doc",
+        "update",
+        "sales_order",
+        &name,
+        "--version",
+        "1",
+        "--data",
+        r#"{"order_date":"2026-10-29"}"#,
+    ]);
+    assert_eq!(code(&kept), Some(0), "{}", stderr(&kept));
+    assert_eq!(json(&kept)["items"], order["items"]);
+    let replaced = run(&[
+        "doc",
+        "update",
+        "sales_order",
+        &name,
+        "--version",
+        "2",
+        "--data",
+        r#"{"items":[{"description":"Only","qty":5}]}"#,
+    ]);
+    assert_eq!(code(&replaced), Some(0), "{}", stderr(&replaced));
+    let replaced = json(&replaced);
+    assert_eq!(replaced["version"], 3);
+    assert_eq!(
+        replaced["items"],
+        serde_json::json!([{"description": "Only", "qty": 5, "rate": null}])
+    );
+
+    // The table is required: no rows is refused, and nothing changed.
+    let empty = run(&[
+        "doc",
+        "update",
+        "sales_order",
+        &name,
+        "--version",
+        "3",
+        "--data",
+        r#"{"items":[]}"#,
+    ]);
+    assert_eq!(code(&empty), Some(1));
+    assert_eq!(
+        stderr(&empty),
+        "error: validation failed:\n  - field `items` is required\n"
+    );
+
+    // Row problems are listed with the row position, one per line; nothing is written.
+    let bad = run(&[
+        "doc",
+        "insert",
+        "sales_order",
+        "--data",
+        r#"{"customer":"c@example.com","items":[{"description":"ok","qty":1},{"qty":1},{"description":"x","qty":2,"nope":1}]}"#,
+    ]);
+    assert_eq!(code(&bad), Some(1));
+    assert_eq!(
+        stderr(&bad),
+        "error: validation failed:\n  - field `items` row 2: field `description` is required\n  - field `items` row 3: unknown field `nope`\n"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM doc_sales_order")
+            .as_deref(),
+        Some("1")
+    );
+
+    // Wrong JSON shapes fail before the database is used.
+    for (data, expected) in [
+        (
+            r#"{"items":"x"}"#,
+            "error: field `items`: expected an array of rows, found a string\n",
+        ),
+        (
+            r#"{"items":[1]}"#,
+            "error: field `items`: row 1: expected an object, found a number\n",
+        ),
+        (
+            r#"{"items":[{"qty":"two"}]}"#,
+            "error: field `items`: row 1: field `qty`: expected an integer, found a string\n",
+        ),
+    ] {
+        let output = run(&["doc", "insert", "sales_order", "--data", data]);
+        assert_eq!(code(&output), Some(1), "{data}");
+        assert_eq!(stderr(&output), expected, "{data}");
+    }
+
+    // A child DocType has no commands of its own.
+    let child = run(&[
+        "doc",
+        "insert",
+        "sales_order_item",
+        "--data",
+        r#"{"description":"x","qty":1}"#,
+    ]);
+    assert_eq!(code(&child), Some(1));
+    assert!(
+        stderr(&child).starts_with("error: DocType `sales_order_item` is a child DocType"),
+        "{}",
+        stderr(&child)
+    );
+
+    // Deleting the order deletes its rows.
+    let deleted = run(&["doc", "delete", "sales_order", &name, "--version", "3"]);
+    assert_eq!(code(&deleted), Some(0), "{}", stderr(&deleted));
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM doc_sales_order_item")
+            .as_deref(),
+        Some("0")
     );
 }

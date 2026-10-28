@@ -36,6 +36,7 @@ fn fixture_loads() {
 #[test]
 fn fixture_validates_documents() {
     let d = customer();
+    let registry = Registry::new();
     let mut doc = Document::default();
     doc.values
         .insert("email".into(), Value::Text("a@example.com".into()));
@@ -54,13 +55,13 @@ fn fixture_validates_documents() {
         Value::Datetime(OffsetDateTime::UNIX_EPOCH),
     );
     doc.values.insert("tier".into(), Value::Text("gold".into()));
-    assert_eq!(validate(&d, &doc), Ok(()));
+    assert_eq!(validate(&registry, &d, &doc), Ok(()));
 
     doc.values
         .insert("tier".into(), Value::Text("platinum".into()));
     doc.values.remove("email");
     assert_eq!(
-        validate(&d, &doc),
+        validate(&registry, &d, &doc),
         Err(vec![
             ValidationError::Required {
                 field: "email".into()

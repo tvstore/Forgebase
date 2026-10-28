@@ -6,18 +6,25 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{PERSON, SALES_ORDER, TestDb, registry};
-use forgebase_core::document::{Document, ValidationError};
-use forgebase_core::meta::DocType;
+use forgebase_core::document::{Changes, Document, ValidationError};
+use forgebase_core::meta::{DocType, Registry};
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, delete, get, insert, update};
 
-async fn setup() -> (TestDb, DocType, DocType) {
+async fn setup() -> (TestDb, Registry, DocType, DocType) {
     let db = TestDb::migrated().await;
     let registry = registry(&[PERSON, SALES_ORDER]);
     db.sync(&registry).await.expect("sync");
     let person = registry.get("person").expect("person").clone();
     let order = registry.get("sales_order").expect("order").clone();
-    (db, person, order)
+    (db, registry, person, order)
+}
+
+fn values_of<const N: usize>(pairs: [(String, Value); N]) -> Changes {
+    Changes {
+        values: BTreeMap::from(pairs),
+        tables: BTreeMap::new(),
+    }
 }
 
 fn text(s: &str) -> Value {
@@ -31,6 +38,7 @@ fn doc(values: &[(&str, Value)]) -> Document {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), v.clone()))
             .collect(),
+        tables: BTreeMap::new(),
     }
 }
 
@@ -55,17 +63,30 @@ async fn count(db: &TestDb, table: &str) -> i64 {
 
 #[tokio::test]
 async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
-    let ann = insert(&**client, &person_type, person("ann@x.y"), "cli")
-        .await
-        .unwrap();
-    insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    let ann = insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("ann@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
     let created = insert(
-        &**client,
-        &order_type,
+        &mut **client,
+        &reg,
+        &order_type.name,
         order(&[("customer", "ann@x.y"), ("title", "T")]),
         "cli",
     )
@@ -75,7 +96,7 @@ async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
     assert_eq!(created.values["approver"], text("boss@x.y"));
     assert_eq!(created.values["follows"], Value::Null);
 
-    let fetched = get(&**client, &order_type, &created.name)
+    let fetched = get(&mut **client, &reg, &order_type.name, &created.name)
         .await
         .unwrap()
         .unwrap();
@@ -93,15 +114,22 @@ async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
 
 #[tokio::test]
 async fn missing_target_is_a_validation_error_and_nothing_is_written() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
-    insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
 
     let error = insert(
-        &**client,
-        &order_type,
+        &mut **client,
+        &reg,
+        &order_type.name,
         order(&[("customer", "nobody@x.y")]),
         "cli",
     )
@@ -131,7 +159,7 @@ async fn missing_target_is_a_validation_error_and_nothing_is_written() {
         ("bogus", Value::Int(1)),
     ]);
     bad.values.insert("approver".into(), text("missing@x.y"));
-    let error = insert(&**client, &order_type, bad, "cli")
+    let error = insert(&mut **client, &reg, &order_type.name, bad, "cli")
         .await
         .unwrap_err();
     let DbError::Validation(errors) = &error else {
@@ -148,15 +176,22 @@ async fn missing_target_is_a_validation_error_and_nothing_is_written() {
 
 #[tokio::test]
 async fn values_that_failed_validation_are_not_looked_up() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
-    insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
     // NUL cannot be sent to PostgreSQL; the validation error is reported and no query is made.
     let error = insert(
-        &**client,
-        &order_type,
+        &mut **client,
+        &reg,
+        &order_type.name,
         order(&[("customer", "a\0b")]),
         "cli",
     )
@@ -169,8 +204,9 @@ async fn values_that_failed_validation_are_not_looked_up() {
     );
     // A blank required link is "required", not "not found".
     let error = insert(
-        &**client,
-        &order_type,
+        &mut **client,
+        &reg,
+        &order_type.name,
         doc(&[("approver", text("  "))]),
         "cli",
     )
@@ -182,30 +218,44 @@ async fn values_that_failed_validation_are_not_looked_up() {
         "{error}"
     );
     // A required link may not be missing, null or cleared.
-    let error = insert(&**client, &order_type, doc(&[]), "cli")
+    let error = insert(&mut **client, &reg, &order_type.name, doc(&[]), "cli")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
-    let created = insert(&**client, &order_type, order(&[]), "cli")
+    let created = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
         .await
         .unwrap();
-    let changes = BTreeMap::from([("approver".to_owned(), Value::Null)]);
-    let error = update(&**client, &order_type, &created.name, 1, &changes, "cli")
-        .await
-        .unwrap_err();
+    let changes = values_of([("approver".to_owned(), Value::Null)]);
+    let error = update(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        1,
+        &changes,
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
 }
 
 #[tokio::test]
 async fn optional_links_may_be_null_or_absent() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
-    insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
     let mut with_null = order(&[]);
     with_null.values.insert("customer".into(), Value::Null);
-    let created = insert(&**client, &order_type, with_null, "cli")
+    let created = insert(&mut **client, &reg, &order_type.name, with_null, "cli")
         .await
         .unwrap();
     assert_eq!(created.values["customer"], Value::Null);
@@ -219,65 +269,97 @@ async fn optional_links_may_be_null_or_absent() {
 
 #[tokio::test]
 async fn updating_links_resolves_and_validates_names() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
     for email in ["boss@x.y", "ann@x.y", "bob@x.y"] {
-        insert(&**client, &person_type, person(email), "cli")
+        insert(&mut **client, &reg, &person_type.name, person(email), "cli")
             .await
             .unwrap();
     }
     let created = insert(
-        &**client,
-        &order_type,
+        &mut **client,
+        &reg,
+        &order_type.name,
         order(&[("customer", "ann@x.y")]),
         "cli",
     )
     .await
     .unwrap();
 
-    let to_bob = BTreeMap::from([("customer".to_owned(), text("bob@x.y"))]);
-    let updated = update(&**client, &order_type, &created.name, 1, &to_bob, "cli")
-        .await
-        .unwrap();
+    let to_bob = values_of([("customer".to_owned(), text("bob@x.y"))]);
+    let updated = update(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        1,
+        &to_bob,
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(updated.version, 2);
     assert_eq!(updated.values["customer"], text("bob@x.y"));
 
-    let missing = BTreeMap::from([("customer".to_owned(), text("nobody@x.y"))]);
-    let error = update(&**client, &order_type, &created.name, 2, &missing, "cli")
-        .await
-        .unwrap_err();
+    let missing = values_of([("customer".to_owned(), text("nobody@x.y"))]);
+    let error = update(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        2,
+        &missing,
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(&error, DbError::Validation(e)
             if matches!(e.as_slice(), [ValidationError::LinkNotFound { .. }])),
         "{error}"
     );
-    let unchanged = get(&**client, &order_type, &created.name)
+    let unchanged = get(&mut **client, &reg, &order_type.name, &created.name)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(unchanged, updated);
 
-    let cleared = BTreeMap::from([("customer".to_owned(), Value::Null)]);
-    let updated = update(&**client, &order_type, &created.name, 2, &cleared, "cli")
-        .await
-        .unwrap();
+    let cleared = values_of([("customer".to_owned(), Value::Null)]);
+    let updated = update(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        2,
+        &cleared,
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(updated.values["customer"], Value::Null);
     assert_eq!(updated.version, 3);
 }
 
 #[tokio::test]
 async fn self_links_work() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
-    insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
-    let first = insert(&**client, &order_type, order(&[]), "cli")
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let first = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
         .await
         .unwrap();
     let second = insert(
-        &**client,
-        &order_type,
+        &mut **client,
+        &reg,
+        &order_type.name,
         order(&[("follows", &first.name)]),
         "cli",
     )
@@ -285,25 +367,39 @@ async fn self_links_work() {
     .unwrap();
     assert_eq!(second.values["follows"], text(&first.name));
     // An update may point a document at itself.
-    let changes = BTreeMap::from([("follows".to_owned(), text(&first.name))]);
-    let updated = update(&**client, &order_type, &first.name, 1, &changes, "cli")
-        .await
-        .unwrap();
+    let changes = values_of([("follows".to_owned(), text(&first.name))]);
+    let updated = update(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &first.name,
+        1,
+        &changes,
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(updated.values["follows"], text(&first.name));
 }
 
 #[tokio::test]
 async fn deleting_a_linked_document_names_the_linking_doctype() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
-    let boss = insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
-    let created = insert(&**client, &order_type, order(&[]), "cli")
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    let boss = insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let created = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
         .await
         .unwrap();
 
-    let error = delete(&**client, &person_type, &boss.name, 1)
+    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 1)
         .await
         .unwrap_err();
     let DbError::LinkedDocumentExists {
@@ -325,37 +421,46 @@ async fn deleting_a_linked_document_names_the_linking_doctype() {
     assert_eq!(count(&db, "doc_person").await, 1);
 
     // A stale version is reported as a conflict before anything is attempted.
-    let error = delete(&**client, &person_type, &boss.name, 7)
+    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 7)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Conflict { .. }), "{error}");
 
     // Deleting the linking document first releases the target.
-    delete(&**client, &order_type, &created.name, 1)
+    delete(&mut **client, &reg, &order_type.name, &created.name, 1)
         .await
         .unwrap();
-    delete(&**client, &person_type, &boss.name, 1)
+    delete(&mut **client, &reg, &person_type.name, &boss.name, 1)
         .await
         .unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
 }
 
 #[tokio::test]
-async fn a_linked_delete_in_a_transaction_aborts_it_and_rolls_back_cleanly() {
-    let (db, person_type, order_type) = setup().await;
+async fn a_linked_delete_in_a_transaction_fails_cleanly_and_leaves_it_usable() {
+    let (db, reg, person_type, order_type) = setup().await;
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
-    let tx = raw.transaction().await.unwrap();
-    insert(&tx, &person_type, person("boss@x.y"), "cli")
+    let mut tx = raw.transaction().await.unwrap();
+    insert(&mut tx, &reg, &person_type.name, person("boss@x.y"), "cli")
         .await
         .unwrap();
     // A target inserted earlier in the same transaction can be linked.
-    insert(&tx, &order_type, order(&[]), "cli").await.unwrap();
-    let error = delete(&tx, &person_type, "boss@x.y", 1).await.unwrap_err();
+    insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
+        .await
+        .unwrap();
+    let error = delete(&mut tx, &reg, &person_type.name, "boss@x.y", 1)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&error, DbError::LinkedDocumentExists { referenced_by: Some(t), .. } if t == "sales_order"),
         "{error}"
     );
+    // The failed delete ran in a savepoint: the transaction is not aborted and still has its work.
+    let boss = get(&mut tx, &reg, &person_type.name, "boss@x.y")
+        .await
+        .unwrap();
+    assert!(boss.is_some());
     tx.rollback().await.unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
     assert_eq!(count(&db, "doc_sales_order").await, 0);
@@ -363,19 +468,21 @@ async fn a_linked_delete_in_a_transaction_aborts_it_and_rolls_back_cleanly() {
 
 #[tokio::test]
 async fn a_link_inside_a_rolled_back_transaction_leaves_nothing() {
-    let (db, person_type, order_type) = setup().await;
+    let (db, reg, person_type, order_type) = setup().await;
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
-    let tx = raw.transaction().await.unwrap();
-    insert(&tx, &person_type, person("boss@x.y"), "cli")
+    let mut tx = raw.transaction().await.unwrap();
+    insert(&mut tx, &reg, &person_type.name, person("boss@x.y"), "cli")
         .await
         .unwrap();
-    insert(&tx, &order_type, order(&[]), "cli").await.unwrap();
+    insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
+        .await
+        .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
     assert_eq!(count(&db, "doc_sales_order").await, 0);
     // The target no longer exists, so linking to it fails.
-    let error = insert(&**client, &order_type, order(&[]), "cli")
+    let error = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
@@ -383,23 +490,41 @@ async fn a_link_inside_a_rolled_back_transaction_leaves_nothing() {
 
 #[tokio::test]
 async fn hostile_names_are_data_not_sql() {
-    let (db, person_type, order_type) = setup().await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, person_type, order_type) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
     let nasty = "x'); DROP TABLE doc_person; --";
-    insert(&**client, &person_type, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
-    let error = insert(&**client, &order_type, order(&[("customer", nasty)]), "cli")
-        .await
-        .unwrap_err();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        order(&[("customer", nasty)]),
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
     // The same string works as the name of a real target.
-    insert(&**client, &person_type, person(nasty), "cli")
+    insert(&mut **client, &reg, &person_type.name, person(nasty), "cli")
         .await
         .unwrap();
-    let created = insert(&**client, &order_type, order(&[("customer", nasty)]), "cli")
-        .await
-        .unwrap();
+    let created = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        order(&[("customer", nasty)]),
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(created.values["customer"], text(nasty));
     assert_eq!(count(&db, "doc_person").await, 2);
 }
@@ -413,11 +538,19 @@ async fn link_target_with_random_naming_is_addressed_by_its_generated_name() {
     ]);
     db.sync(&registry).await.unwrap();
     let (note, tag) = (registry.get("note").unwrap(), registry.get("tag").unwrap());
-    let client = db.pool.get().await.unwrap();
-    let n = insert(&**client, note, doc(&[]), "cli").await.unwrap();
-    let t = insert(&**client, tag, doc(&[("note", text(&n.name))]), "cli")
+    let mut client = db.pool.get().await.unwrap();
+    let n = insert(&mut **client, &registry, &note.name, doc(&[]), "cli")
         .await
         .unwrap();
+    let t = insert(
+        &mut **client,
+        &registry,
+        &tag.name,
+        doc(&[("note", text(&n.name))]),
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(t.values["note"], text(&n.name));
 }
 
@@ -440,21 +573,29 @@ async fn a_duplicate_unique_link_names_the_field_not_the_internal_id() {
         registry.get("person").unwrap().clone(),
         registry.get("badge").unwrap().clone(),
     );
-    let client = db.pool.get().await.unwrap();
-    let ann = insert(&**client, &person_type, person("ann@x.y"), "cli")
-        .await
-        .unwrap();
+    let mut client = db.pool.get().await.unwrap();
+    let ann = insert(
+        &mut **client,
+        &registry,
+        &person_type.name,
+        person("ann@x.y"),
+        "cli",
+    )
+    .await
+    .unwrap();
     insert(
-        &**client,
-        &badge,
+        &mut **client,
+        &registry,
+        &badge.name,
         doc(&[("holder", text(&ann.name))]),
         "cli",
     )
     .await
     .unwrap();
     let error = insert(
-        &**client,
-        &badge,
+        &mut **client,
+        &registry,
+        &badge.name,
         doc(&[("holder", text(&ann.name))]),
         "cli",
     )
@@ -475,15 +616,21 @@ async fn a_duplicate_unique_link_names_the_field_not_the_internal_id() {
 
 #[tokio::test]
 async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_ends() {
-    let (db, person_type, order_type) = setup().await;
+    let (db, reg, person_type, order_type) = setup().await;
     let boss = {
-        let client = db.pool.get().await.unwrap();
-        insert(&**client, &person_type, person("boss@x.y"), "cli")
-            .await
-            .unwrap()
+        let mut client = db.pool.get().await.unwrap();
+        insert(
+            &mut **client,
+            &reg,
+            &person_type.name,
+            person("boss@x.y"),
+            "cli",
+        )
+        .await
+        .unwrap()
     };
     let mut first = db.pool.get().await.unwrap();
-    let second = db.pool.get().await.unwrap();
+    let mut second = db.pool.get().await.unwrap();
     second
         .batch_execute("SET lock_timeout = '300ms'")
         .await
@@ -491,11 +638,13 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
 
     // The first transaction links to the boss: the lookup holds FOR KEY SHARE on the row.
     let raw: &mut forgebase_db::Client = &mut first;
-    let tx = raw.transaction().await.unwrap();
-    insert(&tx, &order_type, order(&[]), "cli").await.unwrap();
+    let mut tx = raw.transaction().await.unwrap();
+    insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
+        .await
+        .unwrap();
 
     // A concurrent delete of the target waits and then times out.
-    let error = delete(&**second, &person_type, &boss.name, 1)
+    let error = delete(&mut **second, &reg, &person_type.name, &boss.name, 1)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::LockTimeout), "{error}");
@@ -505,7 +654,7 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
     tx.rollback().await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(5),
-        delete(&**second, &person_type, &boss.name, 1),
+        delete(&mut **second, &reg, &person_type.name, &boss.name, 1),
     )
     .await
     .expect("delete should no longer wait")

@@ -16,8 +16,9 @@ use forgebase_core::meta::{DefinitionError, DocType, Registry};
 ///
 /// Every problem is reported, each prefixed with its file name: unreadable files, invalid
 /// definitions and duplicate DocType names. When every file loaded, Link targets are checked
-/// ([`Registry::check_references`]): a Link to a DocType that no file defines is reported with
-/// the file of the DocType that has the Link field.
+/// ([`Registry::check_references`]): a Link to a DocType that no file defines, a Table field whose
+/// target is missing or not a child, a child used by no (or several) Table fields, and so on, are
+/// reported with the file of the DocType they are about.
 pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
     let entries = fs::read_dir(dir).map_err(|e| {
         vec![format!(
@@ -90,7 +91,12 @@ pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
     {
         for error in errors {
             let file = match &error {
-                DefinitionError::UnknownLinkTarget { doctype, .. } => defined_in.get(doctype),
+                DefinitionError::UnknownLinkTarget { doctype, .. }
+                | DefinitionError::LinkToChild { doctype, .. }
+                | DefinitionError::UnknownTableTarget { doctype, .. }
+                | DefinitionError::TableTargetNotChild { doctype, .. }
+                | DefinitionError::UnusedChild { doctype } => defined_in.get(doctype),
+                DefinitionError::ChildSharedByTables { child, .. } => defined_in.get(child),
                 _ => None,
             };
             problems.push(match file {
@@ -215,6 +221,56 @@ mod tests {
         let problems = load_dir(&dir).unwrap_err();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("d.toml"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn child_table_problems_name_the_file() {
+        let dir = scratch("children");
+        let parent = |name: &str, target: &str| {
+            format!(
+                "name = \"{name}\"\nlabel = \"P\"\n[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"{target}\"\n"
+            )
+        };
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\n";
+        fs::write(dir.join("p.toml"), parent("p", "row")).unwrap();
+        fs::write(dir.join("row.toml"), child).unwrap();
+        assert_eq!(load_dir(&dir).unwrap().len(), 2);
+
+        // Used twice: reported once, with the child's file.
+        fs::write(dir.join("q.toml"), parent("q", "row")).unwrap();
+        let problems = load_dir(&dir).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("row.toml")
+                && problems[0].contains("used by more than one table field: p.rows, q.rows"),
+            "{problems:?}"
+        );
+
+        // Unknown target and a target that is not a child, each with the parent's file.
+        fs::remove_file(dir.join("q.toml")).unwrap();
+        fs::write(dir.join("p.toml"), parent("p", "nowhere")).unwrap();
+        let problems = load_dir(&dir).unwrap_err();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("p.toml") && p.contains("unknown doctype `nowhere`")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("row.toml") && p.contains("not used by any table field"))
+        );
+        fs::write(dir.join("p.toml"), parent("p", "p")).unwrap();
+        let problems = load_dir(&dir).unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("p.toml") && p.contains("not a child doctype")),
+            "{problems:?}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

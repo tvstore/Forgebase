@@ -1,0 +1,20 @@
+# Example DocType used by the README quick start; it has a child table. Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+name = "sales_order"
+label = "Sales Order"
+
+[[fields]]
+name = "customer"
+type = "link"
+target = "customer"
+required = true
+
+[[fields]]
+name = "order_date"
+type = "date"
+
+[[fields]]
+name = "items"
+label = "Items"
+type = "table"
+target = "sales_order_item"
+required = true

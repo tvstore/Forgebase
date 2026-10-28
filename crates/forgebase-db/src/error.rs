@@ -60,10 +60,34 @@ pub enum DbError {
     #[error("schema sync refused, {} conflict(s): {}", .0.len(), join(.0))]
     SyncConflicts(Vec<Conflict>),
     /// The DocTypes as a whole are inconsistent, for example a Link field names a DocType that
-    /// is not in the registry ([`forgebase_core::meta::Registry::check_references`]). Nothing
-    /// was changed.
+    /// is not in the registry, or a child DocType is used by no (or several) Table fields
+    /// ([`forgebase_core::meta::Registry::check_references`]). Nothing was changed.
     #[error("invalid DocType metadata: {}", join(.0))]
     InvalidMetadata(Vec<DefinitionError>),
+    /// The DocType name is not in the registry.
+    #[error("unknown DocType `{name}`")]
+    UnknownDocType {
+        /// The name that was asked for.
+        name: String,
+    },
+    /// Insert, get, update or delete was called with a child DocType: its rows are read and
+    /// written through the Table field of its parent's documents only.
+    #[error(
+        "DocType `{doctype}` is a child DocType: its rows belong to a parent document and are read and written through the parent"
+    )]
+    ChildDocType {
+        /// The child DocType name.
+        doctype: String,
+    },
+    /// The rows of a document changed several times while it was being read, so no consistent
+    /// copy could be read. Retry.
+    #[error("{doctype} `{name}` was changed while it was being read; retry")]
+    ChangedWhileReading {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+    },
     /// The document or the changes break the DocType's rules; every problem is listed.
     #[error("validation failed: {}", join(.0))]
     Validation(Vec<ValidationError>),
@@ -187,8 +211,8 @@ impl DbError {
     /// 23503, a Link still points at the document) becomes [`DbError::LinkedDocumentExists`].
     ///
     /// The referencing DocType comes from the table the server names in the error (the table of
-    /// the violated foreign key, `doc_<doctype>`), so no further query is needed; that matters
-    /// inside a caller's transaction, which a failed statement leaves aborted.
+    /// the violated foreign key, `doc_<doctype>`), so no further query is needed. The caller maps
+    /// a child table to the DocType that owns it.
     pub(crate) fn from_delete(error: tokio_postgres::Error, doctype: &str, name: &str) -> Self {
         if error.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) {
             let referenced_by = error
