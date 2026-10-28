@@ -9,3 +9,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Workspace skeleton (4 crates), CI, toolchain pin, cargo-deny config, contribution docs.
+- Toolchain pinned to 1.99.1; MSRV (`rust-version`) 1.97.

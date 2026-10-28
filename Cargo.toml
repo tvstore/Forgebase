@@ -17,4 +17,3 @@ unsafe_code = "forbid"
 forgebase-core = { path = "crates/forgebase-core" }
 forgebase-db = { path = "crates/forgebase-db" }
 forgebase-http = { path = "crates/forgebase-http" }
-forgebase-cli = { path = "crates/forgebase-cli" }

@@ -27,6 +27,4 @@ Adding a dependency needs the justification described in [maintenance-policy](do
 
 ## Commits and PRs
 
-- Commit messages and technical docs are in English; keep commits small and focused.
-- Do not push to `main` directly; open a PR.
-- Update docs and `CHANGELOG.md` in the same PR as the behavior change.
+Keep commits small and focused. Update docs and `CHANGELOG.md` in the same PR as the behavior change.
