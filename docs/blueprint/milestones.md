@@ -14,6 +14,7 @@ All milestones are **Proposed**. There are no dates. **Each milestone needs its 
 
 ## M0 Foundations
 
+- **Status:** In progress.
 - **Scope:** workspace skeleton with 4 empty crates; CI (fmt, `clippy -D warnings`, test, build, cargo-deny); toolchain pin; contribution docs.
 - **Exit criteria:** green CI on the empty skeleton.
 - **Non-goals:** any feature code; database access; frontend.

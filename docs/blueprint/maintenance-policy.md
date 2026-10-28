@@ -4,9 +4,11 @@ Status: **Proposed** (awaiting owner acceptance). Workflow, approval gates, git 
 
 ## Toolchain and MSRV
 
-- Pin the toolchain in `rust-toolchain.toml`.
-- MSRV = pinned stable minus a small window; raise it deliberately and note it in the changelog. The dependency set sets the floor (measured: about 1.89 for recommended stack A (ADR 0004/0005 directions plus Proposed crates; the floor is set by `uuid` 1.29.0), 1.94 if sqlx is chosen; see [dependency-evaluation](dependency-evaluation.md#11-supply-chain-tooling-and-msrv)). An earlier research suggestion was "latest stable minus 2 minor releases"; the exact window is to be fixed in M0.
-- Edition 2024 (verify in M0). Commit `Cargo.lock` (the workspace ships binaries).
+Status: **Accepted** (owner decision, 2026-10-28).
+
+- The toolchain is pinned to 1.99.1 in `rust-toolchain.toml`.
+- MSRV = pinned stable minus 2 minor releases (currently 1.97). It is declared as the workspace `rust-version` and checked in CI. MSRV rises together with pin bumps and is noted in `CHANGELOG.md`. The dependency set sets a floor (measured: about 1.89 for recommended stack A, 1.94 if sqlx is chosen; see [dependency-evaluation](dependency-evaluation.md#11-supply-chain-tooling-and-msrv)); the window must stay above it.
+- Edition 2024 is confirmed. `Cargo.lock` is committed (the workspace ships binaries).
 
 ## Dependency admission
 
@@ -21,7 +23,7 @@ Significant dependencies get an ADR ([docs/adr](../adr/README.md)). The same rul
 
 ## cargo-deny
 
-Runs in CI (and advisories on a daily schedule). Covers licenses, advisories, bans (duplicates where practical) and sources. Proposed license allow-list (to be reviewed): MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, Unlicense, BSL-1.0, CC0-1.0. Copyleft is denied by default; a per-crate `clarify` entry for `ring` is added if needed. cargo-deny and cargo-audit are CI tools, not workspace dependencies.
+Runs in CI (and advisories on a daily schedule). Covers licenses, advisories, bans (duplicates where practical) and sources. Proposed license allow-list (to be reviewed): MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, Unlicense, BSL-1.0, CC0-1.0. Copyleft is denied by default; a per-crate `clarify` entry for `ring` is added if needed. cargo-deny and cargo-audit are CI tools, not workspace dependencies. CI installs cargo-deny with `cargo install --locked` (no third-party action).
 
 ## Versioning and changelog
 
