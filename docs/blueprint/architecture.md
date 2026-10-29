@@ -265,7 +265,7 @@ Custom fields and property setters: when added, a small explicit per-site overla
 
 - **Desk (Proposed, M4).** Metadata-driven generic list and form views in React; minimal. UI component library: **Undecided**, decided in M4 together with a dependency evaluation.
 - **Reports (Proposed, M8).** Start with saved list views and filters; SQL-based query reports later with a read-only DB role. Script reports: no.
-- **Workflow (Proposed, not a priority).** States, transitions and roles mapped onto docstatus; M8.
+- **Workflow (Proposed, M8).** States, transitions and roles mapped onto docstatus; M8.
 
 ## Key challenges and how we approach them
 
