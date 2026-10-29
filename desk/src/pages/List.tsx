@@ -85,12 +85,10 @@ export function List({ doctype, params }: Props) {
       },
       (e: unknown) => {
         if (cancelled) return;
-        // Keep the rows of the last answer, so the controls stay where they are.
-        setRowsState((last) => ({
-          ...(last?.doctype === doctype ? last : { doctype, offset, rows: undefined }),
-          key,
-          error: message(e),
-        }));
+        // No rows: the old ones belong to another request and must not pass for this result.
+        // The table (its sort buttons) and the paging controls stay mounted, so keyboard focus
+        // stays where it is.
+        setRowsState({ doctype, key, offset, error: message(e) });
       },
     );
     return () => {
@@ -154,8 +152,8 @@ export function List({ doctype, params }: Props) {
         {loading ? 'Loading...' : ''}
       </p>
 
-      {answer?.rows ? (
-        shown.length === 0 && shownOffset === 0 ? (
+      {answer?.rows || answer?.error ? (
+        shown.length === 0 && shownOffset === 0 && !answer.error ? (
           <p>No documents.</p>
         ) : (
           <div className="table-wrap">
@@ -212,11 +210,13 @@ export function List({ doctype, params }: Props) {
       <nav className="paging" aria-label="Pages">
         {/* aria-disabled, not disabled: the button that was just used may become unavailable
             (the first or last page) and must keep the keyboard focus. */}
+        {/* Not while a request is running: `hasNext` and the rows still belong to the previous
+            request, so a click then could go past the last page. */}
         <button
           type="button"
-          aria-disabled={offset === 0}
+          aria-disabled={offset === 0 || loading}
           onClick={() => {
-            if (offset > 0) go({ ...state, offset: Math.max(0, offset - PAGE_SIZE) });
+            if (offset > 0 && !loading) go({ ...state, offset: Math.max(0, offset - PAGE_SIZE) });
           }}
         >
           Previous
@@ -226,9 +226,9 @@ export function List({ doctype, params }: Props) {
         </span>
         <button
           type="button"
-          aria-disabled={!hasNext}
+          aria-disabled={!hasNext || loading}
           onClick={() => {
-            if (hasNext) go({ ...state, offset: offset + PAGE_SIZE });
+            if (hasNext && !loading) go({ ...state, offset: offset + PAGE_SIZE });
           }}
         >
           Next

@@ -98,3 +98,74 @@ jobs:
       - run: npm run build
       - run: npm run licenses
       - run: npm audit --audit-level=high
+
+  # The desk smoke test (M4.2, one Playwright test in Chromium): login, list, create, edit and
+  # submit a sales order, and a user without the submit right, against a real `forgebase serve`
+  # with the built desk. Seeding: desk/e2e/seed.sh. Uses only the actions already used above
+  # (no artifact upload: no pinned action for it is in use); on failure the server log is printed.
+  # The database URL is built from the service container's credentials and never printed.
+  e2e:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forgebase
+          POSTGRES_PASSWORD: forgebase
+          POSTGRES_DB: forgebase_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forgebase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The service's own database, empty and used by this job only.
+      FORGEBASE_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/forgebase_e2e
+      E2E_BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - run: cargo build --locked -p forgebase-cli
+      - name: Check the Node version
+        run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
+      # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.
+      - name: Build the desk
+        working-directory: desk
+        run: |
+          npm ci
+          npm run build
+      # Downloads the Chromium that this exact Playwright version drives (and its system libraries).
+      - name: Install Chromium
+        working-directory: desk
+        run: npx playwright install --with-deps chromium
+      - name: Seed the database
+        run: desk/e2e/seed.sh
+      - name: Start the server
+        run: |
+          FORGEBASE_DESK_DIR=desk/dist \
+          FORGEBASE_DEV_INSECURE_COOKIES=1 \
+          FORGEBASE_ALLOWED_HOSTS=localhost,127.0.0.1 \
+          target/debug/forgebase serve --doctypes target/e2e/doctypes > server.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8000/desk/; then exit 0; fi
+            sleep 1
+          done
+          echo "the server did not answer in 30 seconds" >&2
+          cat server.log >&2
+          exit 1
+      - name: Run the smoke test
+        working-directory: desk
+        run: npx playwright test
+      - name: Show the server log
+        if: failure()
+        run: tail -n 100 server.log

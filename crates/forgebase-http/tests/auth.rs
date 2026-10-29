@@ -193,7 +193,17 @@ async fn a_cookie_session_reads_and_needs_csrf_to_change_things() {
                 .json(body.clone()),
         )
         .await;
-    for reply in [&without, &wrong, &other, &garbage] {
+    // A repeated header is refused even when every value is the right one.
+    let repeated = env
+        .send(
+            post("/api/v1/resource/note")
+                .cookie(&alice)
+                .csrf(&alice.csrf)
+                .csrf(&alice.csrf)
+                .json(body.clone()),
+        )
+        .await;
+    for reply in [&without, &wrong, &other, &garbage, &repeated] {
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.text);
         assert_eq!(reply.code(), "csrf_failed");
     }

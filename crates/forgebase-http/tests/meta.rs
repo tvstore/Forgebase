@@ -296,6 +296,13 @@ async fn the_session_route_needs_the_refresh_header_and_does_not_rotate_without_
         assert_eq!(reply.code(), "bad_request");
         assert!(!reply.text.contains("csrf_token"));
     }
+    // A repeated header is refused too, even when every value is the right one.
+    let twice = get("/api/v1/session")
+        .header("X-Forgebase-CSRF", "refresh")
+        .header("X-Forgebase-CSRF", "refresh");
+    let reply = env.send(twice.cookie(&login)).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text);
+    assert!(!reply.text.contains("csrf_token"));
     // The old token still works.
     let created = env
         .send(

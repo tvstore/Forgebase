@@ -35,6 +35,20 @@ npm run licenses    # license allow-list over package-lock.json
 npm audit --audit-level=high
 ```
 
+The Playwright smoke test (CI job `e2e`) needs a real server, so it is not part of `npm test`. To run it locally you need a PostgreSQL 16 server, an **empty** scratch database (never one you care about: the seed script creates users and documents), the built `forgebase` binary and the built desk:
+
+```sh
+export FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/fb_e2e   # an empty scratch database
+cargo build -p forgebase-cli && (cd desk && npm ci && npm run build)
+desk/e2e/seed.sh                                   # DocTypes in target/e2e/doctypes, users e2e_manager and e2e_clerk, one customer
+FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/forgebase serve --doctypes target/e2e/doctypes &
+cd desk
+npx playwright install chromium                    # downloads the Chromium of this Playwright version (CI does this too)
+npx playwright test                                # E2E_BASE_URL (default http://localhost:8000), E2E_PASSWORD
+```
+
+If you already have a Chromium, skip the install and set `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chromium`. The test can be run again on the same database (it creates new orders each time). Stop the server and drop the scratch database afterwards.
+
 ## PostgreSQL for tests
 
 The `forgebase-db` and `forgebase-cli` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end. The `forgebase-cli` tests run the built `forgebase` binary against such a database (they set `FORGEBASE_DATABASE_URL` for it themselves).

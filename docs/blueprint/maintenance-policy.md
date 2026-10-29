@@ -46,7 +46,7 @@ SemVer once published; 0.x until the API stabilizes. `CHANGELOG.md` in Keep a Ch
 | `forgebase-core` | Unit tests (pure), table-driven; property tests only where cheap value (for example identifier validation). |
 | `forgebase-db`, `forgebase-http` | Integration tests against a real PostgreSQL (no mocks); each test in its own transaction or fresh database; CI uses a Postgres service container. Supported PostgreSQL floor: 16 (Accepted, owner decision 2026-10-28). |
 | Security | Explicit negative tests for every permission rule and for injection attempts in filters and identifiers ([security-model](security-model.md#required-negative-tests)). |
-| Frontend (from M4) | Vitest on pure modules (router, API client, filter builder, list helpers) with a stubbed `fetch`, ESLint rules that forbid browser storage, raw HTML and inline styles, `tsc --noEmit`, and one Playwright smoke test (M4.2). Component tests with `jsdom` only when a pure-module test cannot cover the risk. Decided in M4 (owner decision 2026-10-29). |
+| Frontend (from M4) | Vitest on pure modules (router, API client, filter builder, list helpers, form field conversion, access rules, error mapping) with a stubbed `fetch`, ESLint rules that forbid browser storage, raw HTML and inline styles, `tsc --noEmit`, and one Playwright smoke test (`desk/e2e/smoke.spec.ts`, Chromium only, CI job `e2e`, implemented in M4.2). Component tests with `jsdom` only when a pure-module test cannot cover the risk. Decided in M4 (owner decision 2026-10-29). |
 | Coverage | No percentage targets; risk-based coverage. |
 
 ## Documentation and ADR rules

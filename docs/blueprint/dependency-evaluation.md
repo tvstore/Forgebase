@@ -289,7 +289,7 @@ React + TypeScript for `desk/` is Accepted ([ADR 0002](../adr/0002-modular-monol
 #### Owner decisions for M4 (2026-10-29, Accepted)
 
 - **No UI component library, no router library, no data-fetching library.** Native inputs and a small own stylesheet; an own hash router (`desk/src/router.ts`); plain `fetch` (`desk/src/api.ts`). Reason: every runtime dependency is a long-term maintenance cost; the desk needs a login, a list and (M4.2) a form. Revisit only if a real need appears (an ADR then).
-- **Toolchain: Vite + TypeScript + Vitest**, with ESLint (`@eslint/js`, `typescript-eslint`, `eslint-plugin-react-hooks`: the smallest set that lints TypeScript and the React hooks rules; the project's own rules forbid browser storage, `dangerouslySetInnerHTML` and inline `style`). Tests are pure-module tests in Vitest's `node` environment with a stubbed `fetch`; no `jsdom`, no testing library (not needed for M4.1).
+- **Toolchain: Vite + TypeScript + Vitest**, with ESLint (`@eslint/js`, `typescript-eslint`, `eslint-plugin-react-hooks`: the smallest set that lints TypeScript and the React hooks rules; the project's own rules forbid browser storage, `dangerouslySetInnerHTML` and inline `style`). Tests are pure-module tests in Vitest's `node` environment with a stubbed `fetch`; no `jsdom`, no testing library (not needed in M4.1 or M4.2: the form view's logic is in pure modules, and the browser behavior is covered by the one Playwright smoke test).
 - **Only `react` and `react-dom` are runtime dependencies.** `npm run licenses` fails otherwise.
 
 #### Admission notes for M4.1 (2026-10-29)
@@ -319,6 +319,17 @@ Versions are pinned exactly in `desk/package.json` (no `^` or `~`) and the lockf
 - packages that are **development only**: the same plus MPL-2.0, BlueOak-1.0.0 and CC-BY-4.0.
 
 **MPL-2.0 is accepted for development tooling only.** MPL-2.0 is file-level copyleft; nothing of `lightningcss` is part of the built desk, so it places no obligation on the MIT-licensed result. If an MPL-2.0 package ever becomes a shipped dependency (not `dev` in the lockfile), the check fails and the owner decides. The same check keeps the runtime dependency list to `react` and `react-dom`. **Limit of the "dev" flag.** The lockfile's `dev` flag says whether a package is reachable from `dependencies` only; it is as good as the imports of `desk/src/`. A development-only package (for example an MPL-2.0 one) that is `import`ed from `src/` would be bundled into the shipped desk although the lockfile calls it dev. Reviewers must check imports in `src/` for that; there is deliberately no scanner of `desk/dist`. Install scripts of dependencies are off: `desk/.npmrc` sets `ignore-scripts=true`, so `npm ci` (locally and in CI) runs none. Node: `^20.19.0 || >=22.12.0` (the range Vite 8 needs). The CI job also runs `npm audit --audit-level=high` (high and critical advisories fail the job; the daily schedule runs it too). `typescript` at 6.x is Apache-2.0 (NOTICE files are kept in `node_modules`, which is not shipped).
+
+#### Admission note for M4.2 (2026-10-29): Playwright
+
+One development dependency is added for the smoke test of owner decision 5 (one Playwright test, Chromium only):
+
+| Package | Version | License | Use |
+|---|---|---|---|
+| `@playwright/test` | 1.64.1 | Apache-2.0 | test runner and API for `desk/e2e/smoke.spec.ts` (dev only) |
+| `playwright`, `playwright-core` | 1.64.1 | Apache-2.0 | pulled in by `@playwright/test` (dev only; no other dependencies; `fsevents` is an optional macOS dependency that was already in the tree) |
+
+`Verified (local measurement)`: licenses are the `license` field of the lockfile (`npm run licenses` passes: the lockfile now lists 200 packages, 3 of them shipped as before); the version is exact-pinned and 1.64.1 is the `latest` dist-tag of `npm view @playwright/test` on 2026-10-29. Nothing of Playwright is imported from `desk/src`; it is used by `desk/e2e` and `desk/playwright.config.ts` only (reviewers check that, like for any dev package). The Chromium that Playwright drives is **not** an npm package: CI downloads it with `npx playwright install --with-deps chromium` (an explicit command; `ignore-scripts=true` still holds for `npm ci`), it is never stored in the repository or shipped, and a developer who already has a Chromium points the test at it with `PLAYWRIGHT_CHROMIUM_EXECUTABLE`. Cost to keep in mind: the browser download is a CI-time network dependency and Playwright releases often (a new Chromium per release); the single test keeps the surface small, and the version is bumped by hand like any other pin. `@types/node` was **not** added: the two e2e files declare the one global they use (`desk/e2e/env.d.ts`).
 
 The earlier remark that "UI library, router, data-fetching and form libraries are deferred" is answered by the decisions above.
 

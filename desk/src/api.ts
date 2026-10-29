@@ -4,6 +4,7 @@
 // `GET /api/v1/session`, which issues a new one; a request refused with `csrf_failed` (the token
 // was rotated by another tab) refreshes it once and is retried once.
 
+import { isAddressable } from './access';
 import type { DocTypeMeta, DocTypeSummary, DocumentRow, SessionInfo } from './types';
 
 const CSRF_HEADER = 'X-Forgebase-CSRF';
@@ -173,4 +174,51 @@ export function listDocuments(doctype: string, params: ListParams): Promise<Docu
     'GET',
     `/api/v1/resource/${encodeURIComponent(doctype)}?${query.toString()}`,
   );
+}
+
+/**
+ * The path of a document. A name that cannot be put in a path segment (`.`, `..`, empty: see
+ * `isAddressable`) is refused here, so the desk never requests a wrong URL; the form view shows
+ * a message for such a document before it gets this far.
+ */
+function documentPath(doctype: string, name: string): string {
+  if (!isAddressable(name)) throw new Error(`the name ${JSON.stringify(name)} has no REST path`);
+  return `/api/v1/resource/${encodeURIComponent(doctype)}/${encodeURIComponent(name)}`;
+}
+
+export function getDocument(doctype: string, name: string): Promise<DocumentRow> {
+  return request<DocumentRow>('GET', documentPath(doctype, name));
+}
+
+/** `POST`: creates a document (201); the answer is the stored document with its generated name. */
+export function createDocument(doctype: string, data: Record<string, unknown>): Promise<DocumentRow> {
+  return request<DocumentRow>('POST', `/api/v1/resource/${encodeURIComponent(doctype)}`, { body: data });
+}
+
+/** `PATCH`: only the changed fields in `data`; `version` is the one the user saw. */
+export function updateDocument(
+  doctype: string,
+  name: string,
+  version: number,
+  data: Record<string, unknown>,
+): Promise<DocumentRow> {
+  return request<DocumentRow>('PATCH', documentPath(doctype, name), { body: { version, data } });
+}
+
+export function deleteDocument(doctype: string, name: string, version: number): Promise<void> {
+  return request<void>('DELETE', `${documentPath(doctype, name)}?version=${version}`);
+}
+
+export type Transition = 'submit' | 'cancel' | 'amend';
+
+/** Submit, cancel or amend (the answer of `amend` is the new draft). */
+export function transitionDocument(
+  doctype: string,
+  name: string,
+  transition: Transition,
+  version: number,
+): Promise<DocumentRow> {
+  return request<DocumentRow>('POST', `${documentPath(doctype, name)}/${transition}`, {
+    body: { version },
+  });
 }
