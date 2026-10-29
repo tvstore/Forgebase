@@ -2,7 +2,7 @@
 //!
 //! Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1 and M2.2):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2 and M2.3):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -18,7 +18,11 @@
 //!   transaction (a savepoint inside a caller's). They take the [`Registry`] and the DocType
 //!   name. Link values are target names, resolved to ids internally; `update` and `delete` need
 //!   the `expected_version` (optimistic concurrency); an update replaces the rows of the Table
-//!   fields it names. No permissions and no renames yet.
+//!   fields it names when they differ from the stored ones. The app's lifecycle hooks
+//!   (`forgebase_core::hooks`, registered in the [`Registry`]) run inside each call's
+//!   transaction in a fixed order, documented on each of the four functions; a hook error is
+//!   [`DbError::Hook`] and rolls the call back. `update` works on the whole stored document with
+//!   the changes merged in. No permissions and no renames yet.
 
 mod document;
 mod error;

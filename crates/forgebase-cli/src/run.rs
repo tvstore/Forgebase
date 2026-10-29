@@ -65,6 +65,7 @@ enum Operation {
         doctype: String,
         name: String,
         expected_version: i64,
+        actor: String,
     },
 }
 
@@ -121,6 +122,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             name,
             version,
             doctypes,
+            actor,
         } => {
             let (registry, found) = find_doctype(&doctypes, &doctype)?;
             Operation::Delete {
@@ -128,6 +130,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
                 doctype: found.name,
                 name,
                 expected_version: version.expected_version,
+                actor: actor.actor,
             }
         }
     })
@@ -186,10 +189,17 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
             doctype,
             name,
             expected_version,
+            actor,
         } => {
-            return Ok(
-                forgebase_db::delete(client, &registry, &doctype, &name, expected_version).await?,
-            );
+            return Ok(forgebase_db::delete(
+                client,
+                &registry,
+                &doctype,
+                &name,
+                expected_version,
+                &actor,
+            )
+            .await?);
         }
     };
     print_document(&stored)

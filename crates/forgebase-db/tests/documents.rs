@@ -561,7 +561,7 @@ async fn delete_removes_the_document() {
     )
     .await
     .unwrap();
-    delete(&mut **client, &reg, &customer.name, &stored.name, 1)
+    delete(&mut **client, &reg, &customer.name, &stored.name, 1, "ann")
         .await
         .unwrap();
     assert!(
@@ -570,7 +570,7 @@ async fn delete_removes_the_document() {
             .unwrap()
             .is_none()
     );
-    let error = delete(&mut **client, &reg, &customer.name, &stored.name, 1)
+    let error = delete(&mut **client, &reg, &customer.name, &stored.name, 1, "ann")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
@@ -698,7 +698,7 @@ async fn injection_like_strings_are_stored_literally() {
                 .is_none()
         );
         assert!(matches!(
-            delete(&mut **client, &reg, &customer.name, value, 1).await,
+            delete(&mut **client, &reg, &customer.name, value, 1, "ann").await,
             Err(DbError::NotFound { .. })
         ));
     }

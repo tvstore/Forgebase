@@ -25,8 +25,9 @@ pub struct Document {
 /// A partial update: the fields to change.
 ///
 /// A field in [`Changes::values`] is set (a [`Value::Null`] clears it). A Table field in
-/// [`Changes::tables`] **replaces all of its rows** with the given ones (an empty list removes
-/// every row); a Table field that is not mentioned keeps its rows.
+/// [`Changes::tables`] **replaces its rows** with the given ones (an empty list removes every
+/// row; `forgebase_db::update` leaves a table alone when the rows equal the stored ones); a Table
+/// field that is not mentioned keeps its rows.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Changes {
     /// New field values.
@@ -192,27 +193,6 @@ pub fn validate(
     }
     check_values(doctype, &doc.values, &mut errors);
     check_tables(registry, doctype, &doc.tables, &mut errors);
-    finish(errors)
-}
-
-/// Validates a partial update: only the given fields are checked.
-///
-/// Fields that are not in `changes` are left alone, so required fields need not be present,
-/// but a required field may not be set to [`Value::Null`] or, for Text, Data, Select and Link,
-/// to an empty or whitespace-only string (see [`validate`]). A Table field in
-/// [`Changes::tables`] replaces all its rows: the new rows are validated as in [`validate`]
-/// (a required Table field may not be given an empty list); a Table field that is not mentioned
-/// is not touched.
-///
-/// `doctype` must be valid ([`DocType::validate`]); a [`Registry`] only holds valid DocTypes.
-pub fn validate_update(
-    registry: &Registry,
-    doctype: &DocType,
-    changes: &Changes,
-) -> Result<(), Vec<ValidationError>> {
-    let mut errors = Vec::new();
-    check_values(doctype, &changes.values, &mut errors);
-    check_tables(registry, doctype, &changes.tables, &mut errors);
     finish(errors)
 }
 
@@ -465,13 +445,6 @@ mod tests {
         }
     }
 
-    fn upd(values: &BTreeMap<String, Value>) -> Changes {
-        Changes {
-            values: values.clone(),
-            tables: BTreeMap::new(),
-        }
-    }
-
     fn doc(pairs: Vec<(&str, Value)>) -> Document {
         let mut d = Document::default();
         d.values.insert("title".into(), text("ok"));
@@ -548,14 +521,6 @@ mod tests {
                     }]),
                     "{field} = {blank:?}"
                 );
-                let changes = BTreeMap::from([(field.to_string(), text(blank))]);
-                assert_eq!(
-                    validate_update(&Registry::new(), &dt, &upd(&changes)),
-                    Err(vec![ValidationError::Required {
-                        field: field.into()
-                    }]),
-                    "update {field} = {blank:?}"
-                );
             }
         }
         // Optional fields may hold blank text.
@@ -579,13 +544,6 @@ mod tests {
                 "{field}"
             );
         }
-        let changes = BTreeMap::from([("notes".to_string(), text("a\0b"))]);
-        assert_eq!(
-            validate_update(&Registry::new(), &doctype(), &upd(&changes)),
-            Err(vec![ValidationError::ContainsNul {
-                field: "notes".into()
-            }])
-        );
     }
 
     #[test]
@@ -599,9 +557,8 @@ mod tests {
             },
             false,
         )];
-        let changes = BTreeMap::from([("amount".to_string(), dec("0.001"))]);
         // The result is unspecified for an invalid DocType; it must only not panic.
-        let _ = validate_update(&Registry::new(), &dt, &upd(&changes));
+        let _ = validate(&Registry::new(), &dt, &doc(vec![("amount", dec("0.001"))]));
     }
 
     #[test]
@@ -649,10 +606,13 @@ mod tests {
             d.values.insert("must_link".into(), Value::Null);
             assert_eq!(validate(&Registry::new(), &dt, &d).unwrap_err().len(), 1);
         }
-        // Optional links may be cleared.
-        let changes = BTreeMap::from([("owner_ref".to_string(), Value::Null)]);
+        // Optional links may be null.
         assert_eq!(
-            validate_update(&Registry::new(), &doctype(), &upd(&changes)),
+            validate(
+                &Registry::new(),
+                &doctype(),
+                &doc(vec![("owner_ref", Value::Null)])
+            ),
             Ok(())
         );
         assert_eq!(
@@ -973,7 +933,7 @@ mod tests {
         );
         assert_eq!(
             validate(&registry, &order, &with_rows(vec![])),
-            Err(vec![required.clone()])
+            Err(vec![required])
         );
         assert_eq!(
             validate(
@@ -982,13 +942,6 @@ mod tests {
                 &with_rows(vec![row(vec![("qty", Value::Int(1))])])
             ),
             Ok(())
-        );
-        // In an update an empty list would remove every row.
-        let mut changes = Changes::default();
-        changes.tables.insert("items".into(), vec![]);
-        assert_eq!(
-            validate_update(&registry, &order, &changes),
-            Err(vec![required])
         );
     }
 
@@ -1045,31 +998,11 @@ mod tests {
     }
 
     #[test]
-    fn update_validates_replacement_rows_and_ignores_untouched_tables() {
-        let (registry, mut order) = order_registry();
-        order.fields[1].required = true;
-        // Not mentioning the table is fine even though it is required.
+    fn changes_know_when_they_are_empty() {
         let mut changes = Changes::default();
-        changes.values.insert("title".into(), text("t"));
-        assert_eq!(validate_update(&registry, &order, &changes), Ok(()));
-        changes.tables.insert(
-            "items".into(),
-            vec![
-                row(vec![("qty", Value::Int(1))]),
-                row(vec![("note", text("x"))]),
-            ],
-        );
-        assert_eq!(
-            validate_update(&registry, &order, &changes),
-            Err(vec![in_row(
-                2,
-                ValidationError::Required {
-                    field: "qty".into()
-                }
-            )])
-        );
+        assert!(changes.is_empty());
+        changes.tables.insert("items".into(), vec![]);
         assert!(!changes.is_empty());
-        assert!(Changes::default().is_empty());
     }
 
     #[test]
@@ -1077,52 +1010,5 @@ mod tests {
         let (_, order) = order_registry();
         let d = with_rows(vec![row(vec![])]);
         assert_eq!(validate(&Registry::new(), &order, &d), Ok(()));
-    }
-
-    #[test]
-    fn partial_update() {
-        let dt = doctype();
-        let mut changes = BTreeMap::new();
-        // Required `title` need not be present.
-        changes.insert("count".to_owned(), Value::Int(3));
-        assert_eq!(
-            validate_update(&Registry::new(), &dt, &upd(&changes)),
-            Ok(())
-        );
-        // Optional fields may be cleared.
-        changes.insert("kind".to_owned(), Value::Null);
-        assert_eq!(
-            validate_update(&Registry::new(), &dt, &upd(&changes)),
-            Ok(())
-        );
-        // Empty update is fine.
-        assert_eq!(
-            validate_update(&Registry::new(), &dt, &Changes::default()),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn partial_update_errors() {
-        let dt = doctype();
-        let mut changes = BTreeMap::new();
-        changes.insert("title".to_owned(), Value::Null);
-        changes.insert("kind".to_owned(), text("z"));
-        changes.insert("nope".to_owned(), Value::Int(1));
-        assert_eq!(
-            validate_update(&Registry::new(), &dt, &upd(&changes)),
-            Err(vec![
-                ValidationError::InvalidOption {
-                    field: "kind".into(),
-                    value: "z".into()
-                },
-                ValidationError::UnknownField {
-                    field: "nope".into()
-                },
-                ValidationError::Required {
-                    field: "title".into()
-                },
-            ])
-        );
     }
 }

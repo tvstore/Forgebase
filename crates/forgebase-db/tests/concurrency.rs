@@ -146,9 +146,16 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
     )
     .await
     .unwrap();
-    let error = delete(&mut **client, &reg, &customer_type.name, &created.name, 1)
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        &customer_type.name,
+        &created.name,
+        1,
+        "ann",
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(
             error,
@@ -166,9 +173,16 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
             .unwrap()
             .is_some()
     );
-    delete(&mut **client, &reg, &customer_type.name, &created.name, 2)
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        &customer_type.name,
+        &created.name,
+        2,
+        "ann",
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -187,7 +201,7 @@ async fn a_missing_document_is_not_found_not_a_conflict() {
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
-    let error = delete(&mut **client, &reg, &customer_type.name, "nobody", 1)
+    let error = delete(&mut **client, &reg, &customer_type.name, "nobody", 1, "ann")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
@@ -384,7 +398,7 @@ async fn racing_delete_and_update_with_the_same_version_succeed_exactly_once() {
             &one,
             "a"
         ),
-        delete(&mut **b, &reg, &customer_type.name, &created.name, 1),
+        delete(&mut **b, &reg, &customer_type.name, &created.name, 1, "ann"),
     );
     // Either the update won (the delete then sees version 2) or the delete won (the update then
     // finds nothing); never both.

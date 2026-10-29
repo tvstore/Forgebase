@@ -153,6 +153,17 @@ pub enum DbError {
     /// An update was called without any change.
     #[error("update needs at least one changed field")]
     NoChanges,
+    /// A lifecycle hook ([`forgebase_core::hooks::DocTypeHooks`]) rejected the operation. The
+    /// whole operation was rolled back: nothing was persisted.
+    #[error("{hook} hook of DocType `{doctype}` rejected the operation: {message}")]
+    Hook {
+        /// DocType name.
+        doctype: String,
+        /// The hook that failed: `before_insert`, `validate` or `before_delete`.
+        hook: &'static str,
+        /// The hook's message.
+        message: String,
+    },
 }
 
 impl From<tokio_postgres::Error> for DbError {
