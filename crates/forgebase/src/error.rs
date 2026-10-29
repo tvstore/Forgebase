@@ -7,6 +7,8 @@ use forgebase_db::auth::AuthError;
 
 use forgebase_http::json::JsonError;
 
+use crate::compose::StartupError;
+
 /// Everything that can make a command fail.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
@@ -21,9 +23,9 @@ pub enum CliError {
     /// The server could not listen or stopped with an I/O error.
     #[error("server error: {0}")]
     Serve(std::io::Error),
-    /// The DocType directory has unreadable or invalid files.
-    #[error("cannot load DocType files:\n{}", bullets(.0))]
-    DocTypes(Vec<String>),
+    /// The apps or the DocType files are wrong; the message lists every problem.
+    #[error("{0}")]
+    Startup(#[from] StartupError),
     /// The DocType named on the command line is not in the DocType directory.
     #[error("unknown DocType `{name}`; known DocTypes: {known}")]
     UnknownDocType {
@@ -72,7 +74,7 @@ fn describe_db(error: &DbError) -> String {
     }
 }
 
-fn bullets(lines: &[String]) -> String {
+pub(crate) fn bullets(lines: &[String]) -> String {
     let mut text = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
@@ -101,15 +103,6 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "validation failed:\n  - field `a` is required\n  - unknown field `b`"
-        );
-    }
-
-    #[test]
-    fn doctype_problems_are_listed_one_per_line() {
-        let error = CliError::DocTypes(vec!["a.toml: bad".to_owned(), "b.toml: worse".to_owned()]);
-        assert_eq!(
-            error.to_string(),
-            "cannot load DocType files:\n  - a.toml: bad\n  - b.toml: worse"
         );
     }
 }

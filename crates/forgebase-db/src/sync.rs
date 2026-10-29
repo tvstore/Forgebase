@@ -69,12 +69,7 @@ pub async fn sync(
         .check_references()
         .map_err(DbError::InvalidMetadata)?;
     let tx = client.transaction().await?;
-    let timeout_ms = options
-        .lock_timeout
-        .as_millis()
-        .clamp(1, u128::from(i32::MAX.unsigned_abs()))
-        .to_string()
-        + "ms";
+    let timeout_ms = lock_timeout_setting(options.lock_timeout);
     tx.query(
         "SELECT set_config('lock_timeout', $1, true)",
         &[&timeout_ms],
@@ -285,4 +280,15 @@ async fn load_catalog(
         catalog.managed.insert(row.try_get(0)?);
     }
     Ok(catalog)
+}
+
+/// `lock_timeout` as the PostgreSQL setting text (`5000ms`), at least 1 ms and at most the
+/// largest value PostgreSQL accepts. Bound as a parameter of `set_config`, never formatted into
+/// SQL.
+pub(crate) fn lock_timeout_setting(timeout: Duration) -> String {
+    timeout
+        .as_millis()
+        .clamp(1, u128::from(i32::MAX.unsigned_abs()))
+        .to_string()
+        + "ms"
 }

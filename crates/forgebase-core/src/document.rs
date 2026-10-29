@@ -60,6 +60,9 @@ impl fmt::Display for DocStatus {
 /// A document: an optional name plus field values keyed by field name.
 ///
 /// A missing key and [`Value::Null`] both mean "no value".
+///
+/// Plain data with public fields, on purpose (ADR 0012). Build one with
+/// `Document { name: .., ..Default::default() }` so that code keeps compiling if a field is added.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Document {
     /// The document name, once assigned.

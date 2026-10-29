@@ -54,6 +54,63 @@ pub enum DbError {
         /// Migration name as recorded in the database.
         name: String,
     },
+    /// An applied app migration no longer matches the SQL the app declares now.
+    #[error(
+        "migration {version} ({name}) of app `{app}` was changed after it was applied: expected checksum {expected}, database has {actual}"
+    )]
+    AppChecksumMismatch {
+        /// App name.
+        app: String,
+        /// Migration version.
+        version: i32,
+        /// Migration name.
+        name: String,
+        /// Checksum of the SQL the app declares.
+        expected: String,
+        /// Checksum recorded in the database.
+        actual: String,
+    },
+    /// The database has an app migration that the app does not declare any more.
+    #[error(
+        "database has migration {version} ({name}) of app `{app}` that the app does not declare; the database is newer than the app, or a migration was removed"
+    )]
+    UnknownAppMigration {
+        /// App name.
+        app: String,
+        /// Migration version.
+        version: i32,
+        /// Migration name as recorded in the database.
+        name: String,
+    },
+    /// An app migration is not applied but a migration with a higher version of the same app
+    /// is: new migrations must have versions above every applied one.
+    #[error(
+        "migration {version} ({name}) of app `{app}` is not applied, but migration {applied_version} of the app is; a new migration must have a version above every applied one (renumber it above {applied_version}); nothing was applied"
+    )]
+    OutOfOrderAppMigration {
+        /// App name.
+        app: String,
+        /// Version of the pending migration.
+        version: i32,
+        /// Name of the pending migration.
+        name: String,
+        /// The highest applied version of the app.
+        applied_version: i32,
+    },
+    /// An app migration failed. It was rolled back; the migrations before it stay applied.
+    #[error(
+        "migration {version} ({name}) of app `{app}` failed and was rolled back (earlier migrations stay applied): {message}"
+    )]
+    AppMigrationFailed {
+        /// App name.
+        app: String,
+        /// Migration version.
+        version: i32,
+        /// Migration name.
+        name: String,
+        /// The database error.
+        message: String,
+    },
     /// Schema sync needs the framework tables, which are not there yet.
     #[error("framework tables are missing; run the framework migrations before schema sync")]
     FrameworkNotMigrated,

@@ -267,6 +267,9 @@ fn from_value(name: &str, value: &Value) -> Result<Json, JsonError> {
             Json::String(d.format(&format).map_err(|e| output(e.to_string()))?)
         }
         Value::Datetime(t) => Json::String(utc_rfc3339(t).map_err(output)?),
+        // `Value` is `#[non_exhaustive]` for other crates: a new kind gets its JSON form here;
+        // until then it is an output error, never a silent drop.
+        other => return Err(output(format!("no JSON form for a {} value", other.kind()))),
     })
 }
 

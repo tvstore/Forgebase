@@ -6,8 +6,9 @@ use tokio_postgres::Client;
 
 use crate::error::DbError;
 
-/// Advisory lock key serializing framework migrations (transaction-level lock).
-const MIGRATE_LOCK_KEY: i64 = 0x4642_4d49_4752_0001;
+/// Advisory lock key serializing migrations: taken per transaction by [`migrate_framework`] and
+/// for the whole of [`crate::migrate_apps`] (session-level lock).
+pub(crate) const MIGRATE_LOCK_KEY: i64 = 0x4642_4d49_4752_0001;
 
 /// The migration table, created before the migrations run so applied ones can be read.
 const BOOTSTRAP_SQL: &str = "CREATE TABLE IF NOT EXISTS fb_migration (\
@@ -42,6 +43,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "auth",
         sql: include_str!("../migrations/0003_auth.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "apps",
+        sql: include_str!("../migrations/0004_apps.sql"),
     },
 ];
 
@@ -107,8 +113,12 @@ pub async fn migrate_framework(
     Ok(pending)
 }
 
-async fn checksum(tx: &tokio_postgres::Transaction<'_>, sql: &str) -> Result<String, DbError> {
-    let row = tx
+/// The SHA-256 of `sql` as lower-case hex, computed by PostgreSQL.
+pub(crate) async fn checksum(
+    client: &impl tokio_postgres::GenericClient,
+    sql: &str,
+) -> Result<String, DbError> {
+    let row = client
         .query_one(
             "SELECT encode(sha256(convert_to($1::text, 'UTF8')), 'hex')",
             &[&sql],

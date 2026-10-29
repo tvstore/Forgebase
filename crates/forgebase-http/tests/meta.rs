@@ -67,7 +67,7 @@ async fn the_meta_list_has_the_readable_doctypes_only_sorted_by_name() {
         for item in reply.data().as_array().expect("array") {
             let mut keys: Vec<_> = item.as_object().expect("object").keys().collect();
             keys.sort();
-            assert_eq!(keys, ["label", "name", "rights", "submittable"]);
+            assert_eq!(keys, ["app", "label", "name", "rights", "submittable"]);
         }
         for role in ["Reader", "Clerk", "Writer", "Biller", "Own"] {
             if user == "root" {

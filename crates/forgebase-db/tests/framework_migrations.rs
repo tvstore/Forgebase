@@ -21,6 +21,7 @@ async fn migrates_empty_database_and_is_idempotent() {
             vec!["1".to_owned(), "init".into(), "64".into()],
             vec!["2".to_owned(), "series".into(), "64".into()],
             vec!["3".to_owned(), "auth".into(), "64".into()],
+            vec!["4".to_owned(), "apps".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -36,7 +37,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["3".to_owned()]]
+        vec![vec!["4".to_owned()]]
     );
 }
 
@@ -87,12 +88,17 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![2, 3]
+        vec![2, 3, 4]
     );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY version")
             .await,
-        vec![vec!["1".to_owned()], vec!["2".into()], vec!["3".into()]]
+        vec![
+            vec!["1".to_owned()],
+            vec!["2".into()],
+            vec!["3".into()],
+            vec!["4".into()]
+        ]
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_series").await,
@@ -101,13 +107,15 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
 }
 
 #[tokio::test]
-async fn a_database_at_migration_2_is_upgraded_to_3() {
+async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
     let db = TestDb::new().await;
     let mut client = db.pool.get().await.unwrap();
     apply_first(&db, 2).await;
     let applied = migrate_framework(&mut client, false).await.unwrap();
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].version, 3);
+    assert_eq!(
+        applied.iter().map(|m| m.version).collect::<Vec<_>>(),
+        vec![3, 4]
+    );
     assert_eq!(applied[0].name, "auth");
     for table in [
         "fb_user",
@@ -115,6 +123,8 @@ async fn a_database_at_migration_2_is_upgraded_to_3() {
         "fb_session",
         "fb_api_token",
         "fb_login_failure",
+        "fb_app",
+        "fb_app_migration",
     ] {
         assert_eq!(
             db.rows(&format!("SELECT count(*)::text FROM {table}"))

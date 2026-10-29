@@ -38,6 +38,9 @@ impl ToSql for SqlValue<'_> {
                 .ok_or("datetime is out of range once converted to UTC")?
                 .to_sql_checked(ty, out),
             Value::Null => Ok(IsNull::Yes),
+            // `Value` is `#[non_exhaustive]` for other crates: a new kind must be bound here
+            // before it can be stored, and until then it is an error, not wrong bytes.
+            other => Err(format!("cannot bind a {} value", other.kind()).into()),
         }
     }
 

@@ -86,11 +86,7 @@
 //! assert_eq!(registry.hooks("customer").len(), 1);
 //!
 //! // `forgebase-db` calls the hooks; here we call one directly.
-//! let ctx = HookContext {
-//!     doctype: "customer",
-//!     actor: "ann",
-//!     operation: Operation::Insert,
-//! };
+//! let ctx = HookContext::new("customer", "ann", Operation::Insert);
 //! let mut doc = Document::default();
 //! doc.values.insert("email".to_owned(), Value::Text("  Ann@Example.com ".to_owned()));
 //! registry.hooks("customer")[0].validate(&ctx, &mut doc)?;
@@ -125,7 +121,12 @@ pub enum Operation {
 }
 
 /// What a hook is told about the operation, besides the document.
+///
+/// `#[non_exhaustive]`: more information may be added later, so other crates cannot build it with
+/// a struct literal; use [`HookContext::new`] (for example in a test that calls a hook directly).
+/// The fields are public to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookContext<'a> {
     /// The name of the DocType.
     pub doctype: &'a str,
@@ -137,6 +138,18 @@ pub struct HookContext<'a> {
     pub actor: &'a str,
     /// The operation.
     pub operation: Operation,
+}
+
+impl<'a> HookContext<'a> {
+    /// A context for `operation` on `doctype` by `actor`. The framework builds these for the hooks
+    /// it calls; an app needs this only to call a hook directly in a test.
+    pub const fn new(doctype: &'a str, actor: &'a str, operation: Operation) -> Self {
+        Self {
+            doctype,
+            actor,
+            operation,
+        }
+    }
 }
 
 /// A hook rejects an operation by returning this. The message is shown to the caller.

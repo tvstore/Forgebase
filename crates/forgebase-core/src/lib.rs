@@ -1,6 +1,8 @@
 //! Pure business-rule core: metadata, validation, lifecycle definitions and the permission evaluator.
 //!
-//! Performs no I/O and has no async code or SQL, and depends on no other Forgebase crate.
+//! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
+//! has a compatibility promise (ADR 0012). Performs no I/O and has no async code or SQL, and
+//! depends on no other Forgebase crate.
 //! See ADR 0002 and `docs/blueprint/architecture.md`.
 //!
 //! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3, M2.4 and M3.2):

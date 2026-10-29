@@ -1,6 +1,6 @@
 # Security model
 
-Status: **Proposed** unless stated; of the sections below identifier and value handling in `forgebase-db` (M1.2, M1.3, M2.1, M2.2), the trust note for the command-line tool, the storage side of authentication (M3.1, [ADR 0010](../adr/0010-authentication-and-sessions.md), Accepted) the role permission model with its enforcement and the list query (M3.2, [ADR 0011](../adr/0011-permission-model-phase-1.md), Accepted) and the HTTP layer (M3.3: cookies, CSRF, Host validation, no CORS, the login concurrency bound, the error envelope) are implemented. Multi-site isolation is not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
+Status: **Proposed** unless stated; of the sections below identifier and value handling in `forgebase-db` (M1.2, M1.3, M2.1, M2.2), the trust note for the command-line tool, the storage side of authentication (M3.1, [ADR 0010](../adr/0010-authentication-and-sessions.md), Accepted) the role permission model with its enforcement and the list query (M3.2, [ADR 0011](../adr/0011-permission-model-phase-1.md), Accepted) and the HTTP layer (M3.3: cookies, CSRF, Host validation, no CORS, the login concurrency bound, the error envelope) are implemented; the trust note for apps and app migrations (M5.1) is recorded below. Multi-site isolation is not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
 
 ## Principles
 
@@ -34,6 +34,15 @@ JWT for first-party browser sessions is avoided (revocation complexity).
 - **Read-only database role (non-goal of M3.2; the open question is answered).** The Link lookup (`FOR KEY SHARE`) and the locking reads need the `UPDATE` privilege on the table, so a read-only database role cannot run the write operations or create documents with Link fields. M3.2 does not use such a role; reports (later) will run read-only queries that take no row locks, and a plain `list` takes none either.
 - **Phase 2 (Proposed for M10, separate decision; sharing Later):** field-level permission levels, user permissions (record filters by linked value), sharing.
 - Frappe's phase-2 matching rules are not fully verified (feature matrix, open questions 3-4); do not copy semantics until they are read from the official pages.
+
+## Apps and app migrations (M5.1, [ADR 0012](../adr/0012-app-model-and-public-api-boundary.md))
+
+An app is **trusted code compiled into the binary** ([ADR 0006](../adr/0006-extension-model.md)); there is no sandbox between an app and the framework, and none is planned. Consequences:
+
+- **App migrations are SQL that runs with the database role of the binary**, the same role as the framework migrations and the schema sync, so an app migration can change or read any table, including `fb_user` and the sessions. This is by design: whoever can build the binary can already run any code with that role. Review the SQL of an app like any code you ship. They are checksummed, so an applied migration that is edited later is refused, but that is integrity of the history, not a security boundary.
+- **Apps cannot reach another app's definitions** through the API: a DocType belongs to one app and no app can change it; an app may link to and hook only DocTypes of the apps it depends on (checked at startup). Hooks have no database access ([ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md)) and run after the permission checks, so a hook of an extending app sees only operations that were allowed.
+- **The system context and the public API.** `Caller::System` is not re-exported by the `forgebase` crate: an app has no API to run document operations as the system context. (The `forgebase` command-line tool uses it, as before.)
+- **The `testing` feature** creates and drops databases on the server of `FORGEBASE_TEST_DATABASE_URL` and sets a fixed, public password for its test users; it is off by default and meant for `[dev-dependencies]` only.
 
 ## The HTTP layer (implemented in M3.3)
 

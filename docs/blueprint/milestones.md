@@ -30,7 +30,7 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
 
 - **Status:** Delivered (all three PRs); Done when M1.3 is merged (Stage 1 plan approved by the owner 2026-10-28). Delivered as three PRs: M1.1 metadata model and DB-layer spike, M1.2 `forgebase-db` and schema sync, M1.3 documents CRUD and CLI.
 - **Scope:** DocType definition loading and validation; additive schema sync with dry-run; insert/get/update/delete of simple documents via library API and CLI; framework migrations. Included the DB-layer spike (tokio-postgres vs sqlx), the required checkpoint for [ADR 0004](../adr/0004-database-access-layer.md); it confirmed the accepted direction (2026-10-28). The metadata file format is decided (TOML, Accepted 2026-10-28). Also confirms the surrogate-UUID primary key.
-- **Exit criteria:** integration tests against a real PostgreSQL (CI service container). Met: the `forgebase-db` and `forgebase-cli` integration tests pass against PostgreSQL 16 (CI runs them with the same service container); a user can run `forgebase migrate` and insert, get, update and delete a document of an example DocType (README quick start).
+- **Exit criteria:** integration tests against a real PostgreSQL (CI service container). Met: the `forgebase-db` and CLI (`forgebase-cli`, now `forgebase`) integration tests pass against PostgreSQL 16 (CI runs them with the same service container); a user can run `forgebase migrate` and insert, get, update and delete a document of an example DocType (README quick start).
 - **Non-goals:** links, child tables, lifecycle hooks, HTTP API, authentication, permissions, jobs, multi-site.
 
 ## M2 Relationships and lifecycle
@@ -58,7 +58,7 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
   - sessions, tokens, CSRF and lockout: expired, idle, revoked, tampered and unknown credentials are the same 401, wrong, missing and foreign CSRF tokens are 403, token requests need no CSRF, the `Authorization` header wins over the cookie, lockout works over HTTP, the login concurrency bound answers 503 (`forgebase-db/tests/auth.rs`; `forgebase-http/tests/auth.rs`);
   - `Host` validation, no CORS, the error envelope for every failure that reaches the router, including extractor rejections (hyper-level errors such as `431` or malformed HTTP bypass it), body limit, generic internal errors and no secrets in responses (`forgebase-http/tests/auth.rs`, `tests/protocol.rs`);
   - decision 9 (no leaks through Links and delete errors) in the library (`permissions.rs`, including the kept-Link scoping per field and table and the hook-set Link) and over HTTP (`decision_9_no_leaks_through_links`);
-  - `forgebase serve` end to end on an ephemeral port: login, cookie, list, Host refusal, dev mode and configuration errors (`forgebase-cli/tests/cli.rs`);
+  - `forgebase serve` end to end on an ephemeral port: login, cookie, list, Host refusal, dev mode and configuration errors (`forgebase/tests/cli.rs`, formerly `forgebase-cli/tests/cli.rs`);
   - docs updated (architecture sections 1, 5 and 7, security model, dependency evaluation, feature matrix, ADR 0005 and 0011, README, CHANGELOG).
 
   CI green and the independent review (AGENTS.md, Stage 3) are recorded per PR at merge (PR #11, PR #12 and the M3.3 PR).
@@ -80,9 +80,11 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
 
 ## M5 App model and developer experience
 
-- **Scope:** a `forgebase new-app` template; one small example business app as a separate crate (DocTypes, hooks, permissions) that validates the framework, not a domain product; app test helpers; a "first app" guide.
-- **Exit criteria:** (to be set in the M5 plan) a developer follows the guide and gets a running app with tests, without touching framework crates. Proves success criteria 1 and 5 of the [Project Goal](vision.md#project-goal); capabilities 9 and 10.
-- **Non-goals:** runtime plugins ([ADR 0006](../adr/0006-extension-model.md)), domain modules beyond the small example.
+- **Status:** In progress (the owner approved M5 plan v2 on 2026-10-29; all eight owner decisions are Accepted, see [ADR 0012](../adr/0012-app-model-and-public-api-boundary.md)). Delivered as three PRs: **M5.1** the framework part (below), **M5.2** `forgebase new-app` and the "first app" guide, **M5.3** the example apps (which touch no file under `crates/`: they prove the public API is enough).
+- **Scope:** the app model and public API boundary (the `forgebase-cli` crate renamed `forgebase`, lib + bin; `App`, `Forgebase`, embedded DocTypes and migrations, app data migrations with `fb_app`, hooks across apps, startup errors, `forgebase::testing`) in M5.1; a `forgebase new-app` template and a "first app" guide in M5.2; small example business apps as separate crates (DocTypes, hooks, permissions) that validate the framework, not domain products, in M5.3.
+- **M5.1 evidence:** tests against a real PostgreSQL 16 and without one: every startup error (`forgebase/tests/startup.rs`, `compose.rs` unit tests); embedded files resolved relative to the calling crate, the DocType-list guard, hook order across apps (an extending app's hook runs after and can reject), ownership in the metadata API, app migrations (once, in app order, checksum mismatch refused before anything else is applied, a failing migration rolled back and the run stopped, `fb_app`, dry run) (`forgebase/tests/apps.rs`); the migration lock held for the whole migrate (`forgebase-db/tests/app_migrations.rs`); a binary with apps end to end (`forgebase/tests/app_binary.rs`). All existing tests pass unchanged except where they count the framework migrations or list the keys of a metadata item.
+- **Exit criteria:** (to be completed in M5.2 and M5.3) a developer follows the guide and gets a running app with tests, without touching framework crates. Proves success criteria 1 and 5 of the [Project Goal](vision.md#project-goal); capabilities 9 and 10.
+- **Non-goals:** runtime plugins ([ADR 0006](../adr/0006-extension-model.md)), domain modules beyond the small examples, uninstalling apps, publishing to crates.io, multi-site, custom fields on another app's DocType (M10), hooks with database access, Rust-code migrations.
 
 ## M6 Jobs and scheduler
 

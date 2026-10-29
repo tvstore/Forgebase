@@ -13,10 +13,11 @@ use std::sync::Arc;
 
 use forgebase_http::{AppConfig, AppState};
 
+use crate::app::App;
 use crate::args::{
     ActorArg, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
 };
-use crate::doctypes::load_dir;
+use crate::compose::{Composed, compose};
 use crate::error::CliError;
 use crate::report::migrate_report;
 use forgebase_http::json::{
@@ -29,8 +30,10 @@ const DEFAULT_ACTOR: &str = "cli";
 /// Environment variable with the PostgreSQL URL.
 const DATABASE_URL_VAR: &str = "FORGEBASE_DATABASE_URL";
 
-/// Runs one command.
-pub async fn run(command: Command) -> Result<(), CliError> {
+/// Runs one command with the apps compiled into the binary. Every command first checks that
+/// the apps (and the `--doctypes` directory) fit together; a startup error ends it with exit
+/// code 1.
+pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
     let url = database_url()?;
     match command {
         Command::Migrate {
@@ -38,19 +41,25 @@ pub async fn run(command: Command) -> Result<(), CliError> {
             dry_run,
             lock_timeout_ms,
         } => {
-            let registry = registry(&doctypes)?;
+            let composed = composed(apps, &doctypes)?;
             let pool = forgebase_db::connect(&url).await?;
             let options = SyncOptions {
                 dry_run,
                 lock_timeout: Duration::from_millis(lock_timeout_ms),
             };
-            let report = forgebase_db::migrate(&pool, &registry, &options).await?;
-            write_stdout(&migrate_report(&report, dry_run))
+            let report = composed.migrate(&pool, &options).await?;
+            write_stdout(&migrate_report(&report, dry_run, composed.app_count()))
         }
-        Command::Doc(command) => execute(&url, prepare(command)?).await,
-        Command::User(command) => user(&url, command).await,
-        Command::Token(command) => token(&url, command).await,
-        Command::Serve { doctypes } => serve(&url, &doctypes).await,
+        Command::Doc(command) => execute(&url, prepare(command, apps)?).await,
+        Command::User(command) => {
+            compose(apps, None)?;
+            user(&url, command).await
+        }
+        Command::Token(command) => {
+            compose(apps, None)?;
+            token(&url, command).await
+        }
+        Command::Serve { doctypes } => serve(&url, &doctypes, apps).await,
     }
 }
 
@@ -106,7 +115,7 @@ enum StatusKind {
     Amend,
 }
 
-fn prepare(command: DocCommand) -> Result<Operation, CliError> {
+fn prepare(command: DocCommand, apps: &[App]) -> Result<Operation, CliError> {
     Ok(match command {
         DocCommand::Insert {
             doctype,
@@ -114,7 +123,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             data,
             actor,
         } => {
-            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
             let input = parse_input(&registry, &found, &read_data(&data.data)?)?;
             Operation::Insert {
                 registry,
@@ -128,7 +137,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             name,
             doctypes,
         } => {
-            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
             Operation::Get {
                 registry,
                 doctype: found.name,
@@ -143,7 +152,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             limit,
             offset,
         } => {
-            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
             let query = ListQuery {
                 filters: match filter {
                     Some(text) => parse_filters(&found, &text)?,
@@ -167,7 +176,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             data,
             actor,
         } => {
-            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
             let input = parse_input(&registry, &found, &read_data(&data.data)?)?;
             Operation::Update {
                 registry,
@@ -184,21 +193,45 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             version,
             doctypes,
             actor,
-        } => status(StatusKind::Submit, doctype, name, version, doctypes, actor)?,
+        } => status(
+            apps,
+            StatusKind::Submit,
+            doctype,
+            name,
+            version,
+            doctypes,
+            actor,
+        )?,
         DocCommand::Cancel {
             doctype,
             name,
             version,
             doctypes,
             actor,
-        } => status(StatusKind::Cancel, doctype, name, version, doctypes, actor)?,
+        } => status(
+            apps,
+            StatusKind::Cancel,
+            doctype,
+            name,
+            version,
+            doctypes,
+            actor,
+        )?,
         DocCommand::Amend {
             doctype,
             name,
             version,
             doctypes,
             actor,
-        } => status(StatusKind::Amend, doctype, name, version, doctypes, actor)?,
+        } => status(
+            apps,
+            StatusKind::Amend,
+            doctype,
+            name,
+            version,
+            doctypes,
+            actor,
+        )?,
         DocCommand::Delete {
             doctype,
             name,
@@ -206,7 +239,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             doctypes,
             actor,
         } => {
-            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
             Operation::Delete {
                 registry,
                 doctype: found.name,
@@ -219,6 +252,7 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
 }
 
 fn status(
+    apps: &[App],
     kind: StatusKind,
     doctype: String,
     name: String,
@@ -226,7 +260,7 @@ fn status(
     doctypes: DocTypesDir,
     actor: ActorArg,
 ) -> Result<Operation, CliError> {
-    let (registry, found) = find_doctype(&doctypes, &doctype)?;
+    let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
     Ok(Operation::Status {
         kind,
         registry,
@@ -427,8 +461,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 ///
 /// The first signal stops accepting connections and lets running requests finish, for at most
 /// [`SHUTDOWN_GRACE`]; a second signal, or the end of the grace period, exits at once.
-async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
-    let registry = registry(doctypes)?;
+async fn serve(url: &str, doctypes: &DocTypesDir, apps: &[App]) -> Result<(), CliError> {
+    let registry = composed(apps, doctypes)?.registry;
     let listen = env_or("FORGEBASE_LISTEN", "127.0.0.1:8000");
     let hosts = env_or("FORGEBASE_ALLOWED_HOSTS", "localhost,127.0.0.1");
     let allowed_hosts = parse_allowed_hosts(&hosts)?;
@@ -632,13 +666,18 @@ fn database_url() -> Result<String, CliError> {
     }
 }
 
-fn registry(dir: &DocTypesDir) -> Result<Registry, CliError> {
-    load_dir(&dir.doctypes).map_err(CliError::DocTypes)
+/// The apps of the binary plus the `--doctypes` directory, composed into one registry.
+fn composed(apps: &[App], dir: &DocTypesDir) -> Result<Composed, CliError> {
+    Ok(compose(apps, dir.doctypes.as_deref())?)
 }
 
-/// The registry of the directory and the DocType called `name` in it.
-fn find_doctype(dir: &DocTypesDir, name: &str) -> Result<(Registry, DocType), CliError> {
-    let registry = registry(dir)?;
+/// The registry of the apps and the directory, and the DocType called `name` in it.
+fn find_doctype(
+    apps: &[App],
+    dir: &DocTypesDir,
+    name: &str,
+) -> Result<(Registry, DocType), CliError> {
+    let registry = composed(apps, dir)?.registry;
     match registry.get(name) {
         Some(doctype) => {
             let doctype = doctype.clone();

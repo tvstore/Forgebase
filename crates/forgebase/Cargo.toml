@@ -1,0 +1,50 @@
+[package]
+name = "forgebase"
+description = "Forgebase entry crate: the app model, the public API for apps and the forgebase binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "forgebase"
+path = "src/main.rs"
+
+# `testing` adds `forgebase::testing`, the helpers for the tests of apps (a throwaway database,
+# an in-process HTTP client, a guard for the embedded DocType list). Apps enable it in their
+# `[dev-dependencies]` only.
+[features]
+testing = ["dep:axum", "dep:tower"]
+
+[dependencies]
+forgebase-core.workspace = true
+forgebase-db.workspace = true
+forgebase-http.workspace = true
+axum = { workspace = true, optional = true }
+clap.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["parsing", "formatting"] }
+tower = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+
+[dev-dependencies]
+# The integration tests use `forgebase::testing`: this line turns the feature on for them, so a
+# plain `cargo test` runs them too.
+forgebase = { path = ".", features = ["testing"] }
+
+# A binary with apps, end to end: this test file is its own `main`. Run as a test it starts
+# itself again as the app binary (see the file), so that `Forgebase::run` is tested with real
+# command-line arguments.
+[[test]]
+name = "app_binary"
+harness = false

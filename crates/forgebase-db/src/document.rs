@@ -204,15 +204,12 @@ async fn insert_in(
     amend: Option<&AmendOf>,
 ) -> Result<StoredDocument, DbError> {
     let actor = caller.name();
-    let ctx = HookContext {
-        doctype: &doctype.name,
-        actor,
-        operation: if amend.is_some() {
-            Operation::Amend
-        } else {
-            Operation::Insert
-        },
+    let operation = if amend.is_some() {
+        Operation::Amend
+    } else {
+        Operation::Insert
     };
+    let ctx = HookContext::new(&doctype.name, actor, operation);
     run_hooks(registry, doctype, "before_insert", |hooks| {
         hooks.before_insert(&ctx, &mut doc)
     })?;
@@ -476,11 +473,7 @@ async fn update_in(
             "field `{field}` gives the document its name and cannot be changed (renames are not supported yet)"
         )));
     }
-    let ctx = HookContext {
-        doctype: &doctype.name,
-        actor: caller.name(),
-        operation: Operation::Update,
-    };
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Update);
     run_hooks(registry, doctype, "validate", |hooks| {
         hooks.validate(&ctx, &mut doc)
     })?;
@@ -742,11 +735,7 @@ async fn submit_in(
     .await?;
     require_status(doctype, &current, DocStatus::Draft, "submit")?;
     let mut doc = as_document(&current);
-    let ctx = HookContext {
-        doctype: &doctype.name,
-        actor: caller.name(),
-        operation: Operation::Submit,
-    };
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Submit);
     run_hooks(registry, doctype, "validate", |hooks| {
         hooks.validate(&ctx, &mut doc)
     })?;
@@ -838,11 +827,7 @@ async fn cancel_in(
     .await?;
     require_status(doctype, &current, DocStatus::Submitted, "cancel")?;
     let doc = as_document(&current);
-    let ctx = HookContext {
-        doctype: &doctype.name,
-        actor: caller.name(),
-        operation: Operation::Cancel,
-    };
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Cancel);
     run_hooks(registry, doctype, "before_cancel", |hooks| {
         hooks.before_cancel(&ctx, &doc)
     })?;
@@ -1044,11 +1029,7 @@ async fn delete_in(
         return Err(invalid_status(doctype, &current, "delete"));
     }
     let doc = as_document(&current);
-    let ctx = HookContext {
-        doctype: &doctype.name,
-        actor: caller.name(),
-        operation: Operation::Delete,
-    };
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Delete);
     run_hooks(registry, doctype, "before_delete", |hooks| {
         hooks.before_delete(&ctx, &doc)
     })?;
