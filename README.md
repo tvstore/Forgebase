@@ -252,7 +252,7 @@ fn main() -> std::process::ExitCode {
 }
 ```
 
-The binary has the same commands as the stock one (`migrate` also applies the app migrations). The stock binary has no apps, so it reports `"app": "local"` for every DocType in the metadata API (the `--doctypes` directory is the app `local`). Everything about how apps load, depend on each other, own DocTypes, order their hooks and migrate is in [ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md) and [the architecture](docs/blueprint/architecture.md#2-extension-model-accepted-adr-0006). 
+The binary has the same commands as the stock one (`migrate` also applies the app migrations). The stock binary has no apps, so it reports `"app": "local"` for every DocType in the metadata API (the `--doctypes` directory is the app `local`). Everything about how apps load, depend on each other, own DocTypes, order their hooks and migrate is in [ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md) and [the architecture](docs/blueprint/architecture.md#2-extension-model-accepted-adr-0006).
 
 To start an app, generate one (a crate with a sample DocType, a hook, tests, a README and an `AGENTS.md` for its maintainers; it builds and passes its tests as created):
 

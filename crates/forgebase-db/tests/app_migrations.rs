@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::TestDb;
 use forgebase_core::meta::Registry;
-use forgebase_db::{AppMigration, AppSpec, DbError, SyncOptions, migrate_apps};
+use forgebase_db::{AppMigration, AppSpec, DbError, SyncOptions, connect, migrate_apps};
 
 /// The key of the migration lock (`MIGRATE_LOCK_KEY` in `migrate.rs`).
 const KEY: i64 = 0x4642_4d49_4752_0001;
@@ -228,4 +228,87 @@ async fn the_app_migration_tables_are_found_once_they_exist() {
             .await
             .expect("check")
     );
+}
+
+const ONE: AppMigration<'static> = AppMigration {
+    version: 1,
+    name: "one",
+    sql: "CREATE TABLE zz_one (n integer)",
+};
+const TWO: AppMigration<'static> = AppMigration {
+    version: 2,
+    name: "two",
+    sql: "CREATE TABLE zz_two (n integer)",
+};
+/// `ONE` with other SQL: the same version and name, another checksum.
+const ONE_EDITED: AppMigration<'static> = AppMigration {
+    version: 1,
+    name: "one",
+    sql: "CREATE TABLE zz_one (n bigint)",
+};
+
+fn app<'a>(migrations: &'a [AppMigration<'a>]) -> AppSpec<'a> {
+    AppSpec {
+        name: "verify_app",
+        version: Some("1"),
+        migrations,
+    }
+}
+
+#[tokio::test]
+async fn a_dry_run_with_pending_framework_migrations_still_verifies_the_app_migrations() {
+    // The situation of a later framework migration (0005, say) that is pending while the app
+    // tables exist. None exists yet, so it is simulated: migration 0004 is made pending again.
+    // A dry run executes the pending migration's SQL before rolling back, and 0004 would fail
+    // on tables that exist; so the real tables are moved to the schema `scratch`, which comes
+    // after `public` in the search path: 0004 creates its tables in `public` (and rolls them
+    // back), and the app migration queries still find the moved ones.
+    let db = TestDb::migrated().await;
+    let options = SyncOptions {
+        dry_run: false,
+        lock_timeout: Duration::from_secs(5),
+    };
+    let registry = Registry::new();
+    migrate_apps(&db.pool, &registry, &[app(&[ONE])], &options)
+        .await
+        .expect("apply the first app migration");
+    db.exec(
+        "CREATE SCHEMA scratch; \
+         ALTER TABLE fb_app SET SCHEMA scratch; \
+         ALTER TABLE fb_app_migration SET SCHEMA scratch; \
+         DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET search_path = public, scratch', \
+             current_database()); END $$; \
+         DELETE FROM fb_migration WHERE version = 4",
+    )
+    .await;
+    // New connections have the search path; the pool of `db` may still hold old ones.
+    let pool = connect(&db.url()).await.expect("pool");
+    let dry = SyncOptions {
+        dry_run: true,
+        lock_timeout: Duration::from_secs(5),
+    };
+
+    // An applied migration whose SQL changed is found, though framework migrations are pending.
+    let error = migrate_apps(&pool, &registry, &[app(&[ONE_EDITED])], &dry)
+        .await
+        .expect_err("the changed migration is refused");
+    assert!(
+        matches!(&error, DbError::AppChecksumMismatch { version: 1, .. }),
+        "{error:?}"
+    );
+
+    // Only the migrations that are really pending are listed, not every declared one.
+    let report = migrate_apps(&pool, &registry, &[app(&[ONE, TWO])], &dry)
+        .await
+        .expect("dry run");
+    assert_eq!(report.migrations.len(), 1, "the framework migration 0004");
+    assert!(report.sync.is_none());
+    assert_eq!(
+        report.app_migrations.len(),
+        1,
+        "{:?}",
+        report.app_migrations
+    );
+    assert_eq!(report.app_migrations[0].version, 2);
+    assert_eq!(report.app_migrations[0].name, "two");
 }

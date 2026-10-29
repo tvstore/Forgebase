@@ -12,7 +12,7 @@ Instructions for every agent and human who changes this app. `{{name}}` is a [Fo
 
 ## Rules
 
-1. **Depend on the `forgebase` crate only.** Never on `forgebase-core`, `forgebase-db` or `forgebase-http`: they are internal and change without notice. If something you need is not exported, say so; do not work around it.
+1. **Of the Forgebase crates, depend on `forgebase` only** (never `forgebase-core`, `forgebase-db` or `forgebase-http`): the others are internal and change without notice. If something you need is not exported, say so; do not work around it.
 2. **List every DocType file** in `doctypes![..]` in `src/lib.rs`. Nothing is scanned; `every_doctype_file_is_listed` fails otherwise.
 3. **DocType names start with the app name** (`{{name}}_note`): names are global across apps. Fields and names follow `^[a-z][a-z0-9_]*$`.
 4. **Change DocTypes additively**: add fields and DocTypes. A changed type or length is refused by `migrate`; to rename or reshape data, add a migration. Do not edit another app's DocTypes: extend them with hooks.

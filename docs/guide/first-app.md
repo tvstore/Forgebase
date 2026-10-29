@@ -77,7 +77,15 @@ Make a second app, `tasks`, that links to the notes of `crm` and adds a rule to 
 target/debug/forgebase new-app tasks --forgebase-path . --dir ~/apps
 ```
 
-In `tasks`, replace the sample DocType with `doctypes/tasks_task.toml`:
+`tasks` starts with the same sample as `crm`, which it does not need. Remove its sample DocType, link `crm`, and then replace three files.
+
+```sh
+cd ~/apps/tasks
+rm doctypes/tasks_note.toml
+cargo add crm --path ../crm      # adds crm = { version = "0.1.0", path = "../crm" } to [dependencies]
+```
+
+`doctypes/tasks_task.toml` (new):
 
 ```toml
 name = "tasks_task"
@@ -100,7 +108,7 @@ write = true
 create = true
 ```
 
-Then `Cargo.toml` gets `crm = { path = "../crm" }` under `[dependencies]`, and `src/lib.rs` becomes:
+`src/lib.rs` (replaces the sample, including its `NoteRules` hook):
 
 ```rust
 use forgebase::{App, DocTypeHooks, Document, HookContext, HookError, Value};
@@ -131,10 +139,85 @@ impl DocTypeHooks for NoDrafts {
 `src/main.rs` lists the dependency first:
 
 ```rust
-forgebase::Forgebase::new().app(crm::app()).app(tasks::app()).run()
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    forgebase::Forgebase::new()
+        .app(crm::app())
+        .app(tasks::app())
+        .run()
+}
 ```
 
-and the tests build the same binary (`Forgebase::new().app(crm::app()).app(tasks::app())`) and log in a user with both roles. The rules of the model:
+`tests/app.rs` (replaces the sample tests, which test the sample DocType and hook that are gone). It builds the same binary as `main.rs`, checks the hook without a database, and runs both apps end to end with a user that has both roles:
+
+```rust
+use forgebase::testing::{TestDb, assert_doctypes_listed, json};
+use forgebase::{DocTypeHooks, Document, Forgebase, HookContext, Operation, Value};
+
+use tasks::{NoDrafts, app};
+
+/// The same apps, in the same order, as `main.rs`.
+fn binary() -> Forgebase {
+    Forgebase::new().app(crm::app()).app(tasks::app())
+}
+
+#[test]
+fn every_doctype_file_is_listed() {
+    assert_doctypes_listed(&app(), env!("CARGO_MANIFEST_DIR"), "doctypes");
+}
+
+#[test]
+fn the_apps_fit_together() {
+    binary().check().expect("valid apps");
+}
+
+#[test]
+fn a_draft_note_is_rejected_by_the_hook() {
+    let ctx = HookContext::new("crm_note", "ann", Operation::Insert);
+    let mut doc = Document::default();
+    doc.values
+        .insert("title".to_owned(), Value::Text("DRAFT: idea".to_owned()));
+    assert!(NoDrafts.validate(&ctx, &mut doc).is_err());
+
+    doc.values
+        .insert("title".to_owned(), Value::Text("Plan".to_owned()));
+    NoDrafts.validate(&ctx, &mut doc).expect("not a draft");
+}
+
+#[tokio::test]
+async fn tasks_link_to_notes_and_drafts_are_refused() {
+    let binary = binary();
+    let db = TestDb::new().await;
+    db.migrate(&binary, false).await.expect("migrate");
+    db.create_user("ann", &["Crm User", "Tasks User"]).await;
+    let ann = db.client(&binary).login("ann").await;
+
+    // The hook of `tasks` runs on the DocType of `crm`.
+    let draft = ann
+        .post("/api/v1/resource/crm_note", json!({"title": "DRAFT: idea"}))
+        .await;
+    assert_eq!(draft.status, 422, "{:?}", draft.body);
+
+    let note = ann
+        .post("/api/v1/resource/crm_note", json!({"title": "Plan"}))
+        .await;
+    assert_eq!(note.status, 201, "{:?}", note.body);
+    let note_name = note.data()["name"].as_str().expect("name").to_owned();
+
+    // A task links to the note of the other app.
+    let task = ann
+        .post(
+            "/api/v1/resource/tasks_task",
+            json!({"subject": "Call", "note": note_name}),
+        )
+        .await;
+    assert_eq!(task.status, 201, "{:?}", task.body);
+    db.cleanup().await;
+}
+```
+
+Run `cargo test` in both crates (`crm` still passes on its own). The rules of the model:
 
 - `depends_on` names apps that must be registered **earlier**. Nothing is sorted; a wrong order is an error.
 - An app may link to, and register hooks for, DocTypes of **itself and its dependencies** only.
@@ -176,12 +259,16 @@ The toolchain: `rust-version` in the generated `Cargo.toml` is the minimum Forge
 
 ## Common errors
 
-Everything about how the apps fit together is checked **before any command runs**, and all problems are reported together (exit code 1). Real examples:
+Everything about how the apps fit together is checked **before any command runs**, and all problems are reported together (exit code 1). Real examples, from the apps of section 5:
 
 ```
 error: invalid app setup:
   - app `tasks` depends on `crm`, which is registered after it; register `crm` first (apps are never sorted)
+  - app `tasks`: doctypes/tasks_task.toml: field `note` of doctype `tasks_task` refers to `crm_note`, which belongs to app `crm`; app `tasks` does not depend on `crm` (add .depends_on(&["crm"]), registered before `tasks`)
+  - app `tasks`: hooks registered for DocType `crm_note` of app `crm`, which `tasks` does not depend on
 ```
+
+The first line is the cause; the other two follow from it. This is the output of `tasks` with `.app(tasks::app()).app(crm::app())` in `main.rs`. Without `.depends_on(&["crm"])` at all, only the last two lines appear (the second example below).
 
 ```
 error: invalid app setup:

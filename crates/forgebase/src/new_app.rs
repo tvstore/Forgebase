@@ -1,10 +1,10 @@
 //! `forgebase new-app`: writes a small app crate that builds and passes its own tests.
 //!
 //! The files are in `templates/app/` and embedded with `include_str!`. They are plain text with
-//! four placeholders that are replaced with simple string replacement (no template engine):
-//! `{{name}}`, `{{title}}` (the name as words, for labels and the role), `{{forgebase_path}}` (the
-//! `crates/forgebase` directory of the checkout) and `{{rust_version}}` (the MSRV of this
-//! Forgebase).
+//! four placeholders that are replaced in one pass over the text (no template engine, and a
+//! replaced value is never scanned again): `{{name}}`, `{{title}}` (the name as words, for labels
+//! and the role), `{{forgebase_path}}` (the `crates/forgebase` directory of the checkout) and
+//! `{{rust_version}}` (the MSRV of this Forgebase).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,8 +37,23 @@ const FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Rust keywords: `<name>::app()` in the generated `src/main.rs` would not compile, and Cargo does
+/// not refuse them as package names. The lowercase ones of the Rust reference ("Keywords": strict,
+/// 2018+ and reserved; the weak keywords `union` and `macro_rules` are ordinary identifiers in
+/// a path, so they are allowed). `Self` and the like cannot happen: app names are lowercase.
+const KEYWORDS: &[&str] = &[
+    // Strict.
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", // Strict since the 2018 edition, and `gen` (2024).
+    "async", "await", "dyn", "gen", // Reserved for future use.
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv", "try", "typeof",
+    "unsized", "virtual", "yield",
+];
+
 /// Names that cannot be the name of the crate: it would clash with a crate it uses or with the
-/// standard library. (Cargo refuses Rust keywords itself, with a clear message.)
+/// standard library.
 const RESERVED: &[&str] = &[
     "forgebase",
     "tokio",
@@ -61,13 +76,21 @@ pub(crate) fn new_app(name: &str, forgebase_path: &Path, dir: &Path) -> Result<P
             name.len()
         ));
     }
+    if KEYWORDS.contains(&name) {
+        problems.push(format!(
+            "app name `{name}` is a Rust keyword and cannot be the name of a crate here"
+        ));
+    }
     if RESERVED.contains(&name) {
         problems.push(format!(
             "app name `{name}` cannot be used as a crate name here"
         ));
     }
     if !problems.is_empty() {
-        return Err(CliError::NewApp(bullets(&problems)));
+        return Err(CliError::NewApp(format!(
+            "invalid app name:\n{}",
+            bullets(&problems)
+        )));
     }
 
     let crate_dir = forgebase_crate_dir(forgebase_path)?;
@@ -88,44 +111,86 @@ pub(crate) fn new_app(name: &str, forgebase_path: &Path, dir: &Path) -> Result<P
             env!("CARGO_PKG_RUST_VERSION").to_owned(),
         ),
     ];
-    let render = |text: &str| {
-        values.iter().fold(text.to_owned(), |text, (key, value)| {
-            text.replace(key, value)
-        })
-    };
+    let render = |text: &str| render(text, &values);
 
-    let io = |action: &str, path: &Path, error: std::io::Error| {
-        CliError::NewApp(format!("cannot {action} {}: {error}", path.display()))
-    };
-    fs::create_dir_all(dir).map_err(|e| io("create", dir, e))?;
-    fs::create_dir(&target).map_err(|e| io("create", &target, e))?;
-    // From here on the directory is ours: when anything fails it is removed again, so a failed
-    // run leaves nothing half written.
-    let written = write_files(&target, &render, forgebase_path);
-    if let Err(error) = written {
-        let _ = fs::remove_dir_all(&target);
-        return Err(error);
-    }
+    // A missing `--dir` (and its missing parents) is created and stays when a later step fails:
+    // only the directory of the app itself is removed again.
+    fs::create_dir_all(dir)
+        .map_err(|e| CliError::NewApp(format!("cannot create {}: {e}", dir.display())))?;
+    generate(&target, &render, forgebase_path, FILES)?;
     Ok(target)
+}
+
+/// Creates `target` and writes `files` (and the lock file of the checkout) into it. From the
+/// moment the directory exists it is ours: when anything fails it is removed again, so a failed
+/// run leaves nothing half written.
+fn generate(
+    target: &Path,
+    render: &dyn Fn(&str) -> String,
+    checkout: &Path,
+    files: &[(&str, &str)],
+) -> Result<(), CliError> {
+    fs::create_dir(target)
+        .map_err(|e| CliError::NewApp(format!("cannot create {}: {e}", target.display())))?;
+    let written = write_files(target, render, checkout, files);
+    if written.is_err() {
+        let _ = fs::remove_dir_all(target);
+    }
+    written
+}
+
+/// `text` with every known placeholder replaced, in one pass: the replaced values are not
+/// scanned again (a path may contain `{{name}}`), and an unknown `{{` is left as it is.
+fn render(text: &str, values: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("{{") {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match values.iter().find(|(key, _)| rest.starts_with(key)) {
+            Some((key, value)) => {
+                out.push_str(value);
+                rest = &rest[key.len()..];
+            }
+            None => {
+                out.push_str("{{");
+                rest = &rest[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What the command prints: where the app is and what to do next.
 pub(crate) fn report(created: &Path) -> String {
     let path = created.display();
+    let quoted = shell_quote(&created.display().to_string());
     format!(
-        "created {path}\n\nnext steps:\n  cd {path}\n  export FORGEBASE_TEST_DATABASE_URL=postgres://user:password@localhost:5432/postgres\n  cargo test\n\nREADME.md says how to migrate, serve and extend the app; AGENTS.md has the rules for whoever maintains it.\n"
+        "created {path}\n\nnext steps:\n  cd {quoted}\n  export FORGEBASE_TEST_DATABASE_URL=postgres://user:password@localhost:5432/postgres\n  cargo test\n\nREADME.md says how to migrate, serve and extend the app; AGENTS.md has the rules for whoever maintains it.\n"
     )
+}
+
+/// `text` as one shell word: unchanged when it has only safe characters, else in single quotes.
+fn shell_quote(text: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_./-+:@%,=~".contains(c);
+    if !text.is_empty() && text.chars().all(safe) {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
 }
 
 fn write_files(
     target: &Path,
     render: &dyn Fn(&str) -> String,
     checkout: &Path,
+    files: &[(&str, &str)],
 ) -> Result<(), CliError> {
     let io = |path: &Path, error: std::io::Error| {
         CliError::NewApp(format!("cannot write {}: {error}", path.display()))
     };
-    for (path, template) in FILES {
+    for (path, template) in files {
         let file = target.join(render(path));
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
@@ -204,6 +269,50 @@ mod tests {
         assert_eq!(title("demo"), "Demo");
         assert_eq!(title("my_app"), "My App");
         assert_eq!(title("a1_b2"), "A1 B2");
+    }
+
+    #[test]
+    fn render_replaces_in_one_pass() {
+        let values = [
+            ("{{name}}", "a{{title}}b".to_owned()),
+            ("{{title}}", "T".to_owned()),
+        ];
+        // A replaced value is not scanned again; an unknown or unfinished `{{` stays.
+        assert_eq!(
+            render("x {{name}} {{title}} {{other}} {{ {{name", &values),
+            "x a{{title}}b T {{other}} {{ {{name"
+        );
+        assert_eq!(render("no placeholder", &values), "no placeholder");
+    }
+
+    #[test]
+    fn shell_quoting() {
+        assert_eq!(shell_quote("./my_app"), "./my_app");
+        assert_eq!(shell_quote("/tmp/a-b/c.d"), "/tmp/a-b/c.d");
+        assert_eq!(shell_quote("/tmp/my apps/x"), "'/tmp/my apps/x'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("a$b;c"), "'a$b;c'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn a_failed_write_removes_the_directory_it_created() {
+        let parent = std::env::temp_dir().join(format!(
+            "forgebase-test-new-app-cleanup-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).expect("parent");
+        let target = parent.join("demo");
+        // `a.txt` is a file, so writing `a.txt/b.txt` fails after the first file was written.
+        let files = [("a.txt", "one"), ("a.txt/b.txt", "two")];
+        let error = generate(&target, &|text| text.to_owned(), &parent, &files)
+            .expect_err("the second file cannot be written");
+        assert!(error.to_string().contains("cannot write"), "{error}");
+        assert!(!target.exists(), "the half-written directory is removed");
+        // The parent, which was not created by `generate`, stays.
+        assert!(parent.is_dir());
+        let _ = fs::remove_dir_all(&parent);
     }
 
     #[test]

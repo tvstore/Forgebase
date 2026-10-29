@@ -262,6 +262,7 @@ fn it_refuses_names_that_are_not_app_names_or_crate_names() {
     let checkout = scratch.checkout();
     let long = "a".repeat(55);
     let cases = [
+        ("My-App", "invalid app name:\n  - app name \"My-App\""),
         ("My-App", "must match"),
         ("1app", "must match"),
         ("", "must not be empty"),
@@ -284,6 +285,111 @@ fn it_refuses_names_that_are_not_app_names_or_crate_names() {
     }
     // Nothing but the checkout was created.
     assert_eq!(fs::read_dir(&scratch.0).expect("dir").count(), 1);
+}
+
+#[test]
+fn it_refuses_rust_keywords_as_names() {
+    let scratch = Scratch::new();
+    let checkout = scratch.checkout();
+    for name in [
+        "match", "type", "self", "crate", "super", "async", "await", "dyn", "try", "gen", "fn",
+        "mod", "yield", "macro", "abstract",
+    ] {
+        let output = new_app(
+            &scratch.0,
+            &[name, "--forgebase-path", checkout.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(1), "name {name:?}");
+        assert!(
+            stderr(&output).contains(&format!("`{name}` is a Rust keyword")),
+            "name {name:?}: {}",
+            stderr(&output)
+        );
+        assert!(!scratch.0.join(name).exists(), "name {name:?}");
+    }
+    // Weak keywords are ordinary identifiers in a path, and names that merely contain a keyword.
+    for name in ["union", "macro_rules", "match_rules", "type_a"] {
+        let output = new_app(
+            &scratch.0,
+            &[name, "--forgebase-path", checkout.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "name {name:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn a_path_with_a_space_a_quote_and_a_backslash_is_escaped_in_cargo_toml() {
+    let scratch = Scratch::new();
+    // `\` and `"` are valid in a file name on Unix; on Windows they are not, and the test is
+    // skipped there (the escaping itself is the same code).
+    if cfg!(windows) {
+        return;
+    }
+    let root = scratch.0.join(r#"my "odd" check\out"#);
+    fs::create_dir_all(root.join("crates/forgebase")).expect("checkout");
+    fs::write(
+        root.join("crates/forgebase/Cargo.toml"),
+        "[package]\nname = \"forgebase\"\n",
+    )
+    .expect("manifest");
+    let output = new_app(
+        &scratch.0,
+        &["demo", "--forgebase-path", root.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let manifest = fs::read_to_string(scratch.0.join("demo/Cargo.toml")).expect("manifest");
+    // The TOML basic string: the quote and the backslash are escaped, the space is not. The
+    // scratch directory is a plain path.
+    let expected = format!(
+        r#"path = "{}/my \"odd\" check\\out/crates/forgebase""#,
+        scratch.0.display()
+    );
+    assert_eq!(manifest.matches(&expected).count(), 2, "{manifest}");
+}
+
+#[test]
+fn placeholder_text_in_the_checkout_path_is_not_replaced() {
+    let scratch = Scratch::new();
+    let root = scratch.0.join("{{name}}-{{title}}");
+    fs::create_dir_all(root.join("crates/forgebase")).expect("checkout");
+    fs::write(
+        root.join("crates/forgebase/Cargo.toml"),
+        "[package]\nname = \"forgebase\"\n",
+    )
+    .expect("manifest");
+    let output = new_app(
+        &scratch.0,
+        &["demo", "--forgebase-path", root.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let manifest = fs::read_to_string(scratch.0.join("demo/Cargo.toml")).expect("manifest");
+    let expected = format!("path = \"{}/crates/forgebase\"", root.display());
+    assert_eq!(manifest.matches(&expected).count(), 2, "{manifest}");
+    assert!(manifest.contains("name = \"demo\""), "{manifest}");
+}
+
+#[test]
+fn the_next_steps_quote_a_path_with_spaces() {
+    let scratch = Scratch::new();
+    let checkout = scratch.checkout();
+    let output = new_app(
+        &scratch.0,
+        &[
+            "demo",
+            "--forgebase-path",
+            checkout.to_str().unwrap(),
+            "--dir",
+            "my apps",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("created my apps/demo\n"), "{stdout}");
+    assert!(stdout.contains("  cd 'my apps/demo'\n"), "{stdout}");
 }
 
 #[test]
