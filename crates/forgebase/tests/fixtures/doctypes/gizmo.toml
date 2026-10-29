@@ -1,0 +1,8 @@
+# Fixture of crates/forgebase/tests/apps.rs: links to the Widget of the same app.
+name = "gizmo"
+label = "Gizmo"
+
+[[fields]]
+name = "widget"
+type = "link"
+target = "widget"

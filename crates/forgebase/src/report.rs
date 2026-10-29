@@ -4,8 +4,9 @@ use std::fmt::Write as _;
 
 use forgebase_db::MigrateReport;
 
-/// Renders what a migrate did, or in a dry run would do.
-pub fn migrate_report(report: &MigrateReport, dry_run: bool) -> String {
+/// Renders what a migrate did, or in a dry run would do. The app migrations are mentioned only
+/// when the binary has apps (`apps` is how many).
+pub fn migrate_report(report: &MigrateReport, dry_run: bool, apps: usize) -> String {
     let mut text = String::new();
     if report.migrations.is_empty() {
         text.push_str("framework migrations: up to date\n");
@@ -24,6 +25,7 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool) -> String {
         text.push_str(
             "schema sync: not planned yet, it needs the tables the pending framework migrations create; run without --dry-run to apply them\n",
         );
+        app_migrations(&mut text, report, dry_run, apps);
         return text;
     };
     if sync.steps.is_empty() {
@@ -35,6 +37,7 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool) -> String {
             let _ = writeln!(text, "{step}");
         }
     }
+    app_migrations(&mut text, report, dry_run, apps);
     if !sync.warnings.is_empty() {
         let _ = writeln!(text, "warnings: {}", sync.warnings.len());
         for warning in &sync.warnings {
@@ -47,10 +50,34 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool) -> String {
     text
 }
 
+/// The app migrations, in the order they run (or would run).
+fn app_migrations(text: &mut String, report: &MigrateReport, dry_run: bool, apps: usize) {
+    if apps == 0 && report.app_migrations.is_empty() {
+        return;
+    }
+    if report.app_migrations.is_empty() {
+        text.push_str("app migrations: up to date\n");
+        return;
+    }
+    let verb = if dry_run { "pending" } else { "applied" };
+    let _ = writeln!(
+        text,
+        "app migrations: {} {verb}",
+        report.app_migrations.len()
+    );
+    for migration in &report.app_migrations {
+        let _ = writeln!(
+            text,
+            "  {} {:04} {}",
+            migration.app, migration.version, migration.name
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgebase_db::{MIGRATIONS, SyncReport, Warning};
+    use forgebase_db::{AppliedAppMigration, MIGRATIONS, SyncReport, Warning};
 
     fn sync(steps: usize, warnings: Vec<Warning>, dry_run: bool) -> SyncReport {
         SyncReport {
@@ -69,9 +96,10 @@ mod tests {
         let report = MigrateReport {
             migrations: vec![],
             sync: Some(sync(0, vec![], false)),
+            app_migrations: vec![],
         };
         assert_eq!(
-            migrate_report(&report, false),
+            migrate_report(&report, false, 0),
             "framework migrations: up to date\nschema sync: up to date\n"
         );
     }
@@ -87,11 +115,12 @@ mod tests {
                 }],
                 false,
             )),
+            app_migrations: vec![],
         };
-        let text = migrate_report(&report, false);
+        let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 3 applied\n  0001 init\n  0002 series\n  0003 auth\n"
+                "framework migrations: 4 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n"
             ),
             "{text}"
         );
@@ -108,9 +137,10 @@ mod tests {
         let report = MigrateReport {
             migrations: MIGRATIONS.iter().collect(),
             sync: None,
+            app_migrations: vec![],
         };
-        let text = migrate_report(&report, true);
-        assert!(text.contains("3 pending"), "{text}");
+        let text = migrate_report(&report, true, 0);
+        assert!(text.contains("4 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 
@@ -119,9 +149,44 @@ mod tests {
         let report = MigrateReport {
             migrations: vec![],
             sync: Some(sync(2, vec![], true)),
+            app_migrations: vec![],
         };
-        let text = migrate_report(&report, true);
+        let text = migrate_report(&report, true, 0);
         assert!(text.contains("would apply 2 step(s)"), "{text}");
         assert!(text.ends_with("dry run: nothing was changed\n"), "{text}");
+    }
+
+    #[test]
+    fn app_migrations_are_listed_in_order_when_the_binary_has_apps() {
+        let migration = |app: &str, version: i32, name: &str| AppliedAppMigration {
+            app: app.to_owned(),
+            version,
+            name: name.to_owned(),
+        };
+        let mut report = MigrateReport {
+            migrations: vec![],
+            sync: Some(sync(0, vec![], false)),
+            app_migrations: vec![],
+        };
+        // No apps: nothing is said. Apps without pending migrations: up to date.
+        assert!(!migrate_report(&report, false, 0).contains("app migrations"));
+        assert_eq!(
+            migrate_report(&report, false, 2),
+            "framework migrations: up to date\nschema sync: up to date\napp migrations: up to date\n"
+        );
+        report.app_migrations = vec![migration("crm", 1, "a"), migration("sales", 12, "b")];
+        assert_eq!(
+            migrate_report(&report, false, 2),
+            "framework migrations: up to date\nschema sync: up to date\n\
+             app migrations: 2 applied\n  crm 0001 a\n  sales 0012 b\n"
+        );
+        let dry = migrate_report(&report, true, 2);
+        assert!(dry.contains("app migrations: 2 pending"), "{dry}");
+        assert!(dry.ends_with("dry run: nothing was changed\n"), "{dry}");
+        // While framework migrations are pending, the app migrations are still listed.
+        report.sync = None;
+        let text = migrate_report(&report, true, 2);
+        assert!(text.contains("schema sync: not planned yet"), "{text}");
+        assert!(text.ends_with("  sales 0012 b\n"), "{text}");
     }
 }

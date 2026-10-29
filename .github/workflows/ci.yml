@@ -23,7 +23,8 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # The forgebase-db and forgebase-cli integration tests need PostgreSQL (they create and drop fb_test_* databases).
+    # The forgebase-db, forgebase-http and forgebase integration tests need PostgreSQL (they create and drop fb_test_* databases).
+    # --all-features turns on the `testing` feature of the forgebase crate (its helpers are tested too).
     services:
       postgres:
         image: postgres:16
@@ -47,9 +48,12 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
       - run: cargo build --workspace --locked
+      - run: cargo doc --workspace --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   msrv:
     if: github.event_name != 'schedule'
@@ -60,7 +64,7 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.97 --profile minimal
-      - run: cargo +1.97 check --workspace --all-targets --locked
+      - run: cargo +1.97 check --workspace --all-targets --all-features --locked
 
   deny:
     runs-on: ubuntu-latest
@@ -135,7 +139,7 @@ jobs:
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
-      - run: cargo build --locked -p forgebase-cli
+      - run: cargo build --locked -p forgebase
       - name: Check the Node version
         run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
       # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.

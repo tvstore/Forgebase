@@ -17,7 +17,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Apply framework migrations and sync the DocType schema (additive changes only).
+    /// Apply framework migrations, sync the DocType schema (additive changes only) and apply the
+    /// SQL data migrations of the apps compiled into the binary.
     Migrate {
         #[command(flatten)]
         doctypes: DocTypesDir,
@@ -47,6 +48,26 @@ pub enum Command {
         #[command(flatten)]
         doctypes: DocTypesDir,
     },
+}
+
+impl Command {
+    /// The `--doctypes` option of the command, for commands that have it.
+    pub fn doctypes(&self) -> Option<&DocTypesDir> {
+        match self {
+            Command::Migrate { doctypes, .. } | Command::Serve { doctypes } => Some(doctypes),
+            Command::Doc(
+                DocCommand::Insert { doctypes, .. }
+                | DocCommand::Get { doctypes, .. }
+                | DocCommand::List { doctypes, .. }
+                | DocCommand::Update { doctypes, .. }
+                | DocCommand::Submit { doctypes, .. }
+                | DocCommand::Cancel { doctypes, .. }
+                | DocCommand::Amend { doctypes, .. }
+                | DocCommand::Delete { doctypes, .. },
+            ) => Some(doctypes),
+            Command::User(_) | Command::Token(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -239,9 +260,11 @@ pub struct VersionArg {
 
 #[derive(Debug, Args)]
 pub struct DocTypesDir {
-    /// Directory with one DocType `*.toml` file per DocType (not searched recursively).
+    /// Directory with one DocType `*.toml` file per DocType (not searched recursively). It
+    /// becomes the app `local`, which depends on every app compiled into the binary. The stock
+    /// `forgebase` binary has no apps, so it needs this option; a binary with apps does not.
     #[arg(long, value_name = "DIR")]
-    pub doctypes: PathBuf,
+    pub doctypes: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

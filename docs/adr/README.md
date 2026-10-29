@@ -31,7 +31,7 @@ An ADR records one significant decision: the context, what was decided, what els
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0002](0002-modular-monolith-and-workspace-layout.md) | Modular monolith and workspace layout | Accepted |
+| [0002](0002-modular-monolith-and-workspace-layout.md) | Modular monolith and workspace layout | Accepted (amended by 0012) |
 | [0003](0003-postgresql-only.md) | PostgreSQL only | Accepted |
 | [0004](0004-database-access-layer.md) | Database access layer | Accepted |
 | [0005](0005-http-stack.md) | HTTP stack: axum on tokio | Accepted |
@@ -41,3 +41,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0009](0009-lifecycle-pipeline-and-hooks.md) | Lifecycle pipeline and hooks | Accepted |
 | [0010](0010-authentication-and-sessions.md) | Authentication and sessions | Accepted |
 | [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted |
+| [0012](0012-app-model-and-public-api-boundary.md) | App model and public API boundary | Accepted |

@@ -800,13 +800,17 @@ impl DocField {
     }
 }
 
-/// A set of DocTypes keyed by name, and the lifecycle hooks the app registered for them.
+/// A set of DocTypes keyed by name, an optional owner tag per DocType, and the lifecycle hooks
+/// the app registered for them.
 ///
 /// Cloning is cheap for the hooks (they are shared). A registry is not comparable: hook sets
 /// are trait objects.
 #[derive(Clone, Default)]
 pub struct Registry {
     doctypes: BTreeMap<String, DocType>,
+    /// DocType name -> the tag of the app that owns it (only for DocTypes added with
+    /// [`Registry::add_owned`]).
+    owners: BTreeMap<String, String>,
     hooks: BTreeMap<String, Vec<Arc<dyn DocTypeHooks>>>,
 }
 
@@ -848,6 +852,22 @@ impl Registry {
         }
         self.doctypes.insert(doctype.name.clone(), doctype);
         Ok(())
+    }
+
+    /// Like [`Registry::add`], and records `owner` as the owner of the DocType
+    /// ([`Registry::owner`]). The owner is only a tag (an app name): this crate attaches no
+    /// rules to it.
+    pub fn add_owned(&mut self, owner: &str, doctype: DocType) -> Result<(), Vec<DefinitionError>> {
+        let name = doctype.name.clone();
+        self.add(doctype)?;
+        self.owners.insert(name, owner.to_owned());
+        Ok(())
+    }
+
+    /// The owner tag given to [`Registry::add_owned`], or `None` for a DocType added with
+    /// [`Registry::add`] (and for an unknown name).
+    pub fn owner(&self, doctype: &str) -> Option<&str> {
+        self.owners.get(doctype).map(String::as_str)
     }
 
     /// Registers a hook set for a DocType. The DocType must already be in the registry
@@ -1648,5 +1668,22 @@ mod tests {
         let text = format!("{registry:?}");
         assert!(text.contains("hooks: {\"thing\": 2}"), "{text}");
         assert!(text.contains("doctypes:"), "{text}");
+    }
+
+    #[test]
+    fn owner_is_a_tag_set_by_add_owned() {
+        let mut registry = Registry::new();
+        registry.add_owned("sales", doctype(vec![])).unwrap();
+        let mut other = doctype(vec![]);
+        other.name = "other".into();
+        registry.add(other).unwrap();
+        assert_eq!(registry.owner("thing"), Some("sales"));
+        assert_eq!(registry.owner("other"), None);
+        assert_eq!(registry.owner("unknown"), None);
+        // A refused DocType records no owner.
+        let mut dup = doctype(vec![]);
+        dup.name = "other".into();
+        assert!(registry.add_owned("crm", dup).is_err());
+        assert_eq!(registry.owner("other"), None);
     }
 }

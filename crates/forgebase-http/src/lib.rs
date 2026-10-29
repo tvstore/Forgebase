@@ -1,6 +1,7 @@
 //! The HTTP API (M3.3): routes, authentication and the error envelope, on axum.
 //!
-//! Depends on `forgebase-core` and `forgebase-db`; axum types stay inside this crate (ADR 0005).
+//! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
+//! has a compatibility promise (ADR 0012). Depends on `forgebase-core` and `forgebase-db`; axum types stay inside this crate (ADR 0005).
 //! See `docs/blueprint/architecture.md` (HTTP layer) and `docs/blueprint/security-model.md`.
 //!
 //! # Request pipeline
@@ -27,8 +28,8 @@
 //! | `POST /login` | 200 `{"data": {"username", "roles", "csrf_token"}}` and `Set-Cookie` |
 //! | `POST /logout` (cookie session only) | 204, cookie cleared |
 //! | `GET /session` (cookie session only, header `X-Forgebase-CSRF: refresh`, else 400) | 200 `{"data": {"username", "roles", "csrf_token"}}`, a **new** CSRF token (the old one stops working) |
-//! | `GET /meta` | 200 `{"data": [{"name", "label", "submittable", "rights"}]}`: the DocTypes the caller can read |
-//! | `GET /meta/{doctype}` | 200 `{"data": {"name", "label", "naming", "submittable", "fields", "rights"}}` |
+//! | `GET /meta` | 200 `{"data": [{"name", "label", "app", "submittable", "rights"}]}`: the DocTypes the caller can read; `app` is the owning app (M5.1, `null` if the registry records none) |
+//! | `GET /meta/{doctype}` | 200 `{"data": {"name", "label", "app", "naming", "submittable", "fields", "rights"}}` |
 //! | `GET /resource/{doctype}` (`filters`, `sort`, `limit`, `offset`) | 200 `{"data": [..]}` |
 //! | `POST /resource/{doctype}` | 201 `{"data": doc}` |
 //! | `GET /resource/{doctype}/{name}` | 200 `{"data": doc}` |

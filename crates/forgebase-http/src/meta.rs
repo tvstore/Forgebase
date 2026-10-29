@@ -106,7 +106,8 @@ fn field_with_children(state: &AppState, f: &DocField) -> Json {
 }
 
 /// `GET /api/v1/meta`: the non-child DocTypes the caller can read, sorted by name, each with
-/// `name`, `label`, `submittable` and the caller's `rights`.
+/// `name`, `label`, `app` (the owning app, `null` when the registry records none),
+/// `submittable` and the caller's `rights`.
 pub async fn list(State(state): State<AppState>, authenticated: Authenticated) -> Reply {
     let caller = authenticated.caller();
     let items: Vec<Json> = state
@@ -117,6 +118,7 @@ pub async fn list(State(state): State<AppState>, authenticated: Authenticated) -
             json!({
                 "name": d.name,
                 "label": d.label,
+                "app": state.registry().owner(&d.name),
                 "submittable": d.submittable,
                 "rights": rights(d, &caller),
             })
@@ -153,6 +155,7 @@ pub async fn read(
         json!({
             "name": doctype.name,
             "label": doctype.label,
+            "app": state.registry().owner(&doctype.name),
             "naming": naming(&doctype.naming),
             "submittable": doctype.submittable,
             "fields": fields,

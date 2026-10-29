@@ -22,7 +22,7 @@ fn admin_url() -> String {
     match std::env::var(ENV_VAR) {
         Ok(url) if !url.is_empty() => url,
         _ => panic!(
-            "{ENV_VAR} is not set. The forgebase-cli integration tests need a PostgreSQL 16 server; \
+            "{ENV_VAR} is not set. The forgebase integration tests need a PostgreSQL 16 server; \
              set it to a superuser/CREATEDB URL, for example \
              {ENV_VAR}=postgres://forgebase:forgebase@localhost:5432/postgres (see CONTRIBUTING.md). \
              The tests never skip."
@@ -246,9 +246,12 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 3 pending"), "{text}");
+    assert!(text.contains("framework migrations: 4 pending"), "{text}");
     assert!(
-        text.contains("0001 init") && text.contains("0002 series") && text.contains("0003 auth"),
+        text.contains("0001 init")
+            && text.contains("0002 series")
+            && text.contains("0003 auth")
+            && text.contains("0004 apps"),
         "{text}"
     );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
@@ -283,7 +286,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 3 applied"), "{text}");
+    assert!(text.contains("framework migrations: 4 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -614,7 +617,7 @@ fn schema_conflicts_exit_1_and_change_nothing() {
 
 #[test]
 fn invalid_doctype_files_exit_1_naming_the_file() {
-    let dir = std::env::temp_dir().join(format!("forgebase-cli-bad-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("forgebase-test-bad-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("dir");
     std::fs::write(dir.join("broken.toml"), "name = ").expect("write");
     // DocType loading fails before any connection is made, so the URL is never used.
@@ -751,7 +754,7 @@ fn links_and_versions_end_to_end() {
 
 #[test]
 fn unknown_link_targets_are_reported_with_the_file() {
-    let dir = std::env::temp_dir().join(format!("forgebase-cli-links-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("forgebase-test-links-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("dir");
     std::fs::write(
         dir.join("order.toml"),
@@ -1673,7 +1676,7 @@ fn serve_serves_the_desk_only_when_configured() {
     let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&out), Some(0), "{}", stderr(&out));
 
-    let desk = std::env::temp_dir().join(format!("forgebase_cli_desk_{}", std::process::id()));
+    let desk = std::env::temp_dir().join(format!("forgebase_test_desk_{}", std::process::id()));
     std::fs::create_dir_all(desk.join("assets")).expect("desk directory");
     std::fs::write(desk.join("index.html"), "<title>desk</title>").expect("index");
     std::fs::write(desk.join("assets/app.js"), "1").expect("asset");

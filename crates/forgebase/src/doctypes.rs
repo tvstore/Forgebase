@@ -1,42 +1,24 @@
-//! Loading the DocType files of a directory into a registry.
+//! Reading the DocType files of a directory (`--doctypes DIR`, and the guard of
+//! [`testing`](crate::testing)).
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use forgebase_core::meta::{DefinitionError, DocType, Registry};
-
-/// Loads every `*.toml` file directly in `dir` into a registry.
+/// The `*.toml` files directly in `dir`, sorted by name, and the problems found on the way.
 ///
 /// Rules: not recursive (subdirectories are ignored); the extension match is case-sensitive
 /// (`*.TOML` is ignored); names starting with `.` are skipped (editor and macOS `._` files);
-/// files are processed sorted by name; an entry named `*.toml` that is not a readable regular
-/// file (for example a dangling symlink) is reported as a problem; a directory with such a name
-/// is ignored. Symlinks to files are followed.
-///
-/// Every problem is reported, each prefixed with its file name: unreadable files, invalid
-/// definitions and duplicate DocType names. When every file loaded, Link targets are checked
-/// ([`Registry::check_references`]): a Link to a DocType that no file defines, a Table field whose
-/// target is missing or not a child, a child used by no (or several) Table fields, and so on, are
-/// reported with the file of the DocType they are about.
-pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
-    let entries = fs::read_dir(dir).map_err(|e| {
-        vec![format!(
-            "cannot read DocType directory {}: {e}",
-            dir.display()
-        )]
-    })?;
+/// an entry named `*.toml` that is not a readable regular file (for example a dangling symlink)
+/// is reported as a problem; a directory with such a name is ignored. Symlinks to files are
+/// followed. `Err` when the directory cannot be read.
+pub(crate) fn toml_files(dir: &Path) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+    let unreadable =
+        |e: std::io::Error| format!("cannot read DocType directory {}: {e}", dir.display());
+    let entries = fs::read_dir(dir).map_err(unreadable)?;
     let mut files: Vec<PathBuf> = Vec::new();
     let mut problems = Vec::new();
     for entry in entries {
-        let path = entry
-            .map_err(|e| {
-                vec![format!(
-                    "cannot read DocType directory {}: {e}",
-                    dir.display()
-                )]
-            })?
-            .path();
+        let path = entry.map_err(unreadable)?.path();
         let hidden = path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with('.'));
@@ -56,70 +38,52 @@ pub fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
         }
     }
     files.sort();
+    Ok((files, problems))
+}
 
-    let mut registry = Registry::new();
-    let mut defined_in: BTreeMap<String, &PathBuf> = BTreeMap::new();
-    for path in &files {
-        let shown = path.display();
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) => {
-                problems.push(format!("{shown}: cannot read: {e}"));
-                continue;
-            }
-        };
-        match DocType::from_toml_str(&text) {
-            Err(e) => problems.push(format!("{shown}: {e}")),
-            Ok(doctype) => {
-                let name = doctype.name.clone();
-                match registry.add(doctype) {
-                    Ok(()) => {
-                        defined_in.insert(name, path);
-                    }
-                    Err(errors) => {
-                        for e in errors {
-                            problems.push(format!("{shown}: {e}"));
-                        }
-                    }
-                }
-            }
+/// One DocType file read from disk: the path as shown in messages and the text.
+pub(crate) struct Source {
+    pub path: String,
+    pub text: String,
+}
+
+/// Reads every `*.toml` file of `dir` ([`toml_files`] has the rules). Every problem is
+/// returned, each naming its file; the readable files are returned whatever the problems.
+pub(crate) fn read_dir(dir: &Path) -> (Vec<Source>, Vec<String>) {
+    let (files, mut problems) = match toml_files(dir) {
+        Ok(found) => found,
+        Err(problem) => return (Vec::new(), vec![problem]),
+    };
+    let mut sources = Vec::new();
+    for path in files {
+        let shown = path.display().to_string();
+        match fs::read_to_string(&path) {
+            Ok(text) => sources.push(Source { path: shown, text }),
+            Err(e) => problems.push(format!("{shown}: cannot read: {e}")),
         }
     }
-    // Only when everything loaded: a Link to a DocType from a broken file would be reported twice.
-    if problems.is_empty()
-        && let Err(errors) = registry.check_references()
-    {
-        for error in errors {
-            let file = match &error {
-                DefinitionError::UnknownLinkTarget { doctype, .. }
-                | DefinitionError::LinkToChild { doctype, .. }
-                | DefinitionError::UnknownTableTarget { doctype, .. }
-                | DefinitionError::TableTargetNotChild { doctype, .. }
-                | DefinitionError::UnusedChild { doctype } => defined_in.get(doctype),
-                DefinitionError::ChildSharedByTables { child, .. } => defined_in.get(child),
-                _ => None,
-            };
-            problems.push(match file {
-                Some(path) => format!("{}: {error}", path.display()),
-                None => error.to_string(),
-            });
-        }
-    }
-    if problems.is_empty() {
-        Ok(registry)
-    } else {
-        Err(problems)
-    }
+    (sources, problems)
 }
 
 #[cfg(test)]
 mod tests {
+    use forgebase_core::meta::Registry;
+
     use super::*;
+    use crate::compose::compose;
+
+    /// The DocTypes of one directory, loaded as the ad-hoc app `local`.
+    fn load_dir(dir: &Path) -> Result<Registry, Vec<String>> {
+        match compose(&[], Some(dir)) {
+            Ok(composed) => Ok(composed.registry),
+            Err(error) => Err(error.problems().map(str::to_owned).collect()),
+        }
+    }
 
     const GOOD: &str = "name = \"{n}\"\nlabel = \"L\"\n[[fields]]\nname = \"f\"\ntype = \"text\"\n";
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("forgebase-cli-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("forgebase-test-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create scratch dir");
         dir

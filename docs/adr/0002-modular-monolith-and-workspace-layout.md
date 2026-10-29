@@ -1,6 +1,6 @@
 # 0002 Modular monolith and workspace layout
 
-- Status: Accepted
+- Status: Accepted. Amended by ADR 0012 (2026-10-29): forgebase-cli renamed to forgebase, now lib + bin (see [ADR 0012](0012-app-model-and-public-api-boundary.md))
 - Date: 2026-10-28
 
 ## Context

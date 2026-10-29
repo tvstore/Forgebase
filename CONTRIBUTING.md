@@ -15,10 +15,11 @@ Run the same commands as CI ([.github/workflows/ci.yml](.github/workflows/ci.yml
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked                        # needs FORGEBASE_TEST_DATABASE_URL, see below
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked         # needs FORGEBASE_TEST_DATABASE_URL, see below
 cargo build --workspace --locked
-cargo +1.97 check --workspace --all-targets --locked   # MSRV
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo +1.97 check --workspace --all-targets --all-features --locked   # MSRV
 cargo deny --locked check                              # needs network for advisories
 ```
 
@@ -39,7 +40,7 @@ The Playwright smoke test (CI job `e2e`) needs a real server, so it is not part 
 
 ```sh
 export FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/fb_e2e   # an empty scratch database
-cargo build -p forgebase-cli && (cd desk && npm ci && npm run build)
+cargo build -p forgebase && (cd desk && npm ci && npm run build)
 desk/e2e/seed.sh                                   # DocTypes in target/e2e/doctypes, users e2e_manager and e2e_clerk, one customer
 FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/forgebase serve --doctypes target/e2e/doctypes &
 cd desk
@@ -51,7 +52,7 @@ If you already have a Chromium, skip the install and set `PLAYWRIGHT_CHROMIUM_EX
 
 ## PostgreSQL for tests
 
-The `forgebase-db` and `forgebase-cli` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end. The `forgebase-cli` tests run the built `forgebase` binary against such a database (they set `FORGEBASE_DATABASE_URL` for it themselves).
+The `forgebase-db`, `forgebase-http` and `forgebase` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end. The `forgebase` tests run the built `forgebase` binary (`tests/cli.rs`) and a test binary with apps (`tests/app_binary.rs`) against such a database (they set `FORGEBASE_DATABASE_URL` for it themselves). `--all-features` turns on the `testing` feature of the `forgebase` crate (the helpers for the tests of apps, [ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md)); the crate's own tests enable it themselves, so a plain `cargo test` runs them too.
 
 ```sh
 docker run -d --name forgebase-pg -p 5432:5432 -e POSTGRES_USER=forgebase -e POSTGRES_PASSWORD=forgebase postgres:16
