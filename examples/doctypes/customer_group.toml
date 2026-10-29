@@ -10,3 +10,14 @@ type = "data"
 max_length = 140
 required = true
 unique = true
+
+[[permissions]]
+role = "Sales User"
+read = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+create = true
+delete = true

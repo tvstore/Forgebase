@@ -8,6 +8,7 @@ use std::time::Duration;
 use common::{PERSON, SALES_ORDER, TestDb, registry};
 use forgebase_core::document::{Changes, Document, ValidationError};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::permission::Caller;
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, delete, get, insert, update};
 
@@ -70,7 +71,7 @@ async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
         &reg,
         &person_type.name,
         person("ann@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -79,7 +80,7 @@ async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -88,7 +89,7 @@ async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
         &reg,
         &order_type.name,
         order(&[("customer", "ann@x.y"), ("title", "T")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -96,10 +97,16 @@ async fn link_values_are_names_in_the_api_and_ids_in_the_table() {
     assert_eq!(created.values["approver"], text("boss@x.y"));
     assert_eq!(created.values["follows"], Value::Null);
 
-    let fetched = get(&mut **client, &reg, &order_type.name, &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, created);
 
     // The table holds the target's id, not its name.
@@ -121,7 +128,7 @@ async fn missing_target_is_a_validation_error_and_nothing_is_written() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -131,7 +138,7 @@ async fn missing_target_is_a_validation_error_and_nothing_is_written() {
         &reg,
         &order_type.name,
         order(&[("customer", "nobody@x.y")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -159,9 +166,15 @@ async fn missing_target_is_a_validation_error_and_nothing_is_written() {
         ("bogus", Value::Int(1)),
     ]);
     bad.values.insert("approver".into(), text("missing@x.y"));
-    let error = insert(&mut **client, &reg, &order_type.name, bad, "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        bad,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     let DbError::Validation(errors) = &error else {
         panic!("{error}");
     };
@@ -183,7 +196,7 @@ async fn values_that_failed_validation_are_not_looked_up() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -193,7 +206,7 @@ async fn values_that_failed_validation_are_not_looked_up() {
         &reg,
         &order_type.name,
         order(&[("customer", "a\0b")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -208,7 +221,7 @@ async fn values_that_failed_validation_are_not_looked_up() {
         &reg,
         &order_type.name,
         doc(&[("approver", text("  "))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -218,13 +231,25 @@ async fn values_that_failed_validation_are_not_looked_up() {
         "{error}"
     );
     // A required link may not be missing, null or cleared.
-    let error = insert(&mut **client, &reg, &order_type.name, doc(&[]), "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        doc(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
-    let created = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap();
+    let created = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let changes = values_of([("approver".to_owned(), Value::Null)]);
     let error = update(
         &mut **client,
@@ -233,7 +258,7 @@ async fn values_that_failed_validation_are_not_looked_up() {
         &created.name,
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -249,15 +274,21 @@ async fn optional_links_may_be_null_or_absent() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
     let mut with_null = order(&[]);
     with_null.values.insert("customer".into(), Value::Null);
-    let created = insert(&mut **client, &reg, &order_type.name, with_null, "cli")
-        .await
-        .unwrap();
+    let created = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        with_null,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     assert_eq!(created.values["customer"], Value::Null);
     assert_eq!(created.values["follows"], Value::Null);
     assert_eq!(
@@ -272,16 +303,22 @@ async fn updating_links_resolves_and_validates_names() {
     let (db, reg, person_type, order_type) = setup().await;
     let mut client = db.pool.get().await.unwrap();
     for email in ["boss@x.y", "ann@x.y", "bob@x.y"] {
-        insert(&mut **client, &reg, &person_type.name, person(email), "cli")
-            .await
-            .unwrap();
+        insert(
+            &mut **client,
+            &reg,
+            &person_type.name,
+            person(email),
+            &Caller::system("cli"),
+        )
+        .await
+        .unwrap();
     }
     let created = insert(
         &mut **client,
         &reg,
         &order_type.name,
         order(&[("customer", "ann@x.y")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -294,7 +331,7 @@ async fn updating_links_resolves_and_validates_names() {
         &created.name,
         1,
         &to_bob,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -309,7 +346,7 @@ async fn updating_links_resolves_and_validates_names() {
         &created.name,
         2,
         &missing,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -318,10 +355,16 @@ async fn updating_links_resolves_and_validates_names() {
             if matches!(e.as_slice(), [ValidationError::LinkNotFound { .. }])),
         "{error}"
     );
-    let unchanged = get(&mut **client, &reg, &order_type.name, &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let unchanged = get(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(unchanged, updated);
 
     let cleared = values_of([("customer".to_owned(), Value::Null)]);
@@ -332,7 +375,7 @@ async fn updating_links_resolves_and_validates_names() {
         &created.name,
         2,
         &cleared,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -349,19 +392,25 @@ async fn self_links_work() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
-    let first = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap();
+    let first = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let second = insert(
         &mut **client,
         &reg,
         &order_type.name,
         order(&[("follows", &first.name)]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -375,7 +424,7 @@ async fn self_links_work() {
         &first.name,
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -391,17 +440,30 @@ async fn deleting_a_linked_document_names_the_linking_doctype() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
-    let created = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap();
+    let created = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
 
-    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 1, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        &boss.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     let DbError::LinkedDocumentExists {
         doctype,
         name,
@@ -421,9 +483,16 @@ async fn deleting_a_linked_document_names_the_linking_doctype() {
     assert_eq!(count(&db, "doc_person").await, 1);
 
     // A stale version is reported as a conflict before anything is attempted.
-    let error = delete(&mut **client, &reg, &person_type.name, &boss.name, 7, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        &boss.name,
+        7,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Conflict { .. }), "{error}");
 
     // Deleting the linking document first releases the target.
@@ -433,13 +502,20 @@ async fn deleting_a_linked_document_names_the_linking_doctype() {
         &order_type.name,
         &created.name,
         1,
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
-    delete(&mut **client, &reg, &person_type.name, &boss.name, 1, "ann")
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        &boss.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
 }
 
@@ -449,24 +525,49 @@ async fn a_linked_delete_in_a_transaction_fails_cleanly_and_leaves_it_usable() {
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
     let mut tx = raw.transaction().await.unwrap();
-    insert(&mut tx, &reg, &person_type.name, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
+    insert(
+        &mut tx,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     // A target inserted earlier in the same transaction can be linked.
-    insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap();
-    let error = delete(&mut tx, &reg, &person_type.name, "boss@x.y", 1, "ann")
-        .await
-        .unwrap_err();
+    insert(
+        &mut tx,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
+    let error = delete(
+        &mut tx,
+        &reg,
+        &person_type.name,
+        "boss@x.y",
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(&error, DbError::LinkedDocumentExists { referenced_by: Some(t), .. } if t == "sales_order"),
         "{error}"
     );
     // The failed delete ran in a savepoint: the transaction is not aborted and still has its work.
-    let boss = get(&mut tx, &reg, &person_type.name, "boss@x.y")
-        .await
-        .unwrap();
+    let boss = get(
+        &mut tx,
+        &reg,
+        &person_type.name,
+        "boss@x.y",
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     assert!(boss.is_some());
     tx.rollback().await.unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
@@ -479,19 +580,37 @@ async fn a_link_inside_a_rolled_back_transaction_leaves_nothing() {
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
     let mut tx = raw.transaction().await.unwrap();
-    insert(&mut tx, &reg, &person_type.name, person("boss@x.y"), "cli")
-        .await
-        .unwrap();
-    insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap();
+    insert(
+        &mut tx,
+        &reg,
+        &person_type.name,
+        person("boss@x.y"),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
+    insert(
+        &mut tx,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(count(&db, "doc_person").await, 0);
     assert_eq!(count(&db, "doc_sales_order").await, 0);
     // The target no longer exists, so linking to it fails.
-    let error = insert(&mut **client, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
 }
 
@@ -505,7 +624,7 @@ async fn hostile_names_are_data_not_sql() {
         &reg,
         &person_type.name,
         person("boss@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -514,21 +633,27 @@ async fn hostile_names_are_data_not_sql() {
         &reg,
         &order_type.name,
         order(&[("customer", nasty)]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::Validation(_)), "{error}");
     // The same string works as the name of a real target.
-    insert(&mut **client, &reg, &person_type.name, person(nasty), "cli")
-        .await
-        .unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        &person_type.name,
+        person(nasty),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let created = insert(
         &mut **client,
         &reg,
         &order_type.name,
         order(&[("customer", nasty)]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -546,15 +671,21 @@ async fn link_target_with_random_naming_is_addressed_by_its_generated_name() {
     db.sync(&registry).await.unwrap();
     let (note, tag) = (registry.get("note").unwrap(), registry.get("tag").unwrap());
     let mut client = db.pool.get().await.unwrap();
-    let n = insert(&mut **client, &registry, &note.name, doc(&[]), "cli")
-        .await
-        .unwrap();
+    let n = insert(
+        &mut **client,
+        &registry,
+        &note.name,
+        doc(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let t = insert(
         &mut **client,
         &registry,
         &tag.name,
         doc(&[("note", text(&n.name))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -586,7 +717,7 @@ async fn a_duplicate_unique_link_names_the_field_not_the_internal_id() {
         &registry,
         &person_type.name,
         person("ann@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -595,7 +726,7 @@ async fn a_duplicate_unique_link_names_the_field_not_the_internal_id() {
         &registry,
         &badge.name,
         doc(&[("holder", text(&ann.name))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -604,7 +735,7 @@ async fn a_duplicate_unique_link_names_the_field_not_the_internal_id() {
         &registry,
         &badge.name,
         doc(&[("holder", text(&ann.name))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -631,7 +762,7 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
             &reg,
             &person_type.name,
             person("boss@x.y"),
-            "cli",
+            &Caller::system("cli"),
         )
         .await
         .unwrap()
@@ -646,14 +777,27 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
     // The first transaction links to the boss: the lookup holds FOR KEY SHARE on the row.
     let raw: &mut forgebase_db::Client = &mut first;
     let mut tx = raw.transaction().await.unwrap();
-    insert(&mut tx, &reg, &order_type.name, order(&[]), "cli")
-        .await
-        .unwrap();
+    insert(
+        &mut tx,
+        &reg,
+        &order_type.name,
+        order(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
 
     // A concurrent delete of the target waits and then times out.
-    let error = delete(&mut **second, &reg, &person_type.name, &boss.name, 1, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **second,
+        &reg,
+        &person_type.name,
+        &boss.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::LockTimeout), "{error}");
     assert_eq!(count(&db, "doc_person").await, 1);
 
@@ -661,7 +805,14 @@ async fn the_link_lookup_lock_blocks_deleting_the_target_until_the_transaction_e
     tx.rollback().await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(5),
-        delete(&mut **second, &reg, &person_type.name, &boss.name, 1, "ann"),
+        delete(
+            &mut **second,
+            &reg,
+            &person_type.name,
+            &boss.name,
+            1,
+            &Caller::system("ann"),
+        ),
     )
     .await
     .expect("delete should no longer wait")

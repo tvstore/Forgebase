@@ -40,3 +40,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0008](0008-model-selection-policy.md) | Model selection policy for the agent workflow | Accepted by owner |
 | [0009](0009-lifecycle-pipeline-and-hooks.md) | Lifecycle pipeline and hooks | Accepted |
 | [0010](0010-authentication-and-sessions.md) | Authentication and sessions | Accepted |
+| [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted |

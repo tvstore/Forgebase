@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
+use crate::permission::{self, PermissionRule, Right};
 use crate::series::{SeriesError, SeriesPattern};
 
 /// Default `max_length` of a Data field.
@@ -37,6 +38,11 @@ pub struct DocType {
     /// (M2.4): its table gets the `docstatus` and `amended_from` columns. It cannot be a child
     /// DocType and cannot use [`Naming::Field`].
     pub submittable: bool,
+    /// Who may do what with the DocType's documents (`[[permissions]]`, M3.2, ADR 0011). Empty
+    /// means only the `Administrator` role and the trusted system caller have access (deny by
+    /// default). A child DocType has none: its rows follow the parent's rules. Decisions are made
+    /// by [`evaluate`](crate::permission::evaluate), nowhere else.
+    pub permissions: Vec<PermissionRule>,
 }
 
 /// One field of a [`DocType`].
@@ -377,6 +383,44 @@ pub enum DefinitionError {
         /// The field.
         field: String,
     },
+    /// A `[[permissions]]` rule names a role that breaks the role rule
+    /// ([`check_role_name`](crate::permission::check_role_name)).
+    #[error("permission rule for role {role:?}: invalid role: {reason}")]
+    InvalidPermissionRole {
+        /// The rejected role.
+        role: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+    /// A `[[permissions]]` rule grants nothing (every right is false), which is most likely a
+    /// mistake.
+    #[error("permission rule for role {role:?} grants no right")]
+    EmptyPermissionRule {
+        /// The rule's role.
+        role: String,
+    },
+    /// A `[[permissions]]` rule grants submit, cancel or amend on a DocType that is not
+    /// submittable.
+    #[error(
+        "permission rule for role {role:?}: `{right}` needs a submittable doctype (`submittable = true`)"
+    )]
+    PermissionNeedsSubmittable {
+        /// The rule's role.
+        role: String,
+        /// The right that cannot be granted.
+        right: Right,
+    },
+    /// Two `[[permissions]]` rules have the same role and the same `if_owner`; merge them.
+    #[error("more than one permission rule for role {role:?} with if_owner = {if_owner}")]
+    DuplicatePermissionRule {
+        /// The repeated role.
+        role: String,
+        /// The repeated `if_owner`.
+        if_owner: bool,
+    },
+    /// A child DocType has `[[permissions]]`; its rows follow the permissions of the parent.
+    #[error("a child doctype has no permission rules (its rows follow the parent's)")]
+    ChildWithPermissions,
     /// A registry already holds a DocType with this name.
     #[error("doctype `{name}` is already registered")]
     DuplicateDocType {
@@ -577,6 +621,7 @@ impl DocType {
                 });
             }
         }
+        self.check_permissions(&mut errors);
         if self.submittable {
             if self.is_child {
                 errors.push(DefinitionError::ChildSubmittable);
@@ -608,6 +653,41 @@ impl DocType {
             self.check_naming_field(name, &mut errors);
         }
         errors
+    }
+
+    fn check_permissions(&self, errors: &mut Vec<DefinitionError>) {
+        if self.is_child && !self.permissions.is_empty() {
+            errors.push(DefinitionError::ChildWithPermissions);
+        }
+        let mut seen = BTreeSet::new();
+        for rule in &self.permissions {
+            let role = || rule.role.clone();
+            if let Err(reason) = permission::check_role_name(&rule.role) {
+                errors.push(DefinitionError::InvalidPermissionRole {
+                    role: role(),
+                    reason,
+                });
+            }
+            if Right::ALL.iter().all(|right| !rule.grants(*right)) {
+                errors.push(DefinitionError::EmptyPermissionRule { role: role() });
+            }
+            if !self.submittable {
+                for right in [Right::Submit, Right::Cancel, Right::Amend] {
+                    if rule.grants(right) {
+                        errors.push(DefinitionError::PermissionNeedsSubmittable {
+                            role: role(),
+                            right,
+                        });
+                    }
+                }
+            }
+            if !seen.insert((rule.role.as_str(), rule.if_owner)) {
+                errors.push(DefinitionError::DuplicatePermissionRule {
+                    role: role(),
+                    if_owner: rule.if_owner,
+                });
+            }
+        }
     }
 
     fn check_naming_field(&self, name: &str, errors: &mut Vec<DefinitionError>) {
@@ -942,6 +1022,7 @@ mod tests {
             fields,
             is_child: false,
             submittable: false,
+            permissions: vec![],
         }
     }
 

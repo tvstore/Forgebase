@@ -12,6 +12,7 @@ use common::{TestDb, registry};
 use forgebase_core::document::{Changes, Document, Row, ValidationError};
 use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError, Operation};
 use forgebase_core::meta::Registry;
+use forgebase_core::permission::Caller;
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, StoredDocument, delete, get, insert, update};
 
@@ -175,9 +176,15 @@ async fn insert_update_and_delete_run_the_hooks_in_the_documented_order() {
     let (reg, log) = recording(None);
     let mut client = db.pool.get().await.unwrap();
 
-    let stored = insert(&mut **client, &reg, "invoice", invoice("a", vec![]), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        invoice("a", vec![]),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     // Per hook point in registration order: A, then B; before_insert before validate.
     assert_eq!(
         taken(&log),
@@ -196,15 +203,22 @@ async fn insert_update_and_delete_run_the_hooks_in_the_documented_order() {
         &stored.name,
         1,
         &set("note", text("n")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
     assert_eq!(taken(&log), ["A:validate:Update", "B:validate:Update"]);
 
-    delete(&mut **client, &reg, "invoice", &stored.name, 2, "ann")
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        &stored.name,
+        2,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         taken(&log),
         ["A:before_delete:Delete", "B:before_delete:Delete"]
@@ -218,9 +232,15 @@ async fn hooks_run_before_framework_validation_and_it_runs_again_after_them() {
     let (reg, log) = recording(None);
     let mut client = db.pool.get().await.unwrap();
     // No title: the hooks still run (they see the input as given) ...
-    let error = insert(&mut **client, &reg, "invoice", Document::default(), "ann")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(taken(&log).len(), 4);
     // ... and then the framework reports the problem.
     assert!(
@@ -269,9 +289,15 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
     let mut client = db.pool.get().await.unwrap();
 
     let first = invoice("one", vec![item(1, "a"), item(2, "b")]);
-    let stored = insert(&mut **client, &reg, "invoice", first, "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        first,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     // The changes name only the title: the hook still sees the stored note, amount and rows.
     let mut changes = set("title", text("two"));
     changes.values.insert("note".to_owned(), text("kept"));
@@ -282,7 +308,7 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
         &stored.name,
         1,
         &changes,
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -294,13 +320,20 @@ async fn hooks_get_the_context_and_see_the_whole_document_on_update() {
         &stored.name,
         2,
         &changes,
-        "cy",
+        &Caller::system("cy"),
     )
     .await
     .unwrap();
-    delete(&mut **client, &reg, "invoice", &stored.name, 3, "dee")
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        &stored.name,
+        3,
+        &Caller::system("dee"),
+    )
+    .await
+    .unwrap();
 
     let seen = spy.0.lock().unwrap();
     assert_eq!(seen.len(), 4);
@@ -364,16 +397,22 @@ async fn changes_made_by_hooks_are_persisted_on_insert_and_update() {
         &reg,
         "invoice",
         invoice("plain", vec![item(1, "a"), item(2, "b")]),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
     assert_eq!(stored.values["amount"], Value::Int(7));
     assert_eq!(stored.values["note"], text("hooked"));
-    let again = get(&mut **client, &reg, "invoice", &stored.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let again = get(
+        &mut **client,
+        &reg,
+        "invoice",
+        &stored.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(again, stored);
     let ids = item_ids(&db).await;
     assert_eq!(ids.len(), 2);
@@ -386,7 +425,7 @@ async fn changes_made_by_hooks_are_persisted_on_insert_and_update() {
         &stored.name,
         1,
         &set("note", text("mine")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -403,7 +442,7 @@ async fn changes_made_by_hooks_are_persisted_on_insert_and_update() {
         &stored.name,
         2,
         &set("title", text("grow")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -428,7 +467,7 @@ async fn changes_made_by_hooks_are_persisted_on_insert_and_update() {
         &stored.name,
         3,
         &set("note", text("hooked")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -496,9 +535,15 @@ async fn a_hook_cannot_leave_an_invalid_document() {
             },
         ),
     ] {
-        let error = insert(&mut **client, &reg, "invoice", with_note(note), "ann")
-            .await
-            .unwrap_err();
+        let error = insert(
+            &mut **client,
+            &reg,
+            "invoice",
+            with_note(note),
+            &Caller::system("ann"),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&error, DbError::Validation(e) if e == std::slice::from_ref(&expected)),
             "{note}: {error}"
@@ -507,9 +552,15 @@ async fn a_hook_cannot_leave_an_invalid_document() {
     }
 
     // The same on update; the stored document stays as it was.
-    let stored = insert(&mut **client, &reg, "invoice", with_note("fine"), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        with_note("fine"),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     for note in ["clear title", "bad row", "unknown"] {
         let error = update(
             &mut **client,
@@ -518,7 +569,7 @@ async fn a_hook_cannot_leave_an_invalid_document() {
             &stored.name,
             1,
             &set("note", text(note)),
-            "ann",
+            &Caller::system("ann"),
         )
         .await
         .unwrap_err();
@@ -527,10 +578,16 @@ async fn a_hook_cannot_leave_an_invalid_document() {
             "{note}: {error}"
         );
     }
-    let after = get(&mut **client, &reg, "invoice", &stored.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let after = get(
+        &mut **client,
+        &reg,
+        "invoice",
+        &stored.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(after, stored);
 }
 
@@ -543,7 +600,7 @@ async fn a_failing_hook_rejects_the_operation_and_persists_nothing() {
         &plain,
         "invoice",
         invoice("kept", vec![item(1, "a")]),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -580,7 +637,7 @@ async fn a_failing_hook_rejects_the_operation_and_persists_nothing() {
                 &reg,
                 "invoice",
                 invoice("new", vec![item(5, "x")]),
-                "ann",
+                &Caller::system("ann"),
             )
             .await
             .map(|_| ()),
@@ -594,11 +651,21 @@ async fn a_failing_hook_rejects_the_operation_and_persists_nothing() {
                     values: BTreeMap::from([("title".to_owned(), text("changed"))]),
                     tables: BTreeMap::from([("items".to_owned(), vec![item(8, "y")])]),
                 },
-                "ann",
+                &Caller::system("ann"),
             )
             .await
             .map(|_| ()),
-            _ => delete(&mut **client, &reg, "invoice", &stored.name, 1, "ann").await,
+            _ => {
+                delete(
+                    &mut **client,
+                    &reg,
+                    "invoice",
+                    &stored.name,
+                    1,
+                    &Caller::system("ann"),
+                )
+                .await
+            }
         };
         let error = result.unwrap_err();
         match &error {
@@ -617,10 +684,16 @@ async fn a_failing_hook_rejects_the_operation_and_persists_nothing() {
         assert_eq!(count(&db, "doc_invoice").await, 1);
         assert_eq!(count(&db, "doc_invoice_item").await, 1);
         assert_eq!(item_ids(&db).await, ids);
-        let now = get(&mut **client, &plain, "invoice", &stored.name)
-            .await
-            .unwrap()
-            .unwrap();
+        let now = get(
+            &mut **client,
+            &plain,
+            "invoice",
+            &stored.name,
+            &Caller::system("cli"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(now, stored, "{hook} {operation:?}");
         assert_eq!(now.version, 1);
     }
@@ -640,18 +713,30 @@ async fn a_hook_error_leaves_the_callers_transaction_usable() {
         &ok_reg,
         "invoice",
         invoice("kept", vec![item(1, "a")]),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
-    let error = insert(&mut tx, &reg, "invoice", invoice("lost", vec![]), "ann")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut tx,
+        &reg,
+        "invoice",
+        invoice("lost", vec![]),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Hook { .. }), "{error}");
     // The transaction still holds the first insert and accepts more work.
-    insert(&mut tx, &ok_reg, "invoice", invoice("more", vec![]), "ann")
-        .await
-        .unwrap();
+    insert(
+        &mut tx,
+        &ok_reg,
+        "invoice",
+        invoice("more", vec![]),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(count(&db, "doc_invoice").await, 2);
     assert_eq!(count(&db, "doc_invoice_item").await, 1);
@@ -672,7 +757,7 @@ async fn update_and_delete_hook_errors_leave_the_callers_transaction_usable() {
         &ok_reg,
         "invoice",
         invoice("kept", vec![item(1, "a")]),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -685,21 +770,34 @@ async fn update_and_delete_hook_errors_leave_the_callers_transaction_usable() {
         doc_name,
         1,
         &set("title", text("lost")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::Hook { .. }), "{error}");
-    let error = delete(&mut tx, &bad_delete, "invoice", doc_name, 1, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut tx,
+        &bad_delete,
+        "invoice",
+        doc_name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Hook { .. }), "{error}");
 
     // The transaction still holds the insert, unchanged, and accepts more work.
-    let still = get(&mut tx, &ok_reg, "invoice", doc_name)
-        .await
-        .unwrap()
-        .expect("kept");
+    let still = get(
+        &mut tx,
+        &ok_reg,
+        "invoice",
+        doc_name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .expect("kept");
     assert_eq!(
         (still.version, still.values["title"].clone()),
         (1, text("kept"))
@@ -711,14 +809,21 @@ async fn update_and_delete_hook_errors_leave_the_callers_transaction_usable() {
         doc_name,
         1,
         &set("title", text("changed")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
     assert_eq!(updated.version, 2);
-    delete(&mut tx, &ok_reg, "invoice", doc_name, 2, "ann")
-        .await
-        .unwrap();
+    delete(
+        &mut tx,
+        &ok_reg,
+        "invoice",
+        doc_name,
+        2,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(count(&db, "doc_invoice").await, 0);
     assert_eq!(count(&db, "doc_invoice_item").await, 0);
@@ -744,7 +849,7 @@ target = "account"
             values: BTreeMap::from([("email".to_owned(), text("a@x.y"))]),
             tables: BTreeMap::new(),
         };
-        insert(&mut **client, &reg, "account", doc, "ann")
+        insert(&mut **client, &reg, "account", doc, &Caller::system("ann"))
             .await
             .unwrap()
     };
@@ -765,7 +870,7 @@ target = "account"
         &account.name,
         1,
         &set("points", Value::Int(5)),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -779,7 +884,7 @@ target = "account"
     };
     tokio::time::timeout(
         Duration::from_secs(5),
-        insert(&mut **second, &reg, "note", linked, "bob"),
+        insert(&mut **second, &reg, "note", linked, &Caller::system("bob")),
     )
     .await
     .expect("the insert should not wait for the update")
@@ -798,7 +903,7 @@ async fn an_update_keeps_the_row_ids_of_a_table_with_identical_rows_and_replaces
         &reg,
         "invoice",
         invoice("t", rows.clone()),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -810,9 +915,17 @@ async fn an_update_keeps_the_row_ids_of_a_table_with_identical_rows_and_replaces
         values: BTreeMap::from([("title".to_owned(), text("t2"))]),
         tables: BTreeMap::from([("items".to_owned(), rows)]),
     };
-    let v2 = update(&mut **client, &reg, "invoice", &doc.name, 1, &same, "ann")
-        .await
-        .unwrap();
+    let v2 = update(
+        &mut **client,
+        &reg,
+        "invoice",
+        &doc.name,
+        1,
+        &same,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(v2.version, 2);
     assert_eq!(item_ids(&db).await, ids);
 
@@ -828,7 +941,7 @@ async fn an_update_keeps_the_row_ids_of_a_table_with_identical_rows_and_replaces
         &doc.name,
         2,
         &changed,
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -843,9 +956,15 @@ async fn not_found_and_conflict_are_reported_before_any_hook_runs() {
     let (db, _) = setup().await;
     let (reg, log) = recording(None);
     let mut client = db.pool.get().await.unwrap();
-    let stored = insert(&mut **client, &reg, "invoice", invoice("a", vec![]), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        invoice("a", vec![]),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     taken(&log);
 
     let error = update(
@@ -855,7 +974,7 @@ async fn not_found_and_conflict_are_reported_before_any_hook_runs() {
         &stored.name,
         5,
         &set("note", text("n")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap_err();
@@ -877,22 +996,43 @@ async fn not_found_and_conflict_are_reported_before_any_hook_runs() {
         "nope",
         1,
         &set("note", text("n")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
-    let error = delete(&mut **client, &reg, "invoice", &stored.name, 5, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        &stored.name,
+        5,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Conflict { .. }), "{error}");
-    let error = delete(&mut **client, &reg, "invoice", &stored.name, 1, "")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        &stored.name,
+        1,
+        &Caller::system(""),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::InvalidActor), "{error}");
-    let error = delete(&mut **client, &reg, "invoice", "nope", 1, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        "nope",
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
     assert!(taken(&log).is_empty(), "no hook was called");
 }
@@ -901,9 +1041,15 @@ async fn not_found_and_conflict_are_reported_before_any_hook_runs() {
 async fn update_validates_the_whole_document() {
     let (db, reg) = setup().await;
     let mut client = db.pool.get().await.unwrap();
-    let stored = insert(&mut **client, &reg, "invoice", invoice("a", vec![]), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        invoice("a", vec![]),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     // Another writer left a required field empty (the column is nullable).
     db.exec("UPDATE doc_invoice SET title = NULL").await;
 
@@ -915,7 +1061,7 @@ async fn update_validates_the_whole_document() {
         &stored.name,
         1,
         &set("note", text("n")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap_err();
@@ -931,7 +1077,7 @@ async fn update_validates_the_whole_document() {
         &stored.name,
         1,
         &set("title", text("fixed")),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -959,7 +1105,7 @@ async fn a_hook_cannot_rename_a_document() {
         values: BTreeMap::from([("email".to_owned(), text("old"))]),
         tables: BTreeMap::new(),
     };
-    insert(&mut **client, &reg, "account", new, "ann")
+    insert(&mut **client, &reg, "account", new, &Caller::system("ann"))
         .await
         .unwrap();
     let error = update(
@@ -969,16 +1115,22 @@ async fn a_hook_cannot_rename_a_document() {
         "old",
         1,
         &set("points", Value::Int(1)),
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::Naming(_)), "{error}");
     assert_eq!(count(&db, "doc_account").await, 1);
-    let stored = get(&mut **client, &reg, "account", "old")
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = get(
+        &mut **client,
+        &reg,
+        "account",
+        "old",
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!((stored.version, &stored.values["email"]), (1, &text("old")));
 }
 
@@ -1006,7 +1158,7 @@ async fn child_doctypes_have_no_hooks_and_other_doctypes_are_not_affected() {
         values: BTreeMap::from([("email".to_owned(), text("x"))]),
         tables: BTreeMap::new(),
     };
-    insert(&mut **client, &reg, "account", new, "ann")
+    insert(&mut **client, &reg, "account", new, &Caller::system("ann"))
         .await
         .unwrap();
     assert!(taken(&log).is_empty());

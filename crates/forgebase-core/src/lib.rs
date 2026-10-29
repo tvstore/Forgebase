@@ -3,7 +3,7 @@
 //! Performs no I/O and has no async code or SQL, and depends on no other Forgebase crate.
 //! See ADR 0002 and `docs/blueprint/architecture.md`.
 //!
-//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3 and M2.4):
+//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3, M2.4 and M3.2):
 //!
 //! - [`ident`]: identifier rules and table naming for DocTypes and fields.
 //! - [`meta`]: the DocType model, [`DocType::from_toml_str`](meta::DocType::from_toml_str) and the
@@ -15,6 +15,9 @@
 //!   with [`Registry::add_hooks`](meta::Registry::add_hooks); the pipeline order is documented
 //!   there; `before_submit` and `before_cancel` arrived with docstatus.
 //! - [`series`]: naming series patterns (`INV-.YYYY.-.#####`), parsing and rendering.
+//! - [`permission`]: `[[permissions]]` rules, [`Right`](permission::Right), the
+//!   [`Caller`](permission::Caller) and [`evaluate`](permission::evaluate), the one function that
+//!   decides access (M3.2, ADR 0011).
 //!
 //! Documents of a `submittable` DocType have a [`DocStatus`](document::DocStatus) (draft,
 //! submitted, cancelled).
@@ -23,6 +26,7 @@ pub mod document;
 pub mod hooks;
 pub mod ident;
 pub mod meta;
+pub mod permission;
 pub mod series;
 pub mod value;
 

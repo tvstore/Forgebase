@@ -5,6 +5,7 @@ mod common;
 
 use common::{TestDb, registry};
 use forgebase_core::document::DocStatus;
+use forgebase_core::permission::Caller;
 use forgebase_db::{Conflict, DbError, Step, Warning, get};
 
 const PLAIN: &str = r#"
@@ -107,10 +108,16 @@ async fn making_an_existing_doctype_submittable_adds_the_columns_additively() {
 
     // The document that was there is now a draft, and reads as one.
     let mut client = db.pool.get().await.unwrap();
-    let stored = get(&mut **client, &submittable, "memo", "old")
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = get(
+        &mut **client,
+        &submittable,
+        "memo",
+        "old",
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(stored.docstatus, Some(DocStatus::Draft));
     assert_eq!(stored.amended_from, None);
     assert!(db.sync(&submittable).await.unwrap().steps.is_empty());
@@ -157,7 +164,7 @@ async fn turning_submittable_off_is_a_warning_and_keeps_the_columns() {
     let plain = registry(&[PLAIN]);
     let mut client = db.pool.get().await.unwrap();
     let doc = forgebase_core::document::Document::default();
-    let stored = forgebase_db::insert(&mut **client, &plain, "memo", doc, "ann")
+    let stored = forgebase_db::insert(&mut **client, &plain, "memo", doc, &Caller::system("ann"))
         .await
         .unwrap();
     assert_eq!(stored.docstatus, None);

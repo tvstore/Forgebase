@@ -51,3 +51,16 @@ options = ["standard", "silver", "gold"]
 name = "customer_group"
 type = "link"
 target = "customer_group"
+
+# Who may do what (ADR 0011). The `forgebase doc` commands run as the trusted system context and ignore these rules;
+# they apply to real users (HTTP API, M3.3). A DocType without rules is closed to everyone except `Administrator`.
+[[permissions]]
+role = "Sales User"
+read = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+create = true
+delete = true

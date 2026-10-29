@@ -24,6 +24,11 @@
 //! | cancel | lock and load the stored document (as above), docstatus check (submitted only), `before_cancel`, write with docstatus 2 |
 //! | amend | lock and load the cancelled document (as above), docstatus check (cancelled only, not amended yet), then the **insert** pipeline on a copy of it: `before_insert`, `validate`, framework validation, Link resolution, naming (the amended name), write as a draft |
 //!
+//! **Permissions** come first (M3.2, ADR 0011): `forgebase-db` checks the caller's rights before
+//! the first step, and in the "lock and load" steps a document the caller cannot read is "not
+//! found", so a refused operation runs no hook. Hooks therefore see operations that are allowed;
+//! they are not a place to check permissions.
+//!
 //! `submit`, `cancel` and `amend` exist only for DocTypes with `submittable = true`. A hook sees
 //! which operation it runs for in [`HookContext::operation`]: `validate` runs for
 //! [`Operation::Insert`], [`Operation::Update`], [`Operation::Submit`] and [`Operation::Amend`],
@@ -124,9 +129,11 @@ pub enum Operation {
 pub struct HookContext<'a> {
     /// The name of the DocType.
     pub doctype: &'a str,
-    /// The actor of the operation, as given to `forgebase-db` (not authenticated). Set for every
+    /// The name of the caller of the operation ([`Caller::name`](crate::permission::Caller::name)):
+    /// the username of a user, or the actor of the trusted system context. Set for every
     /// operation, including [`Operation::Delete`]; insert and update also store it, delete only
-    /// gives it to the hooks (there is no audit trail yet).
+    /// gives it to the hooks (there is no audit trail yet). By the time a hook runs the
+    /// caller's permissions have been checked (ADR 0011); hooks do not see the roles.
     pub actor: &'a str,
     /// The operation.
     pub operation: Operation,

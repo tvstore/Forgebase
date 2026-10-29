@@ -1,0 +1,402 @@
+//! The permission model, phase 1 (M3.2, ADR 0011): rules, rights, the caller and the one
+//! evaluator that decides.
+//!
+//! A DocType declares `[[permissions]]` rules: each names a role and the [`Right`]s it grants,
+//! optionally only on documents the caller owns (`if_owner`). There is **no inheritance and no
+//! deny rule**: access is the union of what the caller's roles grant, and a DocType without
+//! rules is inaccessible to everyone except the [`ADMINISTRATOR`] role and the trusted
+//! [`Caller::System`] context (deny by default). Child DocTypes have no rules: their rows follow
+//! the parent.
+//!
+//! [`evaluate`] is the **only** place that makes a permission decision. It is pure (no I/O, no
+//! clock): `forgebase-db` calls it and turns the [`Access`] it returns into SQL (for read access,
+//! `WHERE owner = $caller`) or into a refusal. Nothing else compares roles.
+
+use std::fmt;
+
+use crate::meta::DocType;
+
+/// The built-in role that bypasses every permission rule.
+pub const ADMINISTRATOR: &str = "Administrator";
+
+/// Longest allowed role name, in characters.
+pub const MAX_ROLE_LEN: usize = 140;
+
+/// Checks a role name: 1 to [`MAX_ROLE_LEN`] characters, not blank, no control characters. The
+/// same rule applies to the roles of users (`forgebase-db`'s `auth` module) and to the roles in
+/// `[[permissions]]`, so a rule can always name a role a user can have. The error is the reason,
+/// ready to follow "invalid role: ".
+pub fn check_role_name(role: &str) -> Result<(), &'static str> {
+    let length = role.chars().count();
+    if length == 0 || length > MAX_ROLE_LEN {
+        Err("must be 1 to 140 characters")
+    } else if role.trim().is_empty() {
+        Err("must not be blank")
+    } else if role.chars().any(char::is_control) {
+        Err("must not contain control characters")
+    } else {
+        Ok(())
+    }
+}
+
+/// One thing a caller may do with documents of a DocType.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Right {
+    /// See documents (get and list).
+    Read,
+    /// Change a document.
+    Write,
+    /// Create a document.
+    Create,
+    /// Delete a document.
+    Delete,
+    /// Submit a draft (submittable DocTypes).
+    Submit,
+    /// Cancel a submitted document (submittable DocTypes).
+    Cancel,
+    /// Amend a cancelled document (submittable DocTypes).
+    Amend,
+}
+
+impl Right {
+    /// Every right, in the order of the `[[permissions]]` keys.
+    pub const ALL: [Right; 7] = [
+        Right::Read,
+        Right::Write,
+        Right::Create,
+        Right::Delete,
+        Right::Submit,
+        Right::Cancel,
+        Right::Amend,
+    ];
+
+    /// The key used in `[[permissions]]` and in messages: `read`, `write`, ...
+    pub fn name(self) -> &'static str {
+        match self {
+            Right::Read => "read",
+            Right::Write => "write",
+            Right::Create => "create",
+            Right::Delete => "delete",
+            Right::Submit => "submit",
+            Right::Cancel => "cancel",
+            Right::Amend => "amend",
+        }
+    }
+}
+
+impl fmt::Display for Right {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A `[[permissions]]` entry of a DocType: the rights one role has, all `false` by default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRule {
+    /// The role the rule is for, see [`check_role_name`].
+    pub role: String,
+    /// May read.
+    pub read: bool,
+    /// May write.
+    pub write: bool,
+    /// May create.
+    pub create: bool,
+    /// May delete.
+    pub delete: bool,
+    /// May submit. Only allowed on a submittable DocType.
+    pub submit: bool,
+    /// May cancel. Only allowed on a submittable DocType.
+    pub cancel: bool,
+    /// May amend. Only allowed on a submittable DocType.
+    pub amend: bool,
+    /// The rights apply to documents whose `owner` is the caller only. (A create is always for
+    /// a new document the caller owns, so `if_owner` does not restrict create.)
+    pub if_owner: bool,
+}
+
+impl PermissionRule {
+    /// A rule for `role` that grants nothing yet: set the rights with struct update syntax
+    /// (`PermissionRule { read: true, ..PermissionRule::new("Sales User") }`).
+    pub fn new(role: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            read: false,
+            write: false,
+            create: false,
+            delete: false,
+            submit: false,
+            cancel: false,
+            amend: false,
+            if_owner: false,
+        }
+    }
+
+    /// Whether the rule grants `right` (ignoring `if_owner`).
+    pub fn grants(&self, right: Right) -> bool {
+        match right {
+            Right::Read => self.read,
+            Right::Write => self.write,
+            Right::Create => self.create,
+            Right::Delete => self.delete,
+            Right::Submit => self.submit,
+            Right::Cancel => self.cancel,
+            Right::Amend => self.amend,
+        }
+    }
+}
+
+/// Who performs an operation: a real user, or the trusted system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// A user with the roles they have. The roles come from the database (`fb_user_role`) at the
+    /// time the caller is built; this type does not check them. The user is
+    /// an administrator if `roles` contains [`ADMINISTRATOR`].
+    User {
+        /// The username, recorded as `owner` and `modified_by` and given to hooks.
+        username: String,
+        /// The user's roles.
+        roles: Vec<String>,
+    },
+    /// The trusted system context: bypasses every permission rule. For code that is not acting for
+    /// a user, such as the command-line tool, migrations, jobs and tests. **Never build one from
+    /// request data.** `actor` is recorded as `owner` and `modified_by` and given to hooks, like
+    /// a username.
+    System {
+        /// Who to record.
+        actor: String,
+    },
+}
+
+impl Caller {
+    /// A user caller.
+    pub fn user(username: impl Into<String>, roles: Vec<String>) -> Self {
+        Caller::User {
+            username: username.into(),
+            roles,
+        }
+    }
+
+    /// The trusted system caller recorded as `actor`.
+    pub fn system(actor: impl Into<String>) -> Self {
+        Caller::System {
+            actor: actor.into(),
+        }
+    }
+
+    /// The name recorded as `owner` / `modified_by` and given to hooks: the username, or the
+    /// system actor.
+    pub fn name(&self) -> &str {
+        match self {
+            Caller::User { username, .. } => username,
+            Caller::System { actor } => actor,
+        }
+    }
+
+    /// True for the system context and for a user with the [`ADMINISTRATOR`] role: the callers
+    /// the rules do not apply to.
+    pub fn bypasses_permissions(&self) -> bool {
+        match self {
+            Caller::System { .. } => true,
+            Caller::User { roles, .. } => roles.iter().any(|r| r == ADMINISTRATOR),
+        }
+    }
+}
+
+/// How much of a DocType's documents a caller may use a right on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Every document.
+    All,
+    /// Only documents whose `owner` is the caller (`if_owner`).
+    OwnerOnly,
+    /// No document. Not a decision about one document: it does not depend on the data.
+    Denied,
+}
+
+/// Decides how far `caller` may use `right` on documents of `doctype`. The one permission
+/// decision of Forgebase (see the module documentation).
+///
+/// - The system context and an administrator get [`Access::All`] for every right on every DocType.
+/// - Otherwise the result is the union over the rules whose role the caller has and that grant
+///   `right`: a rule without `if_owner` gives [`Access::All`]; if there is none, a rule with
+///   `if_owner` gives [`Access::OwnerOnly`]; if there is none, [`Access::Denied`].
+/// - A DocType without rules (a child DocType too) is [`Access::Denied`] for everyone else.
+///
+/// A role name is compared exactly (case-sensitive, like the roles of users).
+pub fn evaluate(doctype: &DocType, caller: &Caller, right: Right) -> Access {
+    if caller.bypasses_permissions() {
+        return Access::All;
+    }
+    let Caller::User { roles, .. } = caller else {
+        return Access::Denied; // unreachable: the system caller bypasses above
+    };
+    let mut access = Access::Denied;
+    for rule in &doctype.permissions {
+        if rule.grants(right) && roles.contains(&rule.role) {
+            if !rule.if_owner {
+                return Access::All;
+            }
+            access = Access::OwnerOnly;
+        }
+    }
+    access
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meta::Naming;
+
+    fn doctype(permissions: Vec<PermissionRule>) -> DocType {
+        DocType {
+            name: "thing".into(),
+            label: "Thing".into(),
+            naming: Naming::Random,
+            fields: vec![],
+            is_child: false,
+            submittable: true,
+            permissions,
+        }
+    }
+
+    fn user(roles: &[&str]) -> Caller {
+        Caller::user("u", roles.iter().map(|r| (*r).to_owned()).collect())
+    }
+
+    /// A rule granting exactly `right`.
+    fn only(role: &str, right: Right, if_owner: bool) -> PermissionRule {
+        let mut rule = PermissionRule::new(role);
+        rule.if_owner = if_owner;
+        match right {
+            Right::Read => rule.read = true,
+            Right::Write => rule.write = true,
+            Right::Create => rule.create = true,
+            Right::Delete => rule.delete = true,
+            Right::Submit => rule.submit = true,
+            Right::Cancel => rule.cancel = true,
+            Right::Amend => rule.amend = true,
+        }
+        rule
+    }
+
+    #[test]
+    fn matrix_of_rights_roles_and_if_owner() {
+        for granted in Right::ALL {
+            for if_owner in [false, true] {
+                let d = doctype(vec![only("Clerk", granted, if_owner)]);
+                for asked in Right::ALL {
+                    let expected = match (asked == granted, if_owner) {
+                        (false, _) => Access::Denied,
+                        (true, false) => Access::All,
+                        (true, true) => Access::OwnerOnly,
+                    };
+                    assert_eq!(
+                        evaluate(&d, &user(&["Clerk"]), asked),
+                        expected,
+                        "granted {granted} if_owner={if_owner}, asked {asked}"
+                    );
+                    // Without the role nothing is granted; a similar role is not the role.
+                    for other in [&[][..], &["Other"], &["clerk"], &["Clerk "]] {
+                        assert_eq!(evaluate(&d, &user(other), asked), Access::Denied);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_rules_means_denied_except_for_administrator_and_system() {
+        let d = doctype(vec![]);
+        for right in Right::ALL {
+            assert_eq!(evaluate(&d, &user(&["Clerk"]), right), Access::Denied);
+            assert_eq!(evaluate(&d, &user(&[]), right), Access::Denied);
+            assert_eq!(evaluate(&d, &user(&[ADMINISTRATOR]), right), Access::All);
+            assert_eq!(
+                evaluate(&d, &user(&["Clerk", ADMINISTRATOR]), right),
+                Access::All
+            );
+            assert_eq!(evaluate(&d, &Caller::system("cli"), right), Access::All);
+        }
+    }
+
+    #[test]
+    fn administrator_is_not_limited_by_if_owner_rules() {
+        let d = doctype(vec![only("Clerk", Right::Read, true)]);
+        assert_eq!(
+            evaluate(&d, &user(&[ADMINISTRATOR]), Right::Read),
+            Access::All
+        );
+        assert_eq!(
+            evaluate(&d, &user(&[ADMINISTRATOR]), Right::Delete),
+            Access::All
+        );
+    }
+
+    #[test]
+    fn roles_union_and_the_wider_rule_wins() {
+        let d = doctype(vec![
+            only("Reader", Right::Read, false),
+            only("Writer", Right::Write, false),
+            only("Own", Right::Read, true),
+            only("Own", Right::Delete, true),
+        ]);
+        let both = user(&["Reader", "Writer"]);
+        assert_eq!(evaluate(&d, &both, Right::Read), Access::All);
+        assert_eq!(evaluate(&d, &both, Right::Write), Access::All);
+        assert_eq!(evaluate(&d, &both, Right::Delete), Access::Denied);
+        // OwnerOnly from one role and All from another: All.
+        let mixed = user(&["Own", "Reader"]);
+        assert_eq!(evaluate(&d, &mixed, Right::Read), Access::All);
+        assert_eq!(evaluate(&d, &mixed, Right::Delete), Access::OwnerOnly);
+        // Declaration order does not matter.
+        let reversed = doctype(d.permissions.iter().rev().cloned().collect());
+        assert_eq!(evaluate(&reversed, &mixed, Right::Read), Access::All);
+        // One rule can grant several rights.
+        let multi = doctype(vec![PermissionRule {
+            read: true,
+            write: true,
+            ..PermissionRule::new("Clerk")
+        }]);
+        assert_eq!(
+            evaluate(&multi, &user(&["Clerk"]), Right::Write),
+            Access::All
+        );
+        assert_eq!(
+            evaluate(&multi, &user(&["Clerk"]), Right::Create),
+            Access::Denied
+        );
+    }
+
+    #[test]
+    fn caller_helpers() {
+        assert_eq!(Caller::user("ann", vec![]).name(), "ann");
+        assert_eq!(Caller::system("cli").name(), "cli");
+        assert!(Caller::system("cli").bypasses_permissions());
+        assert!(user(&[ADMINISTRATOR]).bypasses_permissions());
+        assert!(!user(&["administrator"]).bypasses_permissions());
+        assert!(!user(&[]).bypasses_permissions());
+    }
+
+    #[test]
+    fn right_names() {
+        let names: Vec<&str> = Right::ALL.iter().map(|r| r.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "read", "write", "create", "delete", "submit", "cancel", "amend"
+            ]
+        );
+        assert_eq!(Right::Amend.to_string(), "amend");
+    }
+
+    #[test]
+    fn role_name_rules() {
+        assert!(check_role_name("Sales Manager").is_ok());
+        assert!(check_role_name("Verkäufer").is_ok());
+        assert!(check_role_name(&"r".repeat(140)).is_ok());
+        assert!(check_role_name(&"r".repeat(141)).is_err());
+        for bad in ["", "   ", "a\tb", "a\0b", "\n"] {
+            assert!(check_role_name(bad).is_err(), "{bad:?}");
+        }
+    }
+}
