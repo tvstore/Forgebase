@@ -14,9 +14,10 @@ pub const MAX_DOCTYPE_NAME_LEN: usize = 63 - TABLE_PREFIX.len();
 /// Maximum field (column) name length in bytes.
 pub const MAX_FIELD_NAME_LEN: usize = 63;
 
-/// Names a user field may not use: the standard columns present on every DocType table, and
+/// Names a user field may not use: the standard columns of a DocType table (`docstatus` and
+/// `amended_from` exist only on submittable DocTypes but are reserved everywhere), and
 /// the PostgreSQL system columns (`tableoid` ... `ctid`), which `CREATE TABLE` rejects.
-pub const RESERVED_FIELD_NAMES: [&str; 16] = [
+pub const RESERVED_FIELD_NAMES: [&str; 17] = [
     "id",
     "name",
     "owner",
@@ -25,6 +26,7 @@ pub const RESERVED_FIELD_NAMES: [&str; 16] = [
     "modified_by",
     "version",
     "docstatus",
+    "amended_from",
     "idx",
     "parent_id",
     "tableoid",
@@ -164,7 +166,7 @@ mod tests {
                 "name {name:?}"
             );
         }
-        assert_eq!(RESERVED_FIELD_NAMES.len(), 16);
+        assert_eq!(RESERVED_FIELD_NAMES.len(), 17);
     }
 
     #[test]

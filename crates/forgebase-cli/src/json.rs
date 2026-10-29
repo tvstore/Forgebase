@@ -258,8 +258,9 @@ fn from_value(name: &str, value: &Value) -> Result<Json, JsonError> {
     })
 }
 
-/// A stored document as a JSON object: the standard columns, the field values and, for each
-/// Table field, the array of its rows.
+/// A stored document as a JSON object: the standard columns (and, for a submittable DocType,
+/// `docstatus` as 0, 1 or 2 and `amended_from` as a name or `null`), the field values and, for
+/// each Table field, the array of its rows.
 pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
     let rfc3339 = |field: &str, t: &OffsetDateTime| {
         utc_rfc3339(t)
@@ -292,6 +293,17 @@ pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
         "version".to_owned(),
         Json::Number(Number::from(doc.version)),
     );
+    // Only a submittable DocType has a docstatus: 0 draft, 1 submitted, 2 cancelled.
+    if let Some(status) = doc.docstatus {
+        object.insert(
+            "docstatus".to_owned(),
+            Json::Number(Number::from(status.as_i16())),
+        );
+        object.insert(
+            "amended_from".to_owned(),
+            doc.amended_from.clone().map_or(Json::Null, Json::String),
+        );
+    }
     for (name, value) in &doc.values {
         object.insert(name.clone(), from_value(name, value)?);
     }
@@ -400,6 +412,8 @@ target = "other"
             modified_at: OffsetDateTime::UNIX_EPOCH,
             modified_by: "m".into(),
             version: 1,
+            docstatus: None,
+            amended_from: None,
             values: BTreeMap::from([("l".to_owned(), Value::Text("ann@example.com".into()))]),
             tables: BTreeMap::new(),
         };
@@ -511,6 +525,8 @@ target = "other"
             modified_at: at,
             modified_by: "m".into(),
             version: 3,
+            docstatus: None,
+            amended_from: None,
             values: BTreeMap::from([
                 ("at".to_owned(), Value::Datetime(at)),
                 ("on".to_owned(), Value::Date(date)),
@@ -634,6 +650,8 @@ target = "other"
             modified_at: OffsetDateTime::UNIX_EPOCH,
             modified_by: "m".into(),
             version: 1,
+            docstatus: None,
+            amended_from: None,
             values: BTreeMap::new(),
             tables: BTreeMap::from([("lines".to_owned(), rows), ("empty".to_owned(), Vec::new())]),
         };
@@ -656,5 +674,32 @@ target = "other"
         ));
         let ok = OffsetDateTime::parse("9999-12-31T23:59:59Z", &Rfc3339).unwrap();
         assert!(from_value("at", &Value::Datetime(ok)).is_ok());
+    }
+
+    #[test]
+    fn docstatus_and_amended_from_are_output_for_submittable_doctypes_only() {
+        use forgebase_core::document::DocStatus;
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let stored = |docstatus, amended_from: Option<&str>| StoredDocument {
+            id: "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b".parse().unwrap(),
+            name: "X-1".to_owned(),
+            owner: "o".to_owned(),
+            created_at: at,
+            modified_at: at,
+            modified_by: "m".to_owned(),
+            version: 3,
+            docstatus,
+            amended_from: amended_from.map(str::to_owned),
+            values: BTreeMap::new(),
+            tables: BTreeMap::new(),
+        };
+        let json = document_to_json(&stored(Some(DocStatus::Cancelled), Some("X"))).unwrap();
+        assert_eq!(json["docstatus"], 2);
+        assert_eq!(json["amended_from"], "X");
+        let json = document_to_json(&stored(Some(DocStatus::Draft), None)).unwrap();
+        assert_eq!(json["docstatus"], 0);
+        assert_eq!(json["amended_from"], Json::Null);
+        let json = document_to_json(&stored(None, None)).unwrap();
+        assert!(json.get("docstatus").is_none() && json.get("amended_from").is_none());
     }
 }

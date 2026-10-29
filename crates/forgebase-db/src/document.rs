@@ -17,15 +17,19 @@
 //! [`Registry`]) run inside the same transaction at fixed points: the order of every operation
 //! is listed in the documentation of [`insert`], [`update`] and [`delete`]. A hook error rolls
 //! everything back ([`DbError::Hook`]). Hooks cannot reach the database.
+//!
+//! DocTypes with `submittable = true` also have [`submit`], [`cancel`] and [`amend`], and their
+//! documents carry a [`DocStatus`]: see those functions for the rules.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use forgebase_core::document::{Changes, Document, Row, ValidationError, validate};
+use forgebase_core::document::{Changes, DocStatus, Document, Row, ValidationError, validate};
 use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError, Operation};
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
+use forgebase_core::series::SeriesPattern;
 use forgebase_core::value::Value;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 use tokio_postgres::GenericClient;
 use tokio_postgres::Row as PgRow;
 use tokio_postgres::types::ToSql;
@@ -64,8 +68,13 @@ pub struct StoredDocument {
     pub modified_at: OffsetDateTime,
     /// The actor that made the last change.
     pub modified_by: String,
-    /// Starts at 1 and is incremented by every update.
+    /// Starts at 1 and is incremented by every update, submit and cancel.
     pub version: i64,
+    /// The docstatus of a document of a submittable DocType; `None` for any other DocType.
+    pub docstatus: Option<DocStatus>,
+    /// For a document made by [`amend`]: the name of the cancelled document it replaces. `None`
+    /// otherwise, and for every DocType that is not submittable.
+    pub amended_from: Option<String>,
     /// One entry per column field of the DocType (every field except Table fields), in
     /// field-name order; [`Value::Null`] when absent. A Link field holds the target document's
     /// `name` as [`Value::Text`].
@@ -85,7 +94,8 @@ pub struct StoredDocument {
 /// ([`forgebase_core::document::validate`], all problems collected in [`DbError::Validation`]).
 /// The name follows the DocType's naming rule: with [`Naming::Random`] it is the new UUID v7 and
 /// `doc.name` must be `None`; with [`Naming::Field`] it is the value of that field and
-/// `doc.name` must be `None` or equal to it ([`DbError::Naming`]). `actor` (a non-empty string
+/// `doc.name` must be `None` or equal to it ([`DbError::Naming`]); with [`Naming::Series`] it is
+/// the next name of the series and `doc.name` must be `None`. `actor` (a non-empty string
 /// without NUL, [`DbError::InvalidActor`]) is recorded as `owner` and `modified_by`; it is not
 /// authenticated here. `created_at` and `modified_at` come from the database's `now()`, and
 /// `version` is 1. A duplicate value in a `unique` field or a duplicate name is
@@ -111,6 +121,31 @@ pub struct StoredDocument {
 /// **Table rows.** `doc.tables` holds the rows of each Table field. They are inserted after the
 /// document, one `INSERT` per row, with new UUID v7 ids, the document's id as `parent_id` and
 /// `idx` 1, 2, 3, ... in list order.
+///
+/// **Series.** With [`Naming::Series`] the number comes from the `fb_series` counter row of the
+/// series prefix, in the same transaction as the insert (`INSERT ... ON CONFLICT DO UPDATE ...
+/// RETURNING`): the row is locked until the transaction ends, so inserts with the same prefix
+/// are serialized, and a rollback (a failed insert, a caller's transaction rolled back) gives the
+/// number back, so numbering has no gaps. The prefix is rendered with the UTC date of the
+/// transaction start (`now()` of the database, that is the start of the caller's transaction if
+/// there is one); it and the number are bound parameters. The step happens at the naming point of
+/// the pipeline, after the hooks and the validation, so a document that is refused earlier does
+/// not take a number.
+///
+/// **A name collision blocks the series.** If the rendered name already exists (for example
+/// after the pattern changed to another prefix that renders a used name), the insert fails with
+/// [`DbError::UniqueViolation`] and the rollback returns the number, so every later insert
+/// retries the same number and fails too. Set the counter by hand with an upsert (the row may
+/// not exist yet, since the rollback also removes a row the failed insert created):
+/// `INSERT INTO fb_series (prefix, current) VALUES ('<prefix>', <n>) ON CONFLICT (prefix) DO
+/// UPDATE SET current = EXCLUDED.current`, choosing `<n>` so that the names rendered for
+/// `<n> + 1` and the numbers after it are not already used. Numbering is gapless per
+/// rendered prefix (the `fb_series` key): two DocTypes whose patterns render the same prefix
+/// share one counter and each sees gaps; use a distinct prefix per DocType.
+///
+/// **Docstatus.** A document of a submittable DocType starts as a draft (`docstatus` 0, no
+/// `amended_from`); neither can be set through `doc` (they are not fields, so a value for them is
+/// an unknown field).
 pub async fn insert(
     client: &mut impl GenericClient,
     registry: &Registry,
@@ -120,9 +155,15 @@ pub async fn insert(
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = insert_in(&tx, registry, doctype, doc, actor).await?;
+    let stored = insert_in(&tx, registry, doctype, doc, actor, None).await?;
     tx.commit().await?;
     Ok(stored)
+}
+
+/// What makes an insert an amendment: the cancelled document it replaces and its name.
+struct AmendOf {
+    from: String,
+    name: String,
 }
 
 async fn insert_in(
@@ -131,12 +172,17 @@ async fn insert_in(
     doctype: &DocType,
     mut doc: Document,
     actor: &str,
+    amend: Option<&AmendOf>,
 ) -> Result<StoredDocument, DbError> {
     check_actor(actor)?;
     let ctx = HookContext {
         doctype: &doctype.name,
         actor,
-        operation: Operation::Insert,
+        operation: if amend.is_some() {
+            Operation::Amend
+        } else {
+            Operation::Insert
+        },
     };
     run_hooks(registry, doctype, "before_insert", |hooks| {
         hooks.before_insert(&ctx, &mut doc)
@@ -158,9 +204,9 @@ async fn insert_in(
         return Err(DbError::Validation(errors));
     }
     let id = Uuid::now_v7();
-    let name = new_name(doctype, &doc, id)?;
+    let name = new_name(client, doctype, &doc, id, amend).await?;
 
-    let sql = insert_sql(doctype);
+    let sql = insert_sql(doctype, amend.is_some());
     let (id_value, name_value, actor_value) = (id, name, actor);
     let mut params: Vec<&(dyn ToSql + Sync)> = vec![&id_value, &name_value, &actor_value];
     let null = Value::Null;
@@ -176,6 +222,10 @@ async fn insert_in(
         })
         .collect();
     params.extend(bound.iter().map(|v| v as &(dyn ToSql + Sync)));
+    let amended_from = amend.map(|a| a.from.as_str());
+    if amend.is_some() {
+        params.push(&amended_from);
+    }
 
     let row = client
         .query_one(&sql, &params)
@@ -285,6 +335,14 @@ async fn get_in(
 /// A hook error is [`DbError::Hook`] and nothing is written. The DocType rules, the transaction
 /// and the Link handling are those of [`insert`].
 ///
+/// **Docstatus.** For a submittable DocType: a draft is updated as above; a cancelled document
+/// cannot be updated ([`DbError::InvalidDocStatus`]); a **submitted** document is locked: only
+/// fields marked `allow_on_submit` may change, and its tables never ([`DbError::FieldLocked`]
+/// names the first locked field). The check runs on the merged document before the hooks and
+/// again after them, so a hook cannot change a locked field either (a changes entry equal to
+/// the stored value is no change), and only the `allow_on_submit` columns are written.
+/// `docstatus` and `amended_from` are not fields and cannot be changed here.
+///
 /// **Optimistic concurrency.** The update is applied only if the document's current `version`
 /// equals `expected_version` (the version the caller read). Of two concurrent updates with the
 /// same `expected_version`, exactly one succeeds. Conflict detection assumes READ COMMITTED, the
@@ -342,9 +400,18 @@ async fn update_in(
         "FOR NO KEY UPDATE",
     )
     .await?;
+    let submitted = match current.docstatus {
+        Some(DocStatus::Cancelled) => {
+            return Err(invalid_status(doctype, &current, "update"));
+        }
+        status => status == Some(DocStatus::Submitted),
+    };
     let mut doc = as_document(&current);
     doc.values.extend(changes.values.clone());
     doc.tables.extend(changes.tables.clone());
+    if submitted {
+        check_not_locked(doctype, &current, &doc)?;
+    }
 
     if let Naming::Field(field) = &doctype.naming
         && changes.values.contains_key(field)
@@ -368,26 +435,15 @@ async fn update_in(
             "field `{field}` gives the document its name and cannot be changed, also not by a hook (renames are not supported yet)"
         )));
     }
+    // A hook must not get around the lock either.
+    if submitted {
+        check_not_locked(doctype, &current, &doc)?;
+    }
     let mut errors = validate(registry, doctype, &doc).err().unwrap_or_default();
-
-    // Every column field is written (a value a hook removed is cleared); of the tables only
-    // those whose rows differ from the stored ones.
-    let null = Value::Null;
-    let columns: BTreeMap<String, Value> = doctype
-        .column_fields()
-        .map(|field| {
-            (
-                field.name.clone(),
-                doc.values.get(&field.name).unwrap_or(&null).clone(),
-            )
-        })
-        .collect();
-    let changed_tables: BTreeMap<String, Vec<Row>> = doc
-        .tables
-        .iter()
-        .filter(|(field, rows)| current.tables.get(*field) != Some(*rows))
-        .map(|(field, rows)| (field.clone(), rows.clone()))
-        .collect();
+    // A submitted document only writes its `allow_on_submit` fields (the others are unchanged,
+    // checked above).
+    let columns = column_values(doctype, &doc, submitted);
+    let changed_tables = changed_tables(&current, &doc);
     let (links, writes) = resolve(
         client,
         registry,
@@ -400,15 +456,101 @@ async fn update_in(
     if !errors.is_empty() {
         return Err(DbError::Validation(errors));
     }
+    write_update(
+        client,
+        registry,
+        doctype,
+        (name, expected_version, actor),
+        (&columns, &links, &writes),
+        None,
+    )
+    .await
+}
 
-    let sql = update_sql(doctype, &columns);
+/// The column values to write for `doc`: every column field (a value a hook removed is cleared),
+/// or, with `only_allow_on_submit`, only the fields marked `allow_on_submit`.
+fn column_values(
+    doctype: &DocType,
+    doc: &Document,
+    only_allow_on_submit: bool,
+) -> BTreeMap<String, Value> {
+    let null = Value::Null;
+    doctype
+        .column_fields()
+        .filter(|field| !only_allow_on_submit || field.allow_on_submit)
+        .map(|field| {
+            (
+                field.name.clone(),
+                doc.values.get(&field.name).unwrap_or(&null).clone(),
+            )
+        })
+        .collect()
+}
+
+/// The tables of `doc` whose rows differ from the stored ones.
+fn changed_tables(current: &StoredDocument, doc: &Document) -> BTreeMap<String, Vec<Row>> {
+    doc.tables
+        .iter()
+        .filter(|(field, rows)| current.tables.get(*field) != Some(*rows))
+        .map(|(field, rows)| (field.clone(), rows.clone()))
+        .collect()
+}
+
+/// A submitted document is locked: every column field that is not `allow_on_submit` and every
+/// table must equal the stored one in `doc`. (A key that `doc` does not have is not a change:
+/// a missing value is null as on update, and a table key that is absent keeps its rows.)
+fn check_not_locked(
+    doctype: &DocType,
+    current: &StoredDocument,
+    doc: &Document,
+) -> Result<(), DbError> {
+    let locked = |field: &str| DbError::FieldLocked {
+        doctype: doctype.name.clone(),
+        name: current.name.clone(),
+        field: field.to_owned(),
+    };
+    let null = Value::Null;
+    for field in doctype.column_fields().filter(|f| !f.allow_on_submit) {
+        let given = doc.values.get(&field.name).unwrap_or(&null);
+        if given != current.values.get(&field.name).unwrap_or(&null) {
+            return Err(locked(&field.name));
+        }
+    }
+    for (field, _) in doctype.table_fields() {
+        if let Some(rows) = doc.tables.get(&field.name)
+            && current.tables.get(&field.name) != Some(rows)
+        {
+            return Err(locked(&field.name));
+        }
+    }
+    Ok(())
+}
+
+/// Writes the update of one document: the `columns`, the new rows of the tables in `writes`
+/// (replacing the stored ones) and, with `status`, the new docstatus; `version` is incremented
+/// and `modified_at` and `modified_by` are set in the same statement, which comes first. `who` is
+/// the document name, the expected version and the actor.
+async fn write_update(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    who: (&str, i64, &str),
+    (columns, links, writes): (
+        &BTreeMap<String, Value>,
+        &BTreeMap<String, Uuid>,
+        &[TableWrite<'_>],
+    ),
+    status: Option<DocStatus>,
+) -> Result<StoredDocument, DbError> {
+    let (name, expected_version, actor) = who;
+    let sql = update_sql(doctype, columns, status);
     let bound: Vec<SqlParam<'_>> = columns
         .iter()
         .map(|(field, value)| {
             // `columns` holds column fields only, so every key is a field; the fallback is never used.
             let field_type = doctype.field(field).map(|f| &f.field_type);
             field_type.map_or(SqlParam::Value(SqlValue(value)), |t| {
-                sql_param(t, &links, field, value)
+                sql_param(t, links, field, value)
             })
         })
         .collect();
@@ -427,16 +569,326 @@ async fn update_in(
         return Err(stale_or_missing(client, doctype, name, expected_version).await?);
     };
     let mut stored = decode_row(doctype, &row)?;
-    for write in &writes {
+    for write in writes {
         let sql = format!(
             "DELETE FROM {} WHERE \"parent_id\" = $1::uuid",
             quote_ident(&table_name(&write.child.name))
         );
         client.execute(&sql, &[&stored.id]).await?;
     }
-    write_rows(client, stored.id, &writes).await?;
+    write_rows(client, stored.id, writes).await?;
     stored.tables = load_tables(client, registry, doctype, stored.id).await?;
     Ok(stored)
+}
+
+/// The DocType must be submittable for `operation` (`submit`, `cancel` or `amend`).
+fn require_submittable(doctype: &DocType, operation: &'static str) -> Result<(), DbError> {
+    if doctype.submittable {
+        Ok(())
+    } else {
+        Err(DbError::NotSubmittable {
+            doctype: doctype.name.clone(),
+            operation,
+        })
+    }
+}
+
+fn invalid_status(doctype: &DocType, current: &StoredDocument, operation: &'static str) -> DbError {
+    match current.docstatus {
+        Some(docstatus) => DbError::InvalidDocStatus {
+            doctype: doctype.name.clone(),
+            name: current.name.clone(),
+            docstatus,
+            operation,
+        },
+        None => DbError::NotSubmittable {
+            doctype: doctype.name.clone(),
+            operation,
+        },
+    }
+}
+
+/// The stored document must have docstatus `needed` for `operation`.
+fn require_status(
+    doctype: &DocType,
+    current: &StoredDocument,
+    needed: DocStatus,
+    operation: &'static str,
+) -> Result<(), DbError> {
+    if current.docstatus == Some(needed) {
+        Ok(())
+    } else {
+        Err(invalid_status(doctype, current, operation))
+    }
+}
+
+/// Submits a draft of a submittable DocType: its docstatus becomes `Submitted` and the document
+/// is locked (see [`update`]). Returns the document as stored.
+///
+/// `doctype` must have `submittable = true` ([`DbError::NotSubmittable`]) and the document must be
+/// a draft ([`DbError::InvalidDocStatus`]). `expected_version` and `actor` work as for
+/// [`update`]; `version` is incremented, `modified_at` and `modified_by` are set.
+///
+/// **Pipeline.** In this order: the stored document and its rows are read with a row lock
+/// (`FOR NO KEY UPDATE`, the lock an update takes, which leaves Link lookups of other documents
+/// unblocked; an unknown name and another version are reported here, before any hook runs);
+/// the docstatus is checked; the registered `validate` hooks run on the whole stored document
+/// (with [`Operation::Submit`]), then the `before_submit` hooks, and both may modify it; the
+/// framework validates the whole result; Links are resolved; the column values and the changed
+/// tables are written like an update does (so a value a hook changed is persisted), with
+/// `docstatus` 1. A hook error is [`DbError::Hook`] and nothing is changed. The transaction
+/// and optimistic concurrency are those of [`update`].
+pub async fn submit(
+    client: &mut impl GenericClient,
+    registry: &Registry,
+    doctype: &str,
+    name: &str,
+    expected_version: i64,
+    actor: &str,
+) -> Result<StoredDocument, DbError> {
+    let doctype = document_doctype(registry, doctype)?;
+    let tx = client.transaction().await?;
+    let stored = submit_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    tx.commit().await?;
+    Ok(stored)
+}
+
+async fn submit_in(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    name: &str,
+    expected_version: i64,
+    actor: &str,
+) -> Result<StoredDocument, DbError> {
+    check_actor(actor)?;
+    require_submittable(doctype, "submit")?;
+    let current = lock_current(
+        client,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        "FOR NO KEY UPDATE",
+    )
+    .await?;
+    require_status(doctype, &current, DocStatus::Draft, "submit")?;
+    let mut doc = as_document(&current);
+    let ctx = HookContext {
+        doctype: &doctype.name,
+        actor,
+        operation: Operation::Submit,
+    };
+    run_hooks(registry, doctype, "validate", |hooks| {
+        hooks.validate(&ctx, &mut doc)
+    })?;
+    run_hooks(registry, doctype, "before_submit", |hooks| {
+        hooks.before_submit(&ctx, &mut doc)
+    })?;
+    let mut errors = validate(registry, doctype, &doc).err().unwrap_or_default();
+    let columns = column_values(doctype, &doc, false);
+    let changed_tables = changed_tables(&current, &doc);
+    let (links, writes) = resolve(
+        client,
+        registry,
+        doctype,
+        &columns,
+        &changed_tables,
+        &mut errors,
+    )
+    .await?;
+    if !errors.is_empty() {
+        return Err(DbError::Validation(errors));
+    }
+    write_update(
+        client,
+        registry,
+        doctype,
+        (name, expected_version, actor),
+        (&columns, &links, &writes),
+        Some(DocStatus::Submitted),
+    )
+    .await
+}
+
+/// Cancels a submitted document: its docstatus becomes `Cancelled`. It can then be deleted or
+/// [amended](amend); it cannot be updated. Returns the document as stored.
+///
+/// Documents that link to this one are not touched (no automatic cancellation of linked
+/// documents). `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document
+/// submitted ([`DbError::InvalidDocStatus`]). `expected_version` and `actor` work as for
+/// [`update`]; `version` is incremented, `modified_at` and `modified_by` are set.
+///
+/// **Pipeline.** In this order: the stored document and its rows are read with a row lock
+/// (`FOR NO KEY UPDATE`, as for [`submit`]; an unknown name and another version are reported
+/// here); the docstatus is checked; the registered `before_cancel` hooks run with the stored
+/// document, rows included (read-only; a hook error is [`DbError::Hook`] and nothing is
+/// changed); `docstatus` 2 is written. There is no validation: nothing else changes.
+pub async fn cancel(
+    client: &mut impl GenericClient,
+    registry: &Registry,
+    doctype: &str,
+    name: &str,
+    expected_version: i64,
+    actor: &str,
+) -> Result<StoredDocument, DbError> {
+    let doctype = document_doctype(registry, doctype)?;
+    let tx = client.transaction().await?;
+    let stored = cancel_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    tx.commit().await?;
+    Ok(stored)
+}
+
+async fn cancel_in(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    name: &str,
+    expected_version: i64,
+    actor: &str,
+) -> Result<StoredDocument, DbError> {
+    check_actor(actor)?;
+    require_submittable(doctype, "cancel")?;
+    let current = lock_current(
+        client,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        "FOR NO KEY UPDATE",
+    )
+    .await?;
+    require_status(doctype, &current, DocStatus::Submitted, "cancel")?;
+    let doc = as_document(&current);
+    let ctx = HookContext {
+        doctype: &doctype.name,
+        actor,
+        operation: Operation::Cancel,
+    };
+    run_hooks(registry, doctype, "before_cancel", |hooks| {
+        hooks.before_cancel(&ctx, &doc)
+    })?;
+    write_update(
+        client,
+        registry,
+        doctype,
+        (name, expected_version, actor),
+        (&BTreeMap::new(), &BTreeMap::new(), &[]),
+        Some(DocStatus::Cancelled),
+    )
+    .await
+}
+
+/// Amends a cancelled document: creates a **new draft** with a copy of its values and table
+/// rows and returns it as stored. The cancelled document is not changed.
+///
+/// `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document cancelled
+/// ([`DbError::InvalidDocStatus`]). `expected_version` is the cancelled document's version, as
+/// for [`delete`] (it keeps a stale caller from amending a document it has not read); `actor`
+/// becomes the `owner` and `modified_by` of the new draft.
+///
+/// **Name.** The new document is named `<root>-<n>`, not by the naming rule of the DocType (no
+/// series number is taken). If the cancelled document is itself an amendment (it has
+/// `amended_from`) and its name is `<root>-<k>`, the new name is `<root>-<k+1>`; otherwise it is
+/// `<name>-1`. So `X` is amended as `X-1`, and `X-1` (once cancelled) as `X-2`. The new
+/// document's `amended_from` is the cancelled document's name.
+///
+/// A cancelled document can be amended once: if the document with the new name already exists
+/// and amends it, the call fails with [`DbError::AlreadyAmended`] (delete the amendment to amend
+/// again). Concurrent amendments of the same document serialize on its row lock
+/// (`FOR NO KEY UPDATE`).
+///
+/// **Edge case: stale `AlreadyAmended`.** `amended_from` has no foreign key and the check
+/// looks only at the document with the new name. If a cancelled document in a chain is deleted
+/// and re-created by amending its predecessor, a later amend can name an amendment of the
+/// deleted document: `X`, `X-1`, `X-2`; delete `X-1`; amend `X` again (a new `X-1`), submit and
+/// cancel it; amending it then fails with `AlreadyAmended { amended_by: "X-2" }`. Delete `X-2`
+/// to amend again. There is no code change for this.
+///
+/// **Edge case: `unique` fields.** The copy repeats every value, and the cancelled original
+/// still holds them, so a DocType with a `unique` field fails with [`DbError::UniqueViolation`]
+/// unless a `before_insert` or `validate` hook checks `ctx.operation == Operation::Amend` and
+/// changes the value (the original cannot be deleted or updated first: amend needs it, and a
+/// cancelled document cannot be updated).
+///
+/// **Pipeline.** The cancelled document is read and locked, as for [`submit`]; then the
+/// **insert** pipeline of [`insert`] runs on the copy: the `before_insert` and `validate` hooks
+/// run with [`Operation::Amend`] (the document they see has the new name in `name`; a hook that
+/// changes it is refused with [`DbError::Naming`]), the framework validates it, Links are
+/// resolved (a target that was deleted since is a validation error), the new name is used and
+/// the draft is written. A hook error is [`DbError::Hook`] and nothing is changed.
+pub async fn amend(
+    client: &mut impl GenericClient,
+    registry: &Registry,
+    doctype: &str,
+    name: &str,
+    expected_version: i64,
+    actor: &str,
+) -> Result<StoredDocument, DbError> {
+    let doctype = document_doctype(registry, doctype)?;
+    let tx = client.transaction().await?;
+    let stored = amend_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    tx.commit().await?;
+    Ok(stored)
+}
+
+async fn amend_in(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    name: &str,
+    expected_version: i64,
+    actor: &str,
+) -> Result<StoredDocument, DbError> {
+    check_actor(actor)?;
+    require_submittable(doctype, "amend")?;
+    let current = lock_current(
+        client,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        "FOR NO KEY UPDATE",
+    )
+    .await?;
+    require_status(doctype, &current, DocStatus::Cancelled, "amend")?;
+    let new_name = amended_name(&current.name, current.amended_from.as_deref());
+    let sql = format!(
+        "SELECT \"amended_from\" FROM {} WHERE \"name\" = $1::text",
+        quote_ident(&table_name(&doctype.name))
+    );
+    if let Some(row) = client.query_opt(&sql, &[&new_name]).await? {
+        let amended_from: Option<String> = row.try_get(0)?;
+        if amended_from.as_deref() == Some(current.name.as_str()) {
+            return Err(DbError::AlreadyAmended {
+                doctype: doctype.name.clone(),
+                name: current.name,
+                amended_by: new_name,
+            });
+        }
+        // Some other document has the name: the insert below reports the unique violation.
+    }
+    let mut doc = as_document(&current);
+    doc.name = Some(new_name.clone());
+    let amend = AmendOf {
+        from: current.name,
+        name: new_name,
+    };
+    insert_in(client, registry, doctype, doc, actor, Some(&amend)).await
+}
+
+/// The name of the amendment of a cancelled document, see [`amend`].
+fn amended_name(name: &str, amended_from: Option<&str>) -> String {
+    if amended_from.is_some()
+        && let Some((root, number)) = name.rsplit_once('-')
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(number) = number.parse::<u64>()
+        && let Some(next) = number.checked_add(1)
+    {
+        return format!("{root}-{next}");
+    }
+    format!("{name}-1")
 }
 
 /// Deletes the document with this name, and its table rows, if its current `version` equals
@@ -456,6 +908,10 @@ async fn update_in(
 /// (`FOR UPDATE`; an unknown name or another version is reported here, before any hook runs);
 /// the registered `before_delete` hooks run with the stored document, rows included (a hook error
 /// is [`DbError::Hook`] and nothing is deleted); the document is deleted.
+///
+/// A submitted document of a submittable DocType cannot be deleted
+/// ([`DbError::InvalidDocStatus`], checked after the lock and before the hooks): only a draft or
+/// a cancelled document can.
 pub async fn delete(
     client: &mut impl GenericClient,
     registry: &Registry,
@@ -491,6 +947,9 @@ async fn delete_in(
         "FOR UPDATE",
     )
     .await?;
+    if current.docstatus == Some(DocStatus::Submitted) {
+        return Err(invalid_status(doctype, &current, "delete"));
+    }
     let doc = as_document(&current);
     let ctx = HookContext {
         doctype: &doctype.name,
@@ -812,8 +1271,24 @@ fn check_actor(actor: &str) -> Result<(), DbError> {
     Ok(())
 }
 
-/// The name for a new document. `doc` has passed validation.
-fn new_name(doctype: &DocType, doc: &Document, id: Uuid) -> Result<String, DbError> {
+/// The name for a new document. `doc` has passed validation. An amendment has the name its
+/// rule gave it (a hook may not change it); the series takes the next number of its counter.
+async fn new_name(
+    client: &impl GenericClient,
+    doctype: &DocType,
+    doc: &Document,
+    id: Uuid,
+    amend: Option<&AmendOf>,
+) -> Result<String, DbError> {
+    if let Some(amend) = amend {
+        if doc.name.as_deref() != Some(amend.name.as_str()) {
+            return Err(DbError::Naming(format!(
+                "an amended document is named `{}` and the name cannot be changed",
+                amend.name
+            )));
+        }
+        return Ok(amend.name.clone());
+    }
     match &doctype.naming {
         Naming::Random => {
             if doc.name.is_some() {
@@ -837,7 +1312,41 @@ fn new_name(doctype: &DocType, doc: &Document, id: Uuid) -> Result<String, DbErr
             }
             Ok(name.clone())
         }
+        Naming::Series(pattern) => {
+            if doc.name.is_some() {
+                return Err(DbError::Naming(format!(
+                    "DocType `{}` uses a naming series: the name is generated and cannot be given",
+                    doctype.name
+                )));
+            }
+            next_series_name(client, pattern).await
+        }
     }
+}
+
+/// The counter statement: takes (creating it if needed) the row of the prefix, `$1`, and
+/// increments it. The row lock lasts until the transaction ends.
+const SERIES_SQL: &str = "INSERT INTO fb_series (prefix, current) VALUES ($1::text, 1) \
+     ON CONFLICT (prefix) DO UPDATE SET current = fb_series.current + 1 RETURNING current";
+
+/// The next name of a series: the prefix is rendered with the UTC date of the transaction, the
+/// counter of that prefix is incremented in the caller's transaction and the number rendered.
+async fn next_series_name(
+    client: &impl GenericClient,
+    pattern: &SeriesPattern,
+) -> Result<String, DbError> {
+    let date: Date = client
+        .query_one("SELECT (now() AT TIME ZONE 'UTC')::date", &[])
+        .await?
+        .try_get(0)?;
+    let prefix = pattern.prefix(date);
+    let number: i64 = client.query_one(SERIES_SQL, &[&prefix]).await?.try_get(0)?;
+    let number = u64::try_from(number).map_err(|_| {
+        DbError::Naming(format!(
+            "the counter of series prefix `{prefix}` holds {number}, which is not a valid number"
+        ))
+    })?;
+    Ok(pattern.render(date, number))
 }
 
 /// `"id", "name", ..., "<field>", ...`: the columns of the table, in decode order.
@@ -872,10 +1381,24 @@ fn field_items(doctype: &DocType) -> Vec<String> {
         .collect()
 }
 
-/// What every statement on a document table returns, in decode order: the standard columns, then
-/// [`field_items`].
+/// The columns after the standard ones that only a submittable DocType's table has.
+fn status_columns(doctype: &DocType) -> &'static [&'static str] {
+    if doctype.submittable {
+        &["docstatus", "amended_from"]
+    } else {
+        &[]
+    }
+}
+
+/// What every statement on a document table returns, in decode order: the standard columns, the
+/// [`status_columns`], then [`field_items`].
 fn select_list(doctype: &DocType) -> String {
-    let mut items: Vec<String> = STANDARD_COLUMNS.iter().copied().map(quote_ident).collect();
+    let mut items: Vec<String> = STANDARD_COLUMNS
+        .iter()
+        .chain(status_columns(doctype))
+        .copied()
+        .map(quote_ident)
+        .collect();
     items.extend(field_items(doctype));
     items.join(", ")
 }
@@ -897,8 +1420,9 @@ fn field_placeholders(doctype: &DocType, first: usize) -> Vec<String> {
         .collect()
 }
 
-/// Placeholders `$1` (id), `$2` (name) and `$3` (actor, used twice), then one per column field.
-fn insert_sql(doctype: &DocType) -> String {
+/// Placeholders `$1` (id), `$2` (name) and `$3` (actor, used twice), then one per column field,
+/// then, for an amendment, `amended_from`. `docstatus` is not written: its default (0) is a draft.
+fn insert_sql(doctype: &DocType, amended: bool) -> String {
     let mut values = vec![
         "$1::uuid".to_owned(),
         "$2::text".to_owned(),
@@ -909,10 +1433,15 @@ fn insert_sql(doctype: &DocType) -> String {
         "1".to_owned(),
     ];
     values.extend(field_placeholders(doctype, 4));
+    let mut columns = column_list(doctype);
+    if amended {
+        columns.push_str(", ");
+        columns.push_str(&quote_ident("amended_from"));
+        values.push(format!("${}::text", 4 + doctype.column_fields().count()));
+    }
     format!(
-        "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+        "INSERT INTO {} ({columns}) VALUES ({}) RETURNING {}",
         quote_ident(&table_name(&doctype.name)),
-        column_list(doctype),
         values.join(", "),
         select_list(doctype)
     )
@@ -949,10 +1478,15 @@ fn child_select_sql(child: &DocType) -> String {
 }
 
 /// Placeholders `$1..$n` for the changes (in key order), `$n+1` actor, `$n+2` name,
-/// `$n+3` expected version.
+/// `$n+3` expected version. With `status` the new docstatus is set too (a constant of the
+/// enum, not a value from outside).
 /// `changes` has passed validation, so every key is a field of the DocType (the `text` fallback
 /// cast is unreachable; an unknown column would be rejected by the database, never interpolated).
-fn update_sql(doctype: &DocType, changes: &BTreeMap<String, Value>) -> String {
+fn update_sql(
+    doctype: &DocType,
+    changes: &BTreeMap<String, Value>,
+    status: Option<DocStatus>,
+) -> String {
     let mut sets: Vec<String> = Vec::with_capacity(changes.len() + 3);
     for (i, name) in changes.keys().enumerate() {
         let cast = doctype
@@ -964,6 +1498,9 @@ fn update_sql(doctype: &DocType, changes: &BTreeMap<String, Value>) -> String {
     sets.push("\"modified_at\" = now()".to_owned());
     sets.push(format!("\"modified_by\" = ${}::text", n + 1));
     sets.push("\"version\" = \"version\" + 1".to_owned());
+    if let Some(status) = status {
+        sets.push(format!("\"docstatus\" = {}", status.as_i16()));
+    }
     format!(
         "UPDATE {} SET {} WHERE \"name\" = ${}::text AND \"version\" = ${}::bigint RETURNING {}",
         quote_ident(&table_name(&doctype.name)),
@@ -991,6 +1528,17 @@ fn decode_fields(
 
 /// Decodes a row of [`select_list`]. `tables` is left empty for the caller to fill.
 fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocument, DbError> {
+    let (docstatus, amended_from) = if doctype.submittable {
+        let raw: i16 = row.try_get(STANDARD_COLUMNS.len())?;
+        let status = DocStatus::from_i16(raw).ok_or_else(|| DbError::Decode {
+            doctype: doctype.name.clone(),
+            field: "docstatus".to_owned(),
+            message: format!("{raw} is not a docstatus (0, 1 or 2)"),
+        })?;
+        (Some(status), row.try_get(STANDARD_COLUMNS.len() + 1)?)
+    } else {
+        (None, None)
+    };
     Ok(StoredDocument {
         id: row.try_get(0)?,
         name: row.try_get(1)?,
@@ -999,7 +1547,13 @@ fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocument, DbError>
         modified_at: row.try_get(4)?,
         modified_by: row.try_get(5)?,
         version: row.try_get(6)?,
-        values: decode_fields(doctype, row, STANDARD_COLUMNS.len())?,
+        docstatus,
+        amended_from,
+        values: decode_fields(
+            doctype,
+            row,
+            STANDARD_COLUMNS.len() + status_columns(doctype).len(),
+        )?,
         tables: BTreeMap::new(),
     })
 }
@@ -1020,7 +1574,7 @@ mod tests {
     #[test]
     fn insert_sql_binds_every_value_with_a_cast() {
         assert_eq!(
-            insert_sql(&customer()),
+            insert_sql(&customer(), false),
             "INSERT INTO \"doc_customer\" (\"id\", \"name\", \"owner\", \"created_at\", \"modified_at\", \
              \"modified_by\", \"version\", \"email\", \"points\") VALUES ($1::uuid, $2::text, $3::text, now(), \
              now(), $3::text, 1, $4::varchar, $5::bigint) RETURNING \"id\", \"name\", \"owner\", \"created_at\", \
@@ -1034,7 +1588,7 @@ mod tests {
             ("points".to_owned(), Value::Int(1)),
             ("email".to_owned(), Value::Null),
         ]);
-        let sql = update_sql(&customer(), &changes);
+        let sql = update_sql(&customer(), &changes, None);
         assert!(sql.starts_with(
             "UPDATE \"doc_customer\" SET \"email\" = $1::varchar, \"points\" = $2::bigint, \
              \"modified_at\" = now(), \"modified_by\" = $3::text, \"version\" = \"version\" + 1 \
@@ -1053,7 +1607,7 @@ mod tests {
 
     #[test]
     fn links_are_written_as_uuid_and_read_back_as_names() {
-        let sql = insert_sql(&order());
+        let sql = insert_sql(&order(), false);
         assert!(
             sql.contains("$4::uuid, $5::uuid) RETURNING"),
             "bound as ids: {sql}"
@@ -1095,7 +1649,7 @@ mod tests {
     #[test]
     fn a_table_field_is_not_a_column_in_any_statement() {
         let doctype = with_table();
-        let insert = insert_sql(&doctype);
+        let insert = insert_sql(&doctype, false);
         assert!(
             insert.contains("(\"id\", \"name\", \"owner\", \"created_at\", \"modified_at\", \"modified_by\", \"version\", \"title\", \"note\") VALUES"),
             "{insert}"
@@ -1111,7 +1665,7 @@ mod tests {
         assert!(!field_items(&doctype).concat().contains("lines"));
         assert_eq!(field_placeholders(&doctype, 1).len(), 2);
         // No fields at all: only the meta columns change.
-        let sql = update_sql(&doctype, &BTreeMap::new());
+        let sql = update_sql(&doctype, &BTreeMap::new(), None);
         assert!(
             sql.starts_with(
                 "UPDATE \"doc_ord\" SET \"modified_at\" = now(), \"modified_by\" = $1::text, \
@@ -1140,5 +1694,76 @@ mod tests {
         assert!(check_actor("cli").is_ok());
         assert!(matches!(check_actor(""), Err(DbError::InvalidActor)));
         assert!(matches!(check_actor("a\0b"), Err(DbError::InvalidActor)));
+    }
+
+    fn quote() -> DocType {
+        DocType::from_toml_str(
+            "name = \"quote\"\nlabel = \"Q\"\nsubmittable = true\n\
+             [[fields]]\nname = \"title\"\ntype = \"data\"\n",
+        )
+        .expect("valid DocType")
+    }
+
+    #[test]
+    fn submittable_statements_select_the_status_columns_and_bind_amended_from() {
+        let doctype = quote();
+        let select = select_list(&doctype);
+        assert!(
+            select.starts_with(
+                "\"id\", \"name\", \"owner\", \"created_at\", \"modified_at\", \"modified_by\", \"version\", \"docstatus\", \"amended_from\", \"title\""
+            ),
+            "{select}"
+        );
+        // A draft insert does not mention docstatus (the column default is 0) ...
+        let plain = insert_sql(&doctype, false);
+        assert!(plain.contains("(\"id\", \"name\", \"owner\", \"created_at\", \"modified_at\", \"modified_by\", \"version\", \"title\") VALUES ("), "{plain}");
+        // ... an amendment binds amended_from after the fields.
+        let amended = insert_sql(&doctype, true);
+        assert!(
+            amended.contains("\"version\", \"title\", \"amended_from\") VALUES (")
+                && amended.contains("1, $4::varchar, $5::text) RETURNING"),
+            "{amended}"
+        );
+        // The new docstatus is a constant of the enum.
+        let sql = update_sql(&doctype, &BTreeMap::new(), Some(DocStatus::Cancelled));
+        assert!(
+            sql.starts_with(
+                "UPDATE \"doc_quote\" SET \"modified_at\" = now(), \"modified_by\" = $1::text, \
+                 \"version\" = \"version\" + 1, \"docstatus\" = 2 WHERE \"name\" = $2::text AND \"version\" = $3::bigint RETURNING "
+            ),
+            "{sql}"
+        );
+        // A plain DocType has no such columns anywhere.
+        assert!(!select_list(&customer()).contains("docstatus"));
+    }
+
+    #[test]
+    fn the_series_statement_binds_the_prefix() {
+        assert_eq!(
+            SERIES_SQL,
+            "INSERT INTO fb_series (prefix, current) VALUES ($1::text, 1) \
+             ON CONFLICT (prefix) DO UPDATE SET current = fb_series.current + 1 RETURNING current"
+        );
+    }
+
+    #[test]
+    fn amended_names() {
+        // Not an amendment itself: the name gets `-1`, also when it ends in a number.
+        assert_eq!(amended_name("X", None), "X-1");
+        assert_eq!(amended_name("INV-2026-00007", None), "INV-2026-00007-1");
+        // An amendment counts up from its own number.
+        assert_eq!(amended_name("X-1", Some("X")), "X-2");
+        assert_eq!(
+            amended_name("INV-2026-00007-9", Some("INV-2026-00007-8")),
+            "INV-2026-00007-10"
+        );
+        // A name that is not `<root>-<digits>` starts over with `-1`.
+        assert_eq!(amended_name("X-a", Some("X")), "X-a-1");
+        assert_eq!(amended_name("X-", Some("X")), "X--1");
+        assert_eq!(amended_name("X-+3", Some("X")), "X-+3-1");
+        assert_eq!(
+            amended_name("X-18446744073709551615", Some("X")),
+            "X-18446744073709551615-1"
+        );
     }
 }

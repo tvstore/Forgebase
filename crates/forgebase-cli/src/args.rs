@@ -28,7 +28,7 @@ pub enum Command {
         #[arg(long, value_name = "MS", default_value_t = 5000)]
         lock_timeout_ms: u64,
     },
-    /// Insert, read, update and delete single documents.
+    /// Insert, read, update, delete, submit, cancel and amend single documents.
     #[command(subcommand)]
     Doc(DocCommand),
 }
@@ -68,6 +68,48 @@ pub enum DocCommand {
         doctypes: DocTypesDir,
         #[command(flatten)]
         data: DataArg,
+        #[command(flatten)]
+        actor: ActorArg,
+    },
+    /// Submit a draft of a submittable DocType (it becomes locked) and print it as stored. Fails
+    /// if the document's version is not the one given with --version.
+    Submit {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+        #[command(flatten)]
+        version: VersionArg,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        #[command(flatten)]
+        actor: ActorArg,
+    },
+    /// Cancel a submitted document and print it as stored. Fails if the document's version is
+    /// not the one given with --version.
+    Cancel {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+        #[command(flatten)]
+        version: VersionArg,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        #[command(flatten)]
+        actor: ActorArg,
+    },
+    /// Amend a cancelled document: create a new draft named `<name>-<n>` with a copy of its
+    /// values and rows, and print it. Takes no data; --version is the cancelled document's.
+    Amend {
+        /// DocType name.
+        doctype: String,
+        /// Document name (of the cancelled document).
+        name: String,
+        #[command(flatten)]
+        version: VersionArg,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
         #[command(flatten)]
         actor: ActorArg,
     },
@@ -111,8 +153,8 @@ pub struct DataArg {
 
 #[derive(Debug, Args)]
 pub struct ActorArg {
-    /// Recorded as owner / modified_by on insert and update; given to hooks (on delete it is only
-    /// given to hooks, not stored). Not authenticated.
+    /// Recorded as owner / modified_by on insert, update, submit, cancel and amend; given to
+    /// hooks (on delete it is only given to hooks, not stored). Not authenticated.
     #[arg(long, value_name = "NAME", default_value = "cli")]
     pub actor: String,
 }

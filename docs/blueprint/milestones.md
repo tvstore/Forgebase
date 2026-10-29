@@ -28,10 +28,17 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 
 ## M2 Relationships and lifecycle
 
-- **Status:** In progress (Stage 1 plan approved by the owner 2026-10-28; owner decisions in [architecture, section 3](architecture.md#m2-owner-decisions-2026-10-28-accepted)). Delivered as four PRs: M2.1 Link fields and optimistic concurrency (implemented; in review), M2.2 child tables (implemented; in review), M2.3 lifecycle pipeline and hooks (with [ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md); implemented; in review), M2.4 docstatus and naming series. Done when M2.4 is merged.
+- **Status:** Done (Stage 1 plan approved by the owner 2026-10-28; owner decisions in [architecture, section 3](architecture.md#m2-owner-decisions-2026-10-28-accepted)). Delivered as four PRs: M2.1 Link fields and optimistic concurrency (merged), M2.2 child tables (merged), M2.3 lifecycle pipeline and hooks (with [ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md); merged), M2.4 docstatus (submit, cancel, amend) and naming series (the last PR; CI and independent review are recorded per PR at merge).
 - **Scope:** Link foreign keys; child tables; the fixed lifecycle pipeline with hooks; docstatus and amend; optimistic concurrency; naming series. Specifies the exact pipeline order.
-- **Exit criteria:** lifecycle-order tests and rollback tests.
-- **Non-goals:** Dynamic Link, single DocTypes (still Undecided), workflow, permissions (M3).
+- **Exit criteria:** lifecycle-order tests and rollback tests. Met, with these tests (all against a real PostgreSQL 16):
+  - lifecycle-order tests for insert, update and delete (`forgebase-db/tests/lifecycle.rs`) and for submit, cancel, amend and delete of a submittable DocType (`tests/docstatus.rs`);
+  - rollback tests: a hook failure at each point of every operation leaves nothing changed (`lifecycle.rs`, and `docstatus.rs` for `validate` and `before_submit` on submit, `before_cancel` on cancel, `before_insert` and `validate` on amend); the series counter is not consumed by a failed insert, by a refused document or by a rolled-back caller transaction (`tests/series.rs`);
+  - foreign key integrity (Links `ON DELETE RESTRICT`, child rows `ON DELETE CASCADE`; `tests/links.rs`, `tests/child_tables.rs`) and the schema sync of the docstatus columns (`tests/docstatus_schema.rs`);
+  - concurrency tests: optimistic concurrency (`tests/concurrency.rs`), racing submits and racing amendments, and 20 parallel series inserts that get exactly the numbers 1 to 20 (`tests/docstatus.rs`, `tests/series.rs`);
+  - docs updated (architecture sections 3, 5 and 6, feature matrix, security model, ADR 0009 implementation details, README, CHANGELOG).
+
+  CI green and the independent review (AGENTS.md, Stage 3) are recorded per PR at merge.
+- **Non-goals:** Dynamic Link, single DocTypes (still Undecided), workflow, permissions (M3), automatic cancellation of linked documents.
 
 ## M3 Auth, permissions, REST API
 

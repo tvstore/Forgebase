@@ -15,7 +15,13 @@ async fn migrates_empty_database_and_is_idempotent() {
     let rows = db
         .rows("SELECT version::text, name, length(checksum)::text FROM fb_migration")
         .await;
-    assert_eq!(rows, vec![vec!["1".to_owned(), "init".into(), "64".into()]]);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_owned(), "init".into(), "64".into()],
+            vec!["2".to_owned(), "series".into(), "64".into()],
+        ]
+    );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_doctype").await,
         vec![vec!["0".to_owned()]]
@@ -29,7 +35,60 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["1".to_owned()]]
+        vec![vec!["2".to_owned()]]
+    );
+}
+
+#[tokio::test]
+async fn the_series_counter_table_is_created_by_migration_2() {
+    let db = TestDb::migrated().await;
+    // `prefix` is the primary key, `current` is not null.
+    assert_eq!(
+        db.columns("fb_series").await,
+        vec![
+            ("prefix".to_owned(), "text/NO".to_owned()),
+            ("current".to_owned(), "bigint/NO".to_owned()),
+        ]
+    );
+    assert_eq!(
+        db.rows(
+            "SELECT a.attname::text FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid \
+             AND a.attnum = i.indkey[0] WHERE i.indrelid = 'fb_series'::regclass AND i.indisprimary"
+        )
+        .await,
+        vec![vec!["prefix".to_owned()]]
+    );
+}
+
+#[tokio::test]
+async fn a_database_at_migration_1_is_upgraded_to_2() {
+    let db = TestDb::new().await;
+    let mut client = db.pool.get().await.unwrap();
+    // Apply only migration 1 by hand, with the checksum the runner computes.
+    let first = &MIGRATIONS[0];
+    db.exec(
+        "CREATE TABLE fb_migration (version integer PRIMARY KEY, name text NOT NULL, \
+         checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
+    )
+    .await;
+    db.exec(first.sql).await;
+    db.exec(&format!(
+        "INSERT INTO fb_migration (version, name, checksum) VALUES (1, 'init', \
+         encode(sha256(convert_to($sql${}$sql$, 'UTF8')), 'hex'))",
+        first.sql
+    ))
+    .await;
+    let applied = migrate_framework(&mut client, false).await.unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].version, 2);
+    assert_eq!(
+        db.rows("SELECT version::text FROM fb_migration ORDER BY version")
+            .await,
+        vec![vec!["1".to_owned()], vec!["2".to_owned()]]
+    );
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM fb_series").await,
+        vec![vec!["0".to_owned()]]
     );
 }
 

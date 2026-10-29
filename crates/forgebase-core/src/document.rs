@@ -1,12 +1,61 @@
 //! Documents and their validation against a [`DocType`].
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::meta::{DocField, DocType, FieldType, Registry};
 use crate::value::Value;
 
 /// One row of a child table: field values keyed by field name, like [`Document::values`].
 pub type Row = BTreeMap<String, Value>;
+
+/// The state of a document of a submittable DocType (`submittable = true`), stored as the
+/// `docstatus` column: 0, 1 or 2.
+///
+/// A draft is editable and deletable; a submitted document is locked (only fields marked
+/// `allow_on_submit` change) and cannot be deleted; a cancelled document can be deleted or
+/// amended into a new draft. Documents of other DocTypes have no docstatus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocStatus {
+    /// 0: being edited.
+    Draft,
+    /// 1: submitted, locked.
+    Submitted,
+    /// 2: cancelled after submission.
+    Cancelled,
+}
+
+impl DocStatus {
+    /// The value of the `docstatus` column.
+    pub fn as_i16(self) -> i16 {
+        match self {
+            DocStatus::Draft => 0,
+            DocStatus::Submitted => 1,
+            DocStatus::Cancelled => 2,
+        }
+    }
+
+    /// The status for a `docstatus` column value, `None` for anything but 0, 1 and 2.
+    pub fn from_i16(value: i16) -> Option<Self> {
+        match value {
+            0 => Some(DocStatus::Draft),
+            1 => Some(DocStatus::Submitted),
+            2 => Some(DocStatus::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for DocStatus {
+    /// `draft`, `submitted` or `cancelled`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            DocStatus::Draft => "draft",
+            DocStatus::Submitted => "submitted",
+            DocStatus::Cancelled => "cancelled",
+        })
+    }
+}
 
 /// A document: an optional name plus field values keyed by field name.
 ///
@@ -403,6 +452,7 @@ mod tests {
             field_type,
             required,
             unique: false,
+            allow_on_submit: false,
         }
     }
 
@@ -412,6 +462,7 @@ mod tests {
             label: "Thing".into(),
             naming: Naming::Random,
             is_child: false,
+            submittable: false,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, true),
                 f("notes", FieldType::Text, false),
@@ -793,6 +844,7 @@ mod tests {
             label: "Order".into(),
             naming: Naming::Random,
             is_child: false,
+            submittable: false,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, false),
                 f(
@@ -809,6 +861,7 @@ mod tests {
             label: "Item".into(),
             naming: Naming::Random,
             is_child: true,
+            submittable: false,
             fields: vec![
                 f("qty", FieldType::Int, true),
                 f("note", FieldType::Data { max_length: 3 }, false),

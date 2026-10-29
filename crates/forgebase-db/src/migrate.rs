@@ -27,11 +27,18 @@ pub struct Migration {
 }
 
 /// All framework migrations, in order.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../migrations/0001_init.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "series",
+        sql: include_str!("../migrations/0002_series.sql"),
+    },
+];
 
 /// Applies the pending framework migrations and returns them.
 ///

@@ -30,6 +30,23 @@ const STANDARD_COLUMNS: [(&str, &str); 7] = [
 const CHILD_STANDARD_COLUMNS: [(&str, &str); 3] =
     [("id", "uuid"), ("parent_id", "uuid"), ("idx", "integer")];
 
+/// The extra standard columns of a submittable DocType: (name, PostgreSQL type, `NOT NULL`).
+/// `docstatus` is 0 draft, 1 submitted, 2 cancelled; `amended_from` is the name of the cancelled
+/// document an amendment replaces.
+const SUBMITTABLE_COLUMNS: [(&str, &str, bool); 2] = [
+    ("docstatus", "smallint", true),
+    ("amended_from", "text", false),
+];
+
+/// The submittable columns of `doctype` (none unless it is submittable).
+fn submittable_columns(doctype: &DocType) -> &'static [(&'static str, &'static str, bool)] {
+    if doctype.submittable {
+        &SUBMITTABLE_COLUMNS
+    } else {
+        &[]
+    }
+}
+
 /// The standard columns of the table of `doctype`: a child's rows have no name, owner, version
 /// or timestamps (they are saved with their parent) but point at the parent and have a position.
 fn standard_columns(doctype: &DocType) -> &'static [(&'static str, &'static str)] {
@@ -68,7 +85,9 @@ pub enum Step {
         /// The `ALTER TABLE` statement.
         sql: String,
     },
-    /// Add a nullable column for a field added to an existing DocType.
+    /// Add a nullable column for a field added to an existing DocType, or the `docstatus`
+    /// (`NOT NULL DEFAULT 0`, existing documents become drafts) and `amended_from` columns of a
+    /// DocType that became submittable.
     AddColumn {
         /// DocType name.
         doctype: String,
@@ -149,7 +168,8 @@ pub enum Conflict {
         actual: String,
     },
     /// A column exists with a different type (or, for standard columns, a different
-    /// nullability, uniqueness or primary key), or a standard column is missing.
+    /// nullability, uniqueness or primary key; the same for the `docstatus` and `amended_from` columns
+    /// of a submittable DocType), or a standard column is missing.
     ColumnMismatch {
         /// Table name.
         table: String,
@@ -370,11 +390,26 @@ fn standard_column_sql(name: &str, data_type: &str) -> String {
     format!("{} {data_type} {constraint}", quote_ident(name))
 }
 
+/// `"docstatus" smallint NOT NULL DEFAULT 0` or `"amended_from" text`.
+fn submittable_column_sql(name: &str, data_type: &str, not_null: bool) -> String {
+    let constraint = match (name, not_null) {
+        ("docstatus", _) => " NOT NULL DEFAULT 0",
+        (_, true) => " NOT NULL",
+        (_, false) => "",
+    };
+    format!("{} {data_type}{constraint}", quote_ident(name))
+}
+
 fn create_table_sql(doctype: &DocType, table: &str) -> String {
     let mut lines: Vec<String> = standard_columns(doctype)
         .iter()
         .map(|(name, data_type)| standard_column_sql(name, data_type))
         .collect();
+    lines.extend(
+        submittable_columns(doctype)
+            .iter()
+            .map(|(name, data_type, not_null)| submittable_column_sql(name, data_type, *not_null)),
+    );
     for field in doctype.column_fields() {
         lines.push(format!(
             "{} {}",
@@ -594,6 +629,30 @@ fn plan_doctype(
             Some(_) => {}
         }
     }
+    for &(name, data_type, not_null) in submittable_columns(doctype) {
+        let expected = format!("{data_type}{}", if not_null { " NOT NULL" } else { "" });
+        match columns.get(name) {
+            None => phases.add_columns.push(Step::AddColumn {
+                doctype: doctype.name.clone(),
+                column: name.to_owned(),
+                sql: format!(
+                    "ALTER TABLE {} ADD COLUMN {}",
+                    quote_ident(&table),
+                    submittable_column_sql(name, data_type, not_null)
+                ),
+            }),
+            Some(c) if c.data_type != data_type || c.not_null != not_null => {
+                let null = if c.not_null { " NOT NULL" } else { "" };
+                plan.conflicts.push(Conflict::ColumnMismatch {
+                    table: table.clone(),
+                    column: name.to_owned(),
+                    expected,
+                    actual: format!("{}{null}", c.data_type),
+                });
+            }
+            Some(_) => {}
+        }
+    }
     let key = |column: &str| (table.clone(), column.to_owned());
     let mut standard_keys = vec![(
         "id",
@@ -734,6 +793,9 @@ fn plan_doctype(
     }
     for column in columns.keys() {
         let known = standard_columns(doctype).iter().any(|(n, _)| n == column)
+            || submittable_columns(doctype)
+                .iter()
+                .any(|(n, ..)| n == column)
             || doctype.column_fields().any(|f| f.name == *column);
         if !known {
             plan.warnings.push(Warning::ColumnNotInMetadata {
@@ -1583,5 +1645,95 @@ scale = 2
                 name: "doc_item".into()
             }]
         );
+    }
+
+    const MEMO: &str = "name = \"memo\"\nlabel = \"M\"\nsubmittable = true\n";
+
+    /// A catalog of a `memo` table whose columns are the standard ones plus `extra`.
+    fn memo_catalog(extra: &[(&str, &str, bool)]) -> Catalog {
+        let mut columns: BTreeMap<String, Column> = STANDARD_COLUMNS
+            .iter()
+            .map(|(n, t)| {
+                (
+                    (*n).to_owned(),
+                    Column {
+                        data_type: (*t).into(),
+                        not_null: true,
+                    },
+                )
+            })
+            .collect();
+        for (name, data_type, not_null) in extra {
+            columns.insert(
+                (*name).to_owned(),
+                Column {
+                    data_type: (*data_type).into(),
+                    not_null: *not_null,
+                },
+            );
+        }
+        Catalog {
+            columns: BTreeMap::from([("doc_memo".to_owned(), columns)]),
+            unique: BTreeSet::from([("doc_memo".to_owned(), "name".to_owned())]),
+            primary: BTreeSet::from([("doc_memo".to_owned(), "id".to_owned())]),
+            relations: BTreeSet::from(["doc_memo".to_owned()]),
+            tables: BTreeSet::from(["doc_memo".to_owned()]),
+            managed: BTreeSet::from(["memo".to_owned()]),
+            ..Catalog::default()
+        }
+    }
+
+    #[test]
+    fn a_new_submittable_table_has_the_docstatus_columns_after_the_standard_ones() {
+        let plan = plan(&registry(MEMO), &Catalog::default());
+        let Step::CreateTable { sql, .. } = &plan.steps[0] else {
+            panic!("expected CreateTable");
+        };
+        assert!(
+            sql.contains(
+                "\"version\" bigint NOT NULL DEFAULT 1,\n    \"docstatus\" smallint NOT NULL DEFAULT 0,\n    \"amended_from\" text\n)"
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn missing_docstatus_columns_are_added_and_present_ones_are_a_no_op() {
+        let plan_missing = plan(&registry(MEMO), &memo_catalog(&[]));
+        assert!(plan_missing.conflicts.is_empty());
+        let columns: Vec<&str> = plan_missing
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::AddColumn { column, .. } => Some(column.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(columns, ["docstatus", "amended_from"]);
+
+        let present = memo_catalog(&[
+            ("docstatus", "smallint", true),
+            ("amended_from", "text", false),
+        ]);
+        let no_op = plan(&registry(MEMO), &present);
+        assert!(no_op.steps.is_empty() && no_op.conflicts.is_empty() && no_op.warnings.is_empty());
+    }
+
+    #[test]
+    fn docstatus_column_drift_is_a_conflict_and_turning_submittable_off_a_warning() {
+        let drifted = memo_catalog(&[
+            ("docstatus", "bigint", true),
+            ("amended_from", "text", true),
+        ]);
+        let plan_drift = plan(&registry(MEMO), &drifted);
+        assert_eq!(plan_drift.conflicts.len(), 2, "{:?}", plan_drift.conflicts);
+
+        let kept = memo_catalog(&[
+            ("docstatus", "smallint", true),
+            ("amended_from", "text", false),
+        ]);
+        let off = plan(&registry("name = \"memo\"\nlabel = \"M\"\n"), &kept);
+        assert!(off.steps.is_empty() && off.conflicts.is_empty());
+        assert_eq!(off.warnings.len(), 2, "{:?}", off.warnings);
     }
 }

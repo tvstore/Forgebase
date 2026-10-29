@@ -246,8 +246,11 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 1 pending"), "{text}");
-    assert!(text.contains("0001 init"), "{text}");
+    assert!(text.contains("framework migrations: 2 pending"), "{text}");
+    assert!(
+        text.contains("0001 init") && text.contains("0002 series"),
+        "{text}"
+    );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
     assert_eq!(db.scalar("SELECT to_regclass('doc_customer')::text"), None);
 
@@ -280,7 +283,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 1 applied"), "{text}");
+    assert!(text.contains("framework migrations: 2 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -934,4 +937,200 @@ fn child_tables_end_to_end() {
             .as_deref(),
         Some("0")
     );
+}
+
+#[test]
+fn submit_cancel_and_amend_end_to_end() {
+    let db = TestDb::new();
+    let migrate = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrate), Some(0), "{}", stderr(&migrate));
+    let run = |args: &[&str]| {
+        let mut full = args.to_vec();
+        full.extend_from_slice(&["--doctypes", DOCTYPES]);
+        db.forgebase(&full)
+    };
+    let year = db
+        .scalar("SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY')")
+        .expect("year");
+    let customer = run(&[
+        "doc",
+        "insert",
+        "customer",
+        "--data",
+        r#"{"email":"c@example.com","full_name":"C"}"#,
+    ]);
+    assert_eq!(code(&customer), Some(0), "{}", stderr(&customer));
+    // A customer has no docstatus, so its output has no such keys.
+    assert!(json(&customer).get("docstatus").is_none());
+
+    // The series names the order, and it starts as a draft.
+    let data = r#"{"customer":"c@example.com","items":[{"description":"Widget","qty":2}]}"#;
+    let inserted = run(&["doc", "insert", "sales_order", "--data", data]);
+    assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+    let order = json(&inserted);
+    let name = format!("SO-{year}-00001");
+    assert_eq!(order["name"], name.as_str());
+    assert_eq!(
+        (&order["docstatus"], &order["amended_from"]),
+        (&Json::from(0), &Json::Null)
+    );
+
+    // docstatus and amended_from cannot be set through the data.
+    let forced = run(&[
+        "doc",
+        "update",
+        "sales_order",
+        &name,
+        "--version",
+        "1",
+        "--data",
+        r#"{"docstatus":1}"#,
+    ]);
+    assert_eq!(code(&forced), Some(1));
+    assert!(
+        stderr(&forced).contains("unknown field `docstatus`"),
+        "{}",
+        stderr(&forced)
+    );
+
+    // Submit: needs --version; the output shows docstatus 1 and the next version.
+    let stale = run(&["doc", "submit", "sales_order", &name, "--version", "9"]);
+    assert_eq!(code(&stale), Some(1));
+    assert!(
+        stderr(&stale).contains("current version 1"),
+        "{}",
+        stderr(&stale)
+    );
+    let submitted = run(&[
+        "doc",
+        "submit",
+        "sales_order",
+        &name,
+        "--version",
+        "1",
+        "--actor",
+        "bob",
+    ]);
+    assert_eq!(code(&submitted), Some(0), "{}", stderr(&submitted));
+    let submitted = json(&submitted);
+    assert_eq!(
+        (&submitted["docstatus"], &submitted["version"]),
+        (&Json::from(1), &Json::from(2))
+    );
+    assert_eq!(submitted["modified_by"], "bob");
+    // Submitting again, deleting and changing a locked field are refused ...
+    let again = run(&["doc", "submit", "sales_order", &name, "--version", "2"]);
+    assert_eq!(code(&again), Some(1));
+    assert!(
+        stderr(&again).contains("it is submitted"),
+        "{}",
+        stderr(&again)
+    );
+    let delete = run(&["doc", "delete", "sales_order", &name, "--version", "2"]);
+    assert_eq!(code(&delete), Some(1));
+    assert!(
+        stderr(&delete).contains("cannot delete"),
+        "{}",
+        stderr(&delete)
+    );
+    let locked = run(&[
+        "doc",
+        "update",
+        "sales_order",
+        &name,
+        "--version",
+        "2",
+        "--data",
+        r#"{"order_date":"2026-10-30"}"#,
+    ]);
+    assert_eq!(code(&locked), Some(1));
+    assert!(
+        stderr(&locked).contains("`order_date` cannot be changed"),
+        "{}",
+        stderr(&locked)
+    );
+    // ... while the allow_on_submit field can change.
+    let remark = run(&[
+        "doc",
+        "update",
+        "sales_order",
+        &name,
+        "--version",
+        "2",
+        "--data",
+        r#"{"remarks":"rush"}"#,
+    ]);
+    assert_eq!(code(&remark), Some(0), "{}", stderr(&remark));
+    assert_eq!(json(&remark)["docstatus"], 1);
+
+    // Amend needs a cancelled document; cancel, then amend.
+    let early = run(&["doc", "amend", "sales_order", &name, "--version", "3"]);
+    assert_eq!(code(&early), Some(1));
+    assert!(
+        stderr(&early).contains("it is submitted"),
+        "{}",
+        stderr(&early)
+    );
+    let cancelled = run(&["doc", "cancel", "sales_order", &name, "--version", "3"]);
+    assert_eq!(code(&cancelled), Some(0), "{}", stderr(&cancelled));
+    let cancelled = json(&cancelled);
+    assert_eq!(
+        (&cancelled["docstatus"], &cancelled["version"]),
+        (&Json::from(2), &Json::from(4))
+    );
+    let amended = run(&["doc", "amend", "sales_order", &name, "--version", "4"]);
+    assert_eq!(code(&amended), Some(0), "{}", stderr(&amended));
+    let amended = json(&amended);
+    assert_eq!(amended["name"], format!("{name}-1").as_str());
+    assert_eq!(amended["amended_from"], name.as_str());
+    assert_eq!(
+        (&amended["docstatus"], &amended["version"]),
+        (&Json::from(0), &Json::from(1))
+    );
+    assert_eq!(amended["remarks"], "rush");
+    assert_eq!(amended["items"], cancelled["items"]);
+    // The cancelled document can be amended once.
+    let twice = run(&["doc", "amend", "sales_order", &name, "--version", "4"]);
+    assert_eq!(code(&twice), Some(1));
+    assert!(
+        stderr(&twice).contains("already amended"),
+        "{}",
+        stderr(&twice)
+    );
+
+    // A cancelled document and a draft can be deleted.
+    let gone = run(&["doc", "delete", "sales_order", &name, "--version", "4"]);
+    assert_eq!(code(&gone), Some(0), "{}", stderr(&gone));
+    let draft = format!("{name}-1");
+    let gone = run(&["doc", "delete", "sales_order", &draft, "--version", "1"]);
+    assert_eq!(code(&gone), Some(0), "{}", stderr(&gone));
+
+    // A DocType that is not submittable says so; amend takes no data.
+    let plain = run(&[
+        "doc",
+        "submit",
+        "customer",
+        "c@example.com",
+        "--version",
+        "1",
+    ]);
+    assert_eq!(code(&plain), Some(1));
+    assert!(
+        stderr(&plain).contains("not submittable"),
+        "{}",
+        stderr(&plain)
+    );
+    let data = run(&[
+        "doc",
+        "amend",
+        "sales_order",
+        &name,
+        "--version",
+        "1",
+        "--data",
+        "{}",
+    ]);
+    assert_eq!(code(&data), Some(2), "a usage error: {}", stderr(&data));
+    let counter = db.scalar("SELECT current::text FROM fb_series");
+    assert_eq!(counter.as_deref(), Some("1"));
 }

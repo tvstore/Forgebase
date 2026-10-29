@@ -1,6 +1,10 @@
-# Example DocType used by the README quick start; it has a child table. Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+# Example DocType used by the README quick start. It has a child table, a naming series (SO-2026-00001, ...) and is submittable:
+# draft -> submitted (locked, except `remarks`) -> cancelled -> amended into a new draft named SO-2026-00001-1.
+# Format: docs/blueprint/architecture.md section 3 ("DocType file format").
 name = "sales_order"
 label = "Sales Order"
+submittable = true
+naming = { series = "SO-.YYYY.-.#####" }
 
 [[fields]]
 name = "customer"
@@ -18,3 +22,9 @@ label = "Items"
 type = "table"
 target = "sales_order_item"
 required = true
+
+[[fields]]
+name = "remarks"
+type = "text"
+# A submitted order is locked, except for the fields marked allow_on_submit.
+allow_on_submit = true

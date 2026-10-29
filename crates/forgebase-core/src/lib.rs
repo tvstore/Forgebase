@@ -3,7 +3,7 @@
 //! Performs no I/O and has no async code or SQL, and depends on no other Forgebase crate.
 //! See ADR 0002 and `docs/blueprint/architecture.md`.
 //!
-//! Implemented so far (milestones M1.1, M2.1, M2.2 and M2.3):
+//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3 and M2.4):
 //!
 //! - [`ident`]: identifier rules and table naming for DocTypes and fields.
 //! - [`meta`]: the DocType model, [`DocType::from_toml_str`](meta::DocType::from_toml_str) and the
@@ -13,12 +13,17 @@
 //!   including the rows of child tables.
 //! - [`hooks`]: the [`DocTypeHooks`](hooks::DocTypeHooks) trait for lifecycle hooks, registered
 //!   with [`Registry::add_hooks`](meta::Registry::add_hooks); the pipeline order is documented
-//!   there.
+//!   there; `before_submit` and `before_cancel` arrived with docstatus.
+//! - [`series`]: naming series patterns (`INV-.YYYY.-.#####`), parsing and rendering.
+//!
+//! Documents of a `submittable` DocType have a [`DocStatus`](document::DocStatus) (draft,
+//! submitted, cancelled).
 
 pub mod document;
 pub mod hooks;
 pub mod ident;
 pub mod meta;
+pub mod series;
 pub mod value;
 
 mod load;

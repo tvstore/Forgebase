@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::meta::{
     DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming,
 };
+use crate::series::SeriesPattern;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +16,8 @@ struct RawDocType {
     naming: Option<toml::Value>,
     #[serde(default)]
     is_child: bool,
+    #[serde(default)]
+    submittable: bool,
     #[serde(default)]
     fields: Vec<RawField>,
 }
@@ -27,8 +30,18 @@ fn convert_naming(value: Option<toml::Value>, errors: &mut Vec<DefinitionError>)
             errors.push(DefinitionError::UnknownNamingStrategy { found: s });
             Naming::Random
         }
-        Some(toml::Value::Table(t)) => match (t.len(), t.get("field")) {
-            (1, Some(toml::Value::String(field))) => Naming::Field(field.clone()),
+        Some(toml::Value::Table(t)) => match (t.len(), t.get("field"), t.get("series")) {
+            (1, Some(toml::Value::String(field)), _) => Naming::Field(field.clone()),
+            (1, _, Some(toml::Value::String(pattern))) => match SeriesPattern::parse(pattern) {
+                Ok(pattern) => Naming::Series(pattern),
+                Err(reason) => {
+                    errors.push(DefinitionError::InvalidSeriesPattern {
+                        pattern: pattern.clone(),
+                        reason,
+                    });
+                    Naming::Random
+                }
+            },
             _ => {
                 errors.push(DefinitionError::MalformedNaming);
                 Naming::Random
@@ -54,6 +67,8 @@ struct RawField {
     required: bool,
     #[serde(default)]
     unique: bool,
+    #[serde(default)]
+    allow_on_submit: bool,
     max_length: Option<u32>,
     precision: Option<u8>,
     scale: Option<u8>,
@@ -83,6 +98,7 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
                 field_type,
                 required: f.required,
                 unique: f.unique,
+                allow_on_submit: f.allow_on_submit,
             }),
             Err(mut e) => {
                 errors.append(&mut e);
@@ -97,6 +113,7 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         naming,
         fields,
         is_child: raw.is_child,
+        submittable: raw.submittable,
     };
     errors.extend(doctype.check(&failed));
     if errors.is_empty() {
@@ -603,6 +620,8 @@ type = "date"
             "5",
             "{ fieldd = \"a\" }",
             "{ field = 1 }",
+            "{ series = 1 }",
+            "{ series = \"A.#\", field = \"a\" }",
             "{ field = \"a\", x = 1 }",
             "[\"a\"]",
         ] {
@@ -610,7 +629,7 @@ type = "date"
             assert_eq!(errors, vec![DefinitionError::MalformedNaming], "{naming}");
             assert_eq!(
                 errors[0].to_string(),
-                "naming must be \"random\" or { field = \"<fieldname>\" }"
+                "naming must be \"random\", { field = \"<fieldname>\" } or { series = \"<pattern>\" }"
             );
         }
     }
@@ -656,5 +675,120 @@ type = "date"
     fn error_message_lists_problems() {
         let err = from_toml_str(&doc_with_field("type = \"float\"")).unwrap_err();
         assert!(err.to_string().contains("unknown type `float`"), "{err}");
+    }
+
+    #[test]
+    fn series_naming_is_parsed_and_checked() {
+        let base = "name = \"t\"\nlabel = \"T\"\n";
+        let d = from_toml_str(&format!(
+            "naming = {{ series = \"INV-.YYYY.-.#####\" }}\n{base}"
+        ))
+        .unwrap();
+        let Naming::Series(pattern) = &d.naming else {
+            panic!("expected a series, got {:?}", d.naming);
+        };
+        assert_eq!(pattern.as_str(), "INV-.YYYY.-.#####");
+        for bad in ["", "INV-", "A.#.#", "A..#", "A#.##"] {
+            let errors = invalid(&format!("naming = {{ series = \"{bad}\" }}\n{base}"));
+            assert!(
+                matches!(
+                    errors.as_slice(),
+                    [DefinitionError::InvalidSeriesPattern { pattern, .. }] if pattern == bad
+                ),
+                "{bad:?}: {errors:?}"
+            );
+        }
+        let message = invalid(&format!("naming = {{ series = \"INV-\" }}\n{base}"))[0].to_string();
+        assert_eq!(
+            message,
+            "naming series pattern `INV-` needs exactly one number part such as `#####`, found none"
+        );
+    }
+
+    #[test]
+    fn a_child_cannot_use_a_series_or_be_submittable() {
+        let base = "name = \"t\"\nlabel = \"T\"\nis_child = true\n";
+        assert_eq!(
+            invalid(&format!("naming = {{ series = \"A.#\" }}\n{base}")),
+            vec![DefinitionError::ChildWithNaming]
+        );
+        assert_eq!(
+            invalid(&format!("submittable = true\n{base}")),
+            vec![DefinitionError::ChildSubmittable]
+        );
+    }
+
+    #[test]
+    fn submittable_rules() {
+        let base = "name = \"t\"\nlabel = \"T\"\nsubmittable = true\n";
+        let d = from_toml_str(base).unwrap();
+        assert!(d.submittable);
+        assert!(
+            !from_toml_str("name = \"t\"\nlabel = \"T\"\n")
+                .unwrap()
+                .submittable
+        );
+        // Random naming and a series are fine, field naming is not.
+        assert!(from_toml_str(&format!("naming = \"random\"\n{base}")).is_ok());
+        assert!(from_toml_str(&format!("naming = {{ series = \"A.#\" }}\n{base}")).is_ok());
+        let field =
+            "[[fields]]\nname = \"code\"\ntype = \"data\"\nrequired = true\nunique = true\n";
+        assert_eq!(
+            invalid(&format!("naming = {{ field = \"code\" }}\n{base}{field}")),
+            vec![DefinitionError::SubmittableWithFieldNaming]
+        );
+    }
+
+    #[test]
+    fn allow_on_submit_rules() {
+        let submittable = "name = \"t\"\nlabel = \"T\"\nsubmittable = true\n";
+        let plain = "name = \"t\"\nlabel = \"T\"\n";
+        let field = |extra: &str| format!("[[fields]]\nname = \"f\"\n{extra}\n");
+        let ok = from_toml_str(&format!(
+            "{submittable}{}",
+            field("type = \"text\"\nallow_on_submit = true")
+        ))
+        .unwrap();
+        assert!(ok.fields[0].allow_on_submit);
+        // Default is false.
+        let d = from_toml_str(&format!("{submittable}{}", field("type = \"text\""))).unwrap();
+        assert!(!d.fields[0].allow_on_submit);
+        // Not meaningful without `submittable`: a definition error, not ignored.
+        assert_eq!(
+            invalid(&format!(
+                "{plain}{}",
+                field("type = \"text\"\nallow_on_submit = true")
+            )),
+            vec![DefinitionError::AllowOnSubmitNotSubmittable { field: "f".into() }]
+        );
+        // `allow_on_submit = false` is fine anywhere.
+        assert!(
+            from_toml_str(&format!(
+                "{plain}{}",
+                field("type = \"text\"\nallow_on_submit = false")
+            ))
+            .is_ok()
+        );
+        // A table is always locked.
+        assert_eq!(
+            invalid(&format!(
+                "{submittable}{}",
+                field("type = \"table\"\ntarget = \"row\"\nallow_on_submit = true")
+            )),
+            vec![DefinitionError::AllowOnSubmitTable { field: "f".into() }]
+        );
+    }
+
+    #[test]
+    fn docstatus_and_amended_from_are_reserved_field_names() {
+        for name in ["docstatus", "amended_from"] {
+            let errors = invalid(&format!(
+                "name = \"t\"\nlabel = \"T\"\nsubmittable = true\n[[fields]]\nname = \"{name}\"\ntype = \"int\"\n"
+            ));
+            assert!(
+                matches!(errors.as_slice(), [DefinitionError::InvalidFieldName { field, .. }] if field == name),
+                "{errors:?}"
+            );
+        }
     }
 }
