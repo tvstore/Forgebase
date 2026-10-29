@@ -1,21 +1,19 @@
 //! Startup errors of the app model (M5.1, ADR 0012): every way the apps of a binary can be
 //! wrong is reported by `Forgebase::check`, all problems together. No database needed.
 
-use std::sync::Arc;
-
 use forgebase::{App, DocTypeFile, DocTypeHooks, Forgebase, MigrationFile};
 
 /// A static list of DocType files, from `(path, toml)` pairs.
 macro_rules! files {
     ($(($path:literal, $toml:expr)),* $(,)?) => {
-        &[$(DocTypeFile { path: $path, toml: $toml }),*]
+        const { &[$(DocTypeFile::new($path, $toml)),*] }
     };
 }
 
 /// A static list of migrations, from `(version, name, sql)`.
 macro_rules! sql {
     ($(($version:expr, $name:literal, $sql:literal)),* $(,)?) => {
-        &[$(MigrationFile { version: $version, name: $name, path: concat!($name, ".sql"), sql: $sql }),*]
+        const { &[$(MigrationFile::new($version, $name, concat!($name, ".sql"), $sql)),*] }
     };
 }
 
@@ -60,8 +58,8 @@ is_child = true
 struct Nothing;
 impl DocTypeHooks for Nothing {}
 
-fn hooks() -> Arc<dyn DocTypeHooks> {
-    Arc::new(Nothing)
+fn hooks() -> impl DocTypeHooks + 'static {
+    Nothing
 }
 
 fn crm() -> App {
@@ -336,4 +334,32 @@ fn every_problem_is_reported_together_and_printed_in_two_lists() {
     );
     // A broken file hides the reference and hook checks, which would only add follow-up noise.
     assert!(!text.contains("hooks registered for unknown"), "{text}");
+}
+
+// ---- run_from ---------------------------------------------------------------------------------
+
+/// `ExitCode` has no `PartialEq`; its `Debug` text names the code.
+fn exit(code: std::process::ExitCode) -> String {
+    format!("{code:?}")
+}
+
+#[test]
+fn run_from_returns_exit_codes_instead_of_exiting_the_process() {
+    use std::process::ExitCode;
+
+    // Help is a success, and bad usage is 2: both are returned, the test process goes on.
+    let stock = || Forgebase::new();
+    assert_eq!(
+        exit(stock().run_from(["forgebase", "--help"])),
+        exit(ExitCode::SUCCESS)
+    );
+    assert_eq!(
+        exit(stock().run_from(["forgebase", "bogus"])),
+        exit(ExitCode::from(2))
+    );
+    // No apps and no --doctypes.
+    assert_eq!(
+        exit(stock().run_from(["forgebase", "migrate"])),
+        exit(ExitCode::from(2))
+    );
 }

@@ -99,9 +99,9 @@ impl Composed {
                 app.migrations
                     .iter()
                     .map(|m| AppMigration {
-                        version: m.version,
-                        name: m.name,
-                        sql: m.sql,
+                        version: m.version(),
+                        name: m.name(),
+                        sql: m.sql(),
                     })
                     .collect()
             })
@@ -140,8 +140,8 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
             .doctypes
             .iter()
             .map(|f| File {
-                path: f.path,
-                text: f.toml,
+                path: f.path(),
+                text: f.toml(),
             })
             .collect();
         load(
@@ -239,15 +239,21 @@ fn check_apps(apps: &[App], errors: &mut StartupError) -> BTreeMap<String, BTree
 
         let mut previous: Option<&MigrationFile> = None;
         for migration in &app.migrations {
-            if migration.version < 1 {
+            if migration.version() < 1 {
                 errors.apps.push(format!(
                     "app `{name}`: migration version {} ({}, {}) must be positive",
-                    migration.version, migration.name, migration.path
+                    migration.version(),
+                    migration.name(),
+                    migration.path()
                 ));
-            } else if let Some(before) = previous.filter(|p| p.version >= migration.version) {
+            } else if let Some(before) = previous.filter(|p| p.version() >= migration.version()) {
                 errors.apps.push(format!(
                     "app `{name}`: migration versions must increase: {} ({}, {}) comes after {} ({})",
-                    migration.version, migration.name, migration.path, before.version, before.name
+                    migration.version(),
+                    migration.name(),
+                    migration.path(),
+                    before.version(),
+                    before.name()
                 ));
             }
             previous = Some(migration);
@@ -336,8 +342,9 @@ fn check_references(
                     None => problem.to_string(),
                 });
         }
-        return;
     }
+    // The app rule runs even when the reference rules found problems, so that one run shows both
+    // kinds. (A target nobody defines has no owner and is skipped here: it is already reported.)
     for doctype in registry.iter() {
         let Some((app, path)) = defined_in.get(&doctype.name) else {
             continue;
@@ -414,10 +421,7 @@ mod tests {
     const LINKING: &str = "name = \"{n}\"\nlabel = \"L\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"{t}\"\n";
 
     fn crm() -> App {
-        App::new("crm").doctypes(&[DocTypeFile {
-            path: "doctypes/customer.toml",
-            toml: CUSTOMER,
-        }])
+        App::new("crm").doctypes(const { &[DocTypeFile::new("doctypes/customer.toml", CUSTOMER)] })
     }
 
     fn scratch(tag: &str, files: &[(&str, String)]) -> std::path::PathBuf {
@@ -452,10 +456,12 @@ mod tests {
             "backlink",
             &[("extra.toml", "name = \"extra\"\nlabel = \"E\"\n".to_owned())],
         );
-        let crm = App::new("crm").doctypes(&[DocTypeFile {
-            path: "doctypes/order.toml",
-            toml: "name = \"order\"\nlabel = \"O\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"extra\"\n",
-        }]);
+        let crm = App::new("crm").doctypes(const {
+            &[DocTypeFile::new(
+                "doctypes/order.toml",
+                "name = \"order\"\nlabel = \"O\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"extra\"\n",
+            )]
+        });
         let error = compose(&[crm], Some(&dir)).err().expect("refused");
         let text = error.to_string();
         assert!(
@@ -477,6 +483,36 @@ mod tests {
         );
         fs::remove_dir_all(&dir).expect("cleanup");
     }
+
+    #[test]
+    fn a_cross_app_link_is_reported_together_with_other_reference_errors() {
+        // `sales` links to crm's `customer` without depending on crm, and also to `ghost`,
+        // which nobody defines: both problems are in one error.
+        let sales = App::new("sales").doctypes(
+            const {
+                &[
+                    DocTypeFile::new("doctypes/a.toml", LINKING_A),
+                    DocTypeFile::new("doctypes/b.toml", LINKING_B),
+                ]
+            },
+        );
+        let error = compose(&[crm(), sales], None).err().expect("refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("invalid app setup:\n")
+                && text.contains("app `sales` does not depend on `crm`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("cannot load DocType files:\n")
+                && text.contains("app `sales`: doctypes/b.toml:")
+                && text.contains("`ghost`"),
+            "{text}"
+        );
+    }
+
+    const LINKING_A: &str = "name = \"a\"\nlabel = \"A\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"customer\"\n";
+    const LINKING_B: &str = "name = \"b\"\nlabel = \"B\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"ghost\"\n";
 
     #[test]
     fn startup_errors_print_the_app_list_before_the_file_list() {

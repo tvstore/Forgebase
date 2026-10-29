@@ -5,11 +5,13 @@
 //! everything else.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use tokio_postgres::Client;
 
 use crate::error::DbError;
 use crate::migrate::checksum;
+use crate::sync::lock_timeout_setting;
 
 /// One migration an app declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +50,9 @@ pub struct AppliedAppMigration {
 /// The migrations of `apps` that are not applied yet, in app order and then version order.
 /// Every applied migration of these apps is checked first: it must still be declared
 /// ([`DbError::UnknownAppMigration`]) and its checksum must match
-/// ([`DbError::AppChecksumMismatch`]). Apps that are not in `apps` are not looked at.
+/// ([`DbError::AppChecksumMismatch`]), and no declared migration that is not applied may have a
+/// lower version than an applied one ([`DbError::OutOfOrderAppMigration`]). Apps that are not
+/// in `apps` are not looked at.
 pub(crate) async fn pending<'a>(
     client: &Client,
     apps: &[AppSpec<'a>],
@@ -81,9 +85,26 @@ pub(crate) async fn pending<'a>(
                 });
             }
         }
+        let highest_applied = applied
+            .keys()
+            .filter(|(a, _)| a == app.name)
+            .map(|(_, version)| *version)
+            .max();
         for migration in app.migrations {
             match applied.get(&(app.name.to_owned(), migration.version)) {
-                None => pending.push((app.name, *migration)),
+                None => {
+                    if let Some(applied_version) =
+                        highest_applied.filter(|v| *v > migration.version)
+                    {
+                        return Err(DbError::OutOfOrderAppMigration {
+                            app: app.name.to_owned(),
+                            version: migration.version,
+                            name: migration.name.to_owned(),
+                            applied_version,
+                        });
+                    }
+                    pending.push((app.name, *migration));
+                }
                 Some((name, actual)) => {
                     let expected = checksum(client, migration.sql).await?;
                     if expected != *actual {
@@ -102,12 +123,16 @@ pub(crate) async fn pending<'a>(
     Ok(pending)
 }
 
-/// Applies one migration in its own transaction together with its `fb_app_migration` row. A
-/// failure rolls it back ([`DbError::AppMigrationFailed`]).
+/// Applies one migration in its own transaction together with its `fb_app_migration` row: the
+/// SQL and the record commit or roll back together. A failing SQL is
+/// [`DbError::AppMigrationFailed`]. The transaction has a `lock_timeout` of `lock_timeout`
+/// (`SET LOCAL`, so it ends with the transaction): a migration that waits longer for a lock
+/// fails and is rolled back.
 pub(crate) async fn apply(
     client: &mut Client,
     app: &str,
     migration: &AppMigration<'_>,
+    lock_timeout: Duration,
 ) -> Result<(), DbError> {
     let failed = |error: tokio_postgres::Error| DbError::AppMigrationFailed {
         app: app.to_owned(),
@@ -117,6 +142,11 @@ pub(crate) async fn apply(
     };
     let tx = client.transaction().await?;
     // Dropping `tx` on an error rolls it back.
+    tx.query(
+        "SELECT set_config('lock_timeout', $1, true)",
+        &[&lock_timeout_setting(lock_timeout)],
+    )
+    .await?;
     tx.batch_execute(migration.sql).await.map_err(failed)?;
     let checksum = checksum(&tx, migration.sql).await?;
     tx.execute(

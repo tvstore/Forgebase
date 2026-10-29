@@ -33,8 +33,10 @@
 //!   an app: an app that extends another app's DocType runs after it, and its hooks can reject
 //!   what the first app accepted.
 //! - **App migrations.** Versioned SQL, once per database, checksummed, each in its own
-//!   transaction; `fb_app` records which app and version were migrated. App code is trusted:
-//!   the SQL runs with the database role of the binary.
+//!   transaction (with the `--lock-timeout-ms` lock timeout); a changed or removed applied
+//!   migration, or a new one numbered below an applied one, is refused. `fb_app` records which
+//!   app and version were migrated. App code is trusted: the SQL runs with the database role
+//!   of the binary.
 //! - **Startup errors.** All of the above is checked before anything runs; every problem is
 //!   reported together ([`StartupError`], exit code 1).
 //!

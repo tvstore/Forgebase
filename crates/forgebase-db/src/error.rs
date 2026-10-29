@@ -82,6 +82,21 @@ pub enum DbError {
         /// Migration name as recorded in the database.
         name: String,
     },
+    /// An app migration is not applied but a migration with a higher version of the same app
+    /// is: new migrations must have versions above every applied one.
+    #[error(
+        "migration {version} ({name}) of app `{app}` is not applied, but migration {applied_version} of the app is; a new migration must have a version above every applied one (renumber it above {applied_version}); nothing was applied"
+    )]
+    OutOfOrderAppMigration {
+        /// App name.
+        app: String,
+        /// Version of the pending migration.
+        version: i32,
+        /// Name of the pending migration.
+        name: String,
+        /// The highest applied version of the app.
+        applied_version: i32,
+    },
     /// An app migration failed. It was rolled back; the migrations before it stay applied.
     #[error(
         "migration {version} ({name}) of app `{app}` failed and was rolled back (earlier migrations stay applied): {message}"

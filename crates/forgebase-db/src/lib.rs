@@ -105,15 +105,19 @@ pub async fn migrate(
 /// the data migrations of `apps`, in the order of `apps` and, per app, by version.
 ///
 /// The advisory lock of the framework migrations is held for the whole call (a session-level
-/// lock on the one connection used), so two `migrate` runs never interleave. The steps still
+/// lock on one connection that is taken out of the pool and closed at the end, even on a panic or
+/// when the future is dropped), so two `migrate` runs never interleave. The steps still
 /// use separate transactions: framework migrations and the schema sync stay applied if a later
 /// step fails, and each app migration is its own transaction together with its
 /// `fb_app_migration` row, so a failing one is rolled back
-/// ([`DbError::AppMigrationFailed`]) and stops the run; the ones before it stay applied.
+/// ([`DbError::AppMigrationFailed`]) and stops the run; the ones before it stay applied. Each app
+/// migration runs with `lock_timeout` set to `options.lock_timeout` (`SET LOCAL`).
 ///
 /// Before the schema sync every applied migration of `apps` is verified against the SQL the
-/// apps declare now ([`DbError::AppChecksumMismatch`], [`DbError::UnknownAppMigration`]), so a
-/// changed migration is refused before anything but the framework migrations is applied. After
+/// apps declare now ([`DbError::AppChecksumMismatch`], [`DbError::UnknownAppMigration`]), and a
+/// declared migration that is not applied must not have a lower version than an applied one of
+/// the same app ([`DbError::OutOfOrderAppMigration`]), so a changed or out-of-order migration is
+/// refused before anything but the framework migrations is applied. After
 /// an app's migrations, `fb_app` is upserted with the app's name and version (apps that are not
 /// in `apps` are left as they are).
 ///
@@ -127,10 +131,14 @@ pub async fn migrate_apps(
     apps: &[AppSpec<'_>],
     options: &SyncOptions,
 ) -> Result<MigrateReport, DbError> {
-    let mut client = pool.get().await?;
+    // The connection is taken out of the pool: it holds a session-level lock, so it must never
+    // go back to the pool alive. When this function ends, by returning, by a panic or because the
+    // future is dropped (cancellation), the connection is closed and PostgreSQL releases the lock.
+    let mut client = deadpool_postgres::Object::take(pool.get().await?);
     lock(&client, options).await?;
     let result = migrate_locked(&mut client, registry, apps, options).await;
-    // A failure here means the connection is gone, and then so is its lock.
+    // Released explicitly as well, so a caller that keeps going does not wait for the close. A
+    // failure here means the connection is gone, and then so is its lock.
     let _ = client
         .execute(
             "SELECT pg_advisory_unlock($1)",
@@ -142,21 +150,21 @@ pub async fn migrate_apps(
 
 /// Takes the session-level migration lock, waiting at most `options.lock_timeout`.
 async fn lock(client: &Client, options: &SyncOptions) -> Result<(), DbError> {
-    let timeout = options
-        .lock_timeout
-        .as_millis()
-        .clamp(1, u128::from(i32::MAX.unsigned_abs()))
-        .to_string()
-        + "ms";
     client
-        .execute("SELECT set_config('lock_timeout', $1, false)", &[&timeout])
+        .execute(
+            "SELECT set_config('lock_timeout', $1, false)",
+            &[&sync::lock_timeout_setting(options.lock_timeout)],
+        )
         .await?;
     let locked = client
         .execute("SELECT pg_advisory_lock($1)", &[&migrate::MIGRATE_LOCK_KEY])
         .await;
-    // Back to the connection's default, so a pooled connection is not left changed.
-    client.batch_execute("RESET lock_timeout").await?;
+    // Back to the connection's default, so the migrations that follow have no timeout of their
+    // own. This runs before the lock result is looked at, but must not hide it: when both fail,
+    // the lock error (the cause) is the one reported.
+    let reset = client.batch_execute("RESET lock_timeout").await;
     locked?;
+    reset?;
     Ok(())
 }
 
@@ -191,7 +199,7 @@ async fn migrate_locked(
     } else {
         for app in apps {
             for (_, migration) in pending.iter().filter(|(name, _)| *name == app.name) {
-                app_migrations::apply(client, app.name, migration).await?;
+                app_migrations::apply(client, app.name, migration, options.lock_timeout).await?;
                 app_migrations.push(applied(app.name, migration));
             }
             app_migrations::record(client, app).await?;

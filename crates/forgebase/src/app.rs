@@ -1,35 +1,119 @@
 //! [`App`]: a named set of DocTypes, hooks and SQL data migrations that is compiled into the
 //! binary.
 
+use std::fmt;
 use std::sync::Arc;
 
 use forgebase_core::hooks::DocTypeHooks;
 
 /// A DocType definition file embedded in the binary: its path (for error messages) and its
-/// TOML text. Build the list with [`doctypes!`](crate::doctypes).
+/// TOML text. Build the list with [`doctypes!`](crate::doctypes); by hand (in a test, for
+/// example) with [`DocTypeFile::new`].
+///
+/// The fields are private and the type is `#[non_exhaustive]`, so that fields can be added in a
+/// later version without breaking apps; read them with the getters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DocTypeFile {
-    /// The path as written in the macro, relative to the app crate's root. Only used in
-    /// messages and by `testing::assert_doctypes_listed`.
-    pub path: &'static str,
+    path: &'static str,
+    toml: &'static str,
+}
+
+impl DocTypeFile {
+    /// A file from its path and its TOML text. The path is only used in messages and by
+    /// `testing::assert_doctypes_listed`; use the path as you would write it in
+    /// [`doctypes!`](crate::doctypes), relative to the app crate's root.
+    pub const fn new(path: &'static str, toml: &'static str) -> Self {
+        Self { path, toml }
+    }
+
+    /// Used by [`doctypes!`](crate::doctypes). Not part of the API: it may change with the macro.
+    #[doc(hidden)]
+    pub const fn __new(path: &'static str, toml: &'static str) -> Self {
+        Self { path, toml }
+    }
+
+    /// The path as written in the macro, relative to the app crate's root.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
     /// The file's contents.
-    pub toml: &'static str,
+    pub const fn toml(&self) -> &'static str {
+        self.toml
+    }
 }
 
 /// An app data migration embedded in the binary. Build the list with
-/// [`migrations!`](crate::migrations).
+/// [`migrations!`](crate::migrations); by hand with [`MigrationFile::new`].
+///
+/// The fields are private and the type is `#[non_exhaustive]`, like [`DocTypeFile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MigrationFile {
-    /// Positive; strictly increasing within the app.
-    pub version: i32,
-    /// A short name, recorded in `fb_app_migration`.
-    pub name: &'static str,
-    /// The path as written in the macro, for error messages.
-    pub path: &'static str,
-    /// The SQL. It runs in one transaction together with the row that records it, so it must
-    /// not contain `BEGIN` or `COMMIT`. Never edit an applied migration: its checksum is
-    /// verified, and a changed one is refused.
-    pub sql: &'static str,
+    version: i32,
+    name: &'static str,
+    path: &'static str,
+    sql: &'static str,
+}
+
+impl MigrationFile {
+    /// A migration from its version (positive; strictly increasing within the app), a short
+    /// name (recorded in `fb_app_migration`), the path (for messages) and the SQL.
+    ///
+    /// The SQL runs in one transaction together with the row that records it, so it must not
+    /// contain `BEGIN` or `COMMIT`. Never edit an applied migration: its checksum is verified,
+    /// and a changed one is refused.
+    pub const fn new(
+        version: i32,
+        name: &'static str,
+        path: &'static str,
+        sql: &'static str,
+    ) -> Self {
+        Self {
+            version,
+            name,
+            path,
+            sql,
+        }
+    }
+
+    /// Used by [`migrations!`](crate::migrations). Not part of the API: it may change with the
+    /// macro.
+    #[doc(hidden)]
+    pub const fn __new(
+        version: i32,
+        name: &'static str,
+        path: &'static str,
+        sql: &'static str,
+    ) -> Self {
+        Self {
+            version,
+            name,
+            path,
+            sql,
+        }
+    }
+
+    /// The version.
+    pub const fn version(&self) -> i32 {
+        self.version
+    }
+
+    /// The name.
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The path as written in the macro, for messages.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    /// The SQL.
+    pub const fn sql(&self) -> &'static str {
+        self.sql
+    }
 }
 
 /// Embeds DocType definition files, with paths relative to **the root of the crate that calls
@@ -49,10 +133,12 @@ pub struct MigrationFile {
 #[macro_export]
 macro_rules! doctypes {
     ($($path:literal),* $(,)?) => {
-        &[$($crate::DocTypeFile {
-            path: $path,
-            toml: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $path)),
-        }),*]
+        const {
+            &[$($crate::DocTypeFile::__new(
+                $path,
+                ::core::include_str!(::core::concat!(::core::env!("CARGO_MANIFEST_DIR"), "/", $path)),
+            )),*]
+        }
     };
 }
 
@@ -68,12 +154,14 @@ macro_rules! doctypes {
 #[macro_export]
 macro_rules! migrations {
     ($(($version:expr, $name:expr, $path:literal)),* $(,)?) => {
-        &[$($crate::MigrationFile {
-            version: $version,
-            name: $name,
-            path: $path,
-            sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $path)),
-        }),*]
+        const {
+            &[$($crate::MigrationFile::__new(
+                $version,
+                $name,
+                $path,
+                ::core::include_str!(::core::concat!(::core::env!("CARGO_MANIFEST_DIR"), "/", $path)),
+            )),*]
+        }
     };
 }
 
@@ -88,7 +176,7 @@ macro_rules! migrations {
 ///         .version(env!("CARGO_PKG_VERSION"))
 ///         .depends_on(&["crm"])
 ///         .doctypes(forgebase::doctypes!["doctypes/sales_order.toml"])
-///         .hooks("sales_order", std::sync::Arc::new(OrderHooks))
+///         .hooks("sales_order", OrderHooks)
 ///         .migrations(forgebase::migrations![(1, "backfill", "migrations/0001_backfill.sql")])
 /// }
 /// ```
@@ -117,6 +205,26 @@ pub struct App {
     pub(crate) doctypes: Vec<DocTypeFile>,
     pub(crate) hooks: Vec<(String, Arc<dyn DocTypeHooks>)>,
     pub(crate) migrations: Vec<MigrationFile>,
+}
+
+impl fmt::Debug for App {
+    /// Shows the name, version, dependencies, DocType files and migrations; hooks are shown by
+    /// DocType only (a hook set has no `Debug`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hooked: Vec<&str> = self
+            .hooks
+            .iter()
+            .map(|(doctype, _)| doctype.as_str())
+            .collect();
+        f.debug_struct("App")
+            .field("name", &self.name)
+            .field("version", &self.version)
+            .field("depends_on", &self.depends_on)
+            .field("doctypes", &self.doctypes)
+            .field("hooks", &hooked)
+            .field("migrations", &self.migrations)
+            .finish()
+    }
 }
 
 impl App {
@@ -159,8 +267,12 @@ impl App {
     /// through other apps). Several hook sets may be registered for one DocType; they run in
     /// registration order, after the hooks of the apps before this one. A child DocType has no
     /// hooks (the hooks of its parent see its rows). See [`DocTypeHooks`] for the pipeline.
-    pub fn hooks(mut self, doctype: &str, hooks: Arc<dyn DocTypeHooks>) -> Self {
-        self.hooks.push((doctype.to_owned(), hooks));
+    ///
+    /// The hook set is taken by value and kept behind an `Arc` internally. There is one hook
+    /// object per call: to use the same logic for several DocTypes, build one value per DocType
+    /// (they can share state through an `Arc` field of their own).
+    pub fn hooks(mut self, doctype: &str, hooks: impl DocTypeHooks + 'static) -> Self {
+        self.hooks.push((doctype.to_owned(), Arc::new(hooks)));
         self
     }
 

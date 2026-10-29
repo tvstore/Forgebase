@@ -243,7 +243,7 @@ pub fn app() -> forgebase::App {
         .version(env!("CARGO_PKG_VERSION"))
         .depends_on(&["crm"])
         .doctypes(forgebase::doctypes!["doctypes/sales_order.toml"])
-        .hooks("sales_order", std::sync::Arc::new(OrderHooks))
+        .hooks("sales_order", OrderHooks)
         .migrations(forgebase::migrations![(1, "backfill", "migrations/0001_backfill.sql")])
 }
 
@@ -252,7 +252,7 @@ fn main() -> std::process::ExitCode {
 }
 ```
 
-The binary has the same commands as the stock one (`migrate` also applies the app migrations). Everything about how apps load, depend on each other, own DocTypes, order their hooks and migrate is in [ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md) and [the architecture](docs/blueprint/architecture.md#2-extension-model-accepted-adr-0006). The full guide and `forgebase new-app` come in M5.2.
+The binary has the same commands as the stock one (`migrate` also applies the app migrations). The stock binary has no apps, so it reports `"app": "local"` for every DocType in the metadata API (the `--doctypes` directory is the app `local`). Everything about how apps load, depend on each other, own DocTypes, order their hooks and migrate is in [ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md) and [the architecture](docs/blueprint/architecture.md#2-extension-model-accepted-adr-0006). The full guide and `forgebase new-app` come in M5.2.
 
 ## License
 

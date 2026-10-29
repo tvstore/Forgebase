@@ -7,7 +7,6 @@
 
 use std::io::Write;
 use std::process::{Command, ExitCode, Output, Stdio};
-use std::sync::Arc;
 
 use forgebase::testing::TestDb;
 use forgebase::{
@@ -21,12 +20,12 @@ const CUSTOMER: &str = "name = \"customer\"\nlabel = \"Customer\"\nnaming = { fi
     [[fields]]\nname = \"code\"\ntype = \"data\"\nrequired = true\nunique = true\n\
     [[fields]]\nname = \"title\"\ntype = \"data\"\n";
 
-const SEED: MigrationFile = MigrationFile {
-    version: 1,
-    name: "seed",
-    path: "migrations/0001_seed.sql",
-    sql: "CREATE TABLE crm_seed (entry text); INSERT INTO crm_seed VALUES ('seeded')",
-};
+const SEED: MigrationFile = MigrationFile::new(
+    1,
+    "seed",
+    "migrations/0001_seed.sql",
+    "CREATE TABLE crm_seed (entry text); INSERT INTO crm_seed VALUES ('seeded')",
+);
 
 /// Rejects a customer titled `banned`.
 struct NoBanned;
@@ -43,17 +42,14 @@ impl DocTypeHooks for NoBanned {
 fn crm() -> App {
     App::new("crm")
         .version("1.2.3")
-        .doctypes(&[DocTypeFile {
-            path: "doctypes/customer.toml",
-            toml: CUSTOMER,
-        }])
+        .doctypes(const { &[DocTypeFile::new("doctypes/customer.toml", CUSTOMER)] })
         .migrations(&[SEED])
 }
 
 fn sales() -> App {
     App::new("sales")
         .depends_on(&["crm"])
-        .hooks("customer", Arc::new(NoBanned))
+        .hooks("customer", NoBanned)
 }
 
 fn main() -> ExitCode {

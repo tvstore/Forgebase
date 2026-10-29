@@ -225,6 +225,43 @@ fn version_and_usage_errors() {
 }
 
 #[test]
+fn the_stock_binary_without_doctypes_is_a_usage_error_that_names_the_subcommand() {
+    // The stock binary has no apps, so a command that needs DocTypes needs `--doctypes`.
+    for (args, usage) in [
+        (&["migrate"][..], "Usage: forgebase migrate "),
+        (&["serve"], "Usage: forgebase serve "),
+        (
+            &["doc", "get", "customer", "x"],
+            "Usage: forgebase doc get ",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+            .args(args)
+            .env_remove("FORGEBASE_DATABASE_URL")
+            .output()
+            .expect("run");
+        assert_eq!(code(&output), Some(2), "{args:?}");
+        assert!(stdout(&output).is_empty());
+        let message = stderr(&output);
+        assert!(
+            message.contains("--doctypes <DIR>") && message.contains(usage),
+            "{args:?}: {message}"
+        );
+    }
+    // The help says when the option is required.
+    let help = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+        .args(["migrate", "--help"])
+        .output()
+        .expect("run");
+    assert_eq!(code(&help), Some(0));
+    assert!(
+        stdout(&help).contains("Required when the binary has no apps"),
+        "{}",
+        stdout(&help)
+    );
+}
+
+#[test]
 fn missing_database_url_is_a_clear_error() {
     let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))
         .args(["migrate", "--doctypes", DOCTYPES])

@@ -86,3 +86,92 @@ async fn a_held_migration_lock_makes_migrate_time_out_and_nothing_is_left_behind
         .get::<_, bool>(0);
     assert!(free, "migrate_apps left the advisory lock held");
 }
+
+/// Advisory locks held in this test's database (the view is cluster-wide).
+const HELD_LOCKS: &str = "SELECT count(*)::text FROM pg_locks WHERE locktype = 'advisory' \
+    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+
+#[tokio::test]
+async fn a_cancelled_migrate_does_not_leave_its_lock_on_a_pooled_connection() {
+    let db = TestDb::new().await;
+    const SLEEPY: &[AppMigration<'static>] = &[AppMigration {
+        version: 1,
+        name: "sleepy",
+        sql: "SELECT pg_sleep(1.5)",
+    }];
+    let pool = db.pool.clone();
+    let task = tokio::spawn(async move {
+        let app = AppSpec {
+            name: "sleepy_app",
+            version: None,
+            migrations: SLEEPY,
+        };
+        migrate_apps(&pool, &Registry::new(), &[app], &SyncOptions::default()).await
+    });
+    // Wait until the migrate holds its lock, then drop it in the middle of the migration.
+    let mut held = false;
+    for _ in 0..100 {
+        if db.rows(HELD_LOCKS).await == vec![vec!["1".to_owned()]] {
+            held = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(held, "the migrate never took its lock");
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+
+    // The connection was closed, not returned to the pool alive: once the server notices
+    // (when the running statement ends) the lock is gone.
+    let mut free = false;
+    for _ in 0..100 {
+        if db.rows(HELD_LOCKS).await == vec![vec!["0".to_owned()]] {
+            free = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(free, "a cancelled migrate left the advisory lock held");
+}
+
+#[tokio::test]
+async fn an_app_migration_gives_up_waiting_for_a_lock_after_the_lock_timeout() {
+    let db = TestDb::new().await;
+    db.exec("CREATE TABLE zz_locked (n integer)").await;
+    const BLOCKED: &[AppMigration<'static>] = &[AppMigration {
+        version: 1,
+        name: "blocked",
+        sql: "INSERT INTO zz_locked VALUES (1); ALTER TABLE zz_locked ADD COLUMN extra text",
+    }];
+    let app = AppSpec {
+        name: "blocked_app",
+        version: None,
+        migrations: BLOCKED,
+    };
+    // Another transaction holds a conflicting lock on the table and does not end.
+    let mut holder = db.pool.get().await.expect("connection");
+    let tx = holder.transaction().await.expect("transaction");
+    tx.batch_execute("LOCK TABLE zz_locked IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("lock the table");
+    let options = SyncOptions {
+        dry_run: false,
+        lock_timeout: Duration::from_millis(300),
+    };
+    let started = std::time::Instant::now();
+    let error = migrate_apps(&db.pool, &Registry::new(), &[app], &options)
+        .await
+        .expect_err("times out");
+    assert!(
+        matches!(&error, DbError::AppMigrationFailed { version: 1, message, .. }
+            if message.contains("timed out waiting for a database lock")),
+        "{error:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    tx.rollback().await.expect("rollback");
+    // Nothing was recorded.
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM fb_app_migration").await,
+        vec![vec!["0".to_owned()]]
+    );
+}

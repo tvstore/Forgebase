@@ -7,7 +7,11 @@ use time::{Date, OffsetDateTime};
 ///
 /// `Select` fields hold their value as [`Value::Text`]; so do Link fields, which hold the
 /// `name` of the target document.
+///
+/// `#[non_exhaustive]`: new field types are planned, and each brings a variant, so code in other
+/// crates matches with a wildcard arm. Inside `forgebase-core` matches stay exhaustive.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     /// Text, used by Data, Text, Select and Link fields.
     Text(String),

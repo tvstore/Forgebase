@@ -1,9 +1,10 @@
 //! [`Forgebase`]: the binary of an application, composed of apps.
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, error::ErrorKind};
+use clap::Parser;
 
 use crate::app::App;
 use crate::args::Cli;
@@ -53,20 +54,29 @@ impl Forgebase {
         compose(&self.apps, None).map(drop)
     }
 
-    /// Runs the command line (`std::env::args`) and returns the process exit code: 0 on
+    /// Runs the command line (`std::env::args_os`) and returns the process exit code: 0 on
     /// success, 1 on a startup, runtime, validation or database error (the message goes to
     /// standard error, starting with `error:`), 2 on a usage error. See the crate
     /// documentation for the commands.
     pub fn run(self) -> ExitCode {
-        let cli = Cli::parse();
+        self.run_from(std::env::args_os())
+    }
+
+    /// Like [`Forgebase::run`], with the arguments given (the first is the program name, as in
+    /// `std::env::args_os`). It never exits the process: help and usage errors are printed and
+    /// returned as an exit code (0 and 2), so a test can call it in process.
+    pub fn run_from<I, T>(self, args: I) -> ExitCode
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let cli = match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(error) => return usage(&error),
+        };
         // A binary without apps has nothing but --doctypes to learn DocTypes from.
         if self.apps.is_empty() && cli.command.doctypes().is_some_and(|d| d.doctypes.is_none()) {
-            Cli::command()
-                .error(
-                    ErrorKind::MissingRequiredArgument,
-                    "the following required arguments were not provided:\n  --doctypes <DIR>",
-                )
-                .exit();
+            return usage(&cli.command.missing_doctypes_error());
         }
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -80,6 +90,13 @@ impl Forgebase {
             Err(error) => fail(&error.to_string()),
         }
     }
+}
+
+/// Prints a clap error or help text (to standard error or standard output, as clap decides) and
+/// gives its exit code.
+fn usage(error: &clap::Error) -> ExitCode {
+    let _ = error.print();
+    ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(2))
 }
 
 fn fail(message: &str) -> ExitCode {

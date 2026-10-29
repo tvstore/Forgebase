@@ -45,9 +45,9 @@ use forgebase_db::{Pool, SyncOptions, auth, connect, quote_ident};
 use forgebase_http::{AppConfig, AppState, router};
 use tower::ServiceExt;
 
-use crate::app::App;
+use crate::app::{App, DocTypeFile};
 use crate::builder::Forgebase;
-use crate::compose::compose;
+use crate::compose::{StartupError, compose};
 use crate::doctypes::toml_files;
 
 /// JSON, for request bodies and replies: `serde_json`, re-exported so that the version matches.
@@ -79,6 +79,19 @@ fn with_database(url: &str, database: &str) -> String {
         .find('?')
         .map_or(url.len(), |i| path_start + i);
     format!("{}/{database}{}", &url[..path_start], &url[path_end..])
+}
+
+/// Why [`TestDb::migrate`] failed. `Display` gives the message `forgebase migrate` would print.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MigrateError {
+    /// The apps do not fit together (nothing was run).
+    #[error("{0}")]
+    Startup(#[from] StartupError),
+    /// The migration failed: a refused schema sync, a changed or unknown applied migration, a
+    /// failing migration SQL, a lock timeout or a database error. The message says which.
+    #[error("{0}")]
+    Failed(String),
 }
 
 /// A migration that [`TestDb::migrate`] applied (in a dry run: would apply).
@@ -156,9 +169,12 @@ impl TestDb {
 
     /// Runs what `forgebase migrate` runs for `forgebase`: the framework migrations, the
     /// DocType schema sync and the app migrations in app order. With `dry_run` nothing is kept.
-    /// `Err` has the message of a startup error or a migration failure.
-    pub async fn migrate(&self, forgebase: &Forgebase, dry_run: bool) -> Result<Migrated, String> {
-        let composed = compose(&forgebase.apps, None).map_err(|e| e.to_string())?;
+    pub async fn migrate(
+        &self,
+        forgebase: &Forgebase,
+        dry_run: bool,
+    ) -> Result<Migrated, MigrateError> {
+        let composed = compose(&forgebase.apps, None)?;
         let options = SyncOptions {
             dry_run,
             lock_timeout: Duration::from_secs(5),
@@ -166,7 +182,7 @@ impl TestDb {
         let report = composed
             .migrate(&self.pool, &options)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| MigrateError::Failed(e.to_string()))?;
         Ok(Migrated {
             app_migrations: report
                 .app_migrations
@@ -444,15 +460,21 @@ impl HttpClient {
     }
 }
 
-/// Fails the test when the DocType files in `dir` and the DocType files embedded in `app` are
-/// not the same set, compared by file name: a file in the directory that the app does not list
+/// Fails the test when the DocType files in a directory of the app crate and the DocType files
+/// embedded in `app` are not the same set: a file in the directory that the app does not list
 /// (it would silently be missing from the binary), or a listed file that is not in the
-/// directory. Pass the directory that holds the app's DocType files:
+/// directory.
+///
+/// `manifest_dir` is the root of the app crate (`env!("CARGO_MANIFEST_DIR")`, evaluated in the
+/// app's own test) and `dir` the directory with the DocType files, relative to it. Paths are
+/// compared in full, relative to the crate root, as they are written in
+/// [`doctypes!`](crate::doctypes): `doctypes/customer.toml`, not just `customer.toml`, so a file
+/// listed from another directory does not count.
 ///
 /// ```ignore
 /// #[test]
 /// fn every_doctype_file_is_listed() {
-///     forgebase::testing::assert_doctypes_listed(&app(), concat!(env!("CARGO_MANIFEST_DIR"), "/doctypes"));
+///     forgebase::testing::assert_doctypes_listed(&app(), env!("CARGO_MANIFEST_DIR"), "doctypes");
 /// }
 /// ```
 ///
@@ -462,26 +484,40 @@ impl HttpClient {
 /// # Panics
 ///
 /// On a difference, or when the directory cannot be read.
-pub fn assert_doctypes_listed(app: &App, dir: &str) {
-    let (files, problems) =
-        toml_files(Path::new(dir)).unwrap_or_else(|problem| panic!("{problem}"));
-    assert!(problems.is_empty(), "DocType directory {dir}: {problems:?}");
-    let file_name = |path: &Path| {
-        path.file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-    };
-    let on_disk: Vec<String> = files.iter().map(|p| file_name(p)).collect();
-    let listed: Vec<String> = app
-        .doctypes
+pub fn assert_doctypes_listed(app: &App, manifest_dir: &str, dir: &str) {
+    let relative_dir = dir.trim_start_matches("./").trim_end_matches('/');
+    let full = Path::new(manifest_dir).join(relative_dir);
+    let (files, problems) = toml_files(&full).unwrap_or_else(|problem| panic!("{problem}"));
+    assert!(
+        problems.is_empty(),
+        "DocType directory {}: {problems:?}",
+        full.display()
+    );
+    let on_disk: Vec<String> = files
         .iter()
-        .map(|f| file_name(Path::new(f.path)))
+        .filter_map(|path| path.file_name())
+        .map(|name| {
+            if relative_dir.is_empty() {
+                name.to_string_lossy().into_owned()
+            } else {
+                format!("{relative_dir}/{}", name.to_string_lossy())
+            }
+        })
         .collect();
-    let not_listed: Vec<&String> = on_disk.iter().filter(|n| !listed.contains(n)).collect();
-    let not_found: Vec<&String> = listed.iter().filter(|n| !on_disk.contains(n)).collect();
+    let listed: Vec<&str> = app.doctypes.iter().map(DocTypeFile::path).collect();
+    let not_listed: Vec<&String> = on_disk
+        .iter()
+        .filter(|n| !listed.contains(&n.as_str()))
+        .collect();
+    let not_found: Vec<&&str> = listed
+        .iter()
+        .filter(|n| !on_disk.iter().any(|d| d == **n))
+        .collect();
     assert!(
         not_listed.is_empty() && not_found.is_empty(),
-        "app `{}`: the embedded DocType list and {dir} differ; in the directory but not in \
+        "app `{}`: the embedded DocType list and {} differ; in the directory but not in \
          doctypes![..]: {not_listed:?}; in doctypes![..] but not in the directory: {not_found:?}",
-        app.name
+        app.name,
+        full.display()
     );
 }

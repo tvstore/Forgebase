@@ -15,18 +15,13 @@ use forgebase::{
 /// A static list of DocType files, from `(path, toml)` pairs.
 macro_rules! files {
     ($(($path:literal, $toml:expr)),* $(,)?) => {
-        &[$(DocTypeFile { path: $path, toml: $toml }),*]
+        const { &[$(DocTypeFile::new($path, $toml)),*] }
     };
 }
 
 /// A migration with a made-up path.
 const fn migration(version: i32, name: &'static str, sql: &'static str) -> MigrationFile {
-    MigrationFile {
-        version,
-        name,
-        path: "migrations/inline.sql",
-        sql,
-    }
+    MigrationFile::new(version, name, "migrations/inline.sql", sql)
 }
 
 fn rows(list: &[&[&str]]) -> Vec<Vec<String>> {
@@ -71,12 +66,16 @@ fn the_macros_embed_files_relative_to_the_crate_that_calls_them() {
         .expect("fixture file");
     let doctypes = forgebase::doctypes!["tests/fixtures/doctypes/widget.toml"];
     assert_eq!(doctypes.len(), 1);
-    assert_eq!(doctypes[0].path, "tests/fixtures/doctypes/widget.toml");
-    assert_eq!(doctypes[0].toml, widget);
+    assert_eq!(doctypes[0].path(), "tests/fixtures/doctypes/widget.toml");
+    assert_eq!(doctypes[0].toml(), widget);
     let migrations = forgebase::migrations![(7, "seed", "tests/fixtures/migrations/0001_seed.sql")];
     assert_eq!(migrations.len(), 1);
     assert_eq!(
-        (migrations[0].version, migrations[0].name, migrations[0].sql),
+        (
+            migrations[0].version(),
+            migrations[0].name(),
+            migrations[0].sql()
+        ),
         (7, "seed", seed.as_str())
     );
     // Both accept a trailing comma and an empty list.
@@ -121,36 +120,59 @@ async fn an_app_with_embedded_files_migrates_and_serves() {
 
 // ---- the guard for the embedded list ----------------------------------------------------------
 
-const FIXTURE_DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/doctypes");
+const FIXTURE_DOCTYPES: &str = "tests/fixtures/doctypes";
 
 #[test]
 fn the_guard_passes_when_the_list_and_the_directory_agree() {
-    assert_doctypes_listed(&fixture_app(), FIXTURE_DOCTYPES);
+    assert_doctypes_listed(&fixture_app(), env!("CARGO_MANIFEST_DIR"), FIXTURE_DOCTYPES);
 }
 
 #[test]
-#[should_panic(expected = "in the directory but not in doctypes![..]: [\"gizmo.toml\"]")]
+#[should_panic(
+    expected = "in the directory but not in doctypes![..]: [\"tests/fixtures/doctypes/gizmo.toml\"]"
+)]
 fn the_guard_fails_for_a_file_that_is_not_listed() {
     let app =
         App::new("fixture").doctypes(forgebase::doctypes!["tests/fixtures/doctypes/widget.toml"]);
-    assert_doctypes_listed(&app, FIXTURE_DOCTYPES);
+    assert_doctypes_listed(&app, env!("CARGO_MANIFEST_DIR"), FIXTURE_DOCTYPES);
 }
 
 #[test]
-#[should_panic(expected = "in doctypes![..] but not in the directory: [\"seed.toml\"]")]
+#[should_panic(expected = "in doctypes![..] but not in the directory: [\"elsewhere/seed.toml\"]")]
 fn the_guard_fails_for_a_listed_file_that_is_not_in_the_directory() {
     // A file of another directory in the list.
     let app = fixture_app().doctypes(files![(
         "elsewhere/seed.toml",
         "name = \"seed\"\nlabel = \"S\"\n"
     )]);
-    assert_doctypes_listed(&app, FIXTURE_DOCTYPES);
+    assert_doctypes_listed(&app, env!("CARGO_MANIFEST_DIR"), FIXTURE_DOCTYPES);
+}
+
+#[test]
+#[should_panic(
+    expected = "in the directory but not in doctypes![..]: [\"tests/fixtures/doctypes/widget.toml\"]"
+)]
+fn the_guard_compares_paths_not_bare_file_names() {
+    // `other/widget.toml` has the file name of a file in the directory, but it is another path:
+    // the directory's `widget.toml` is still not listed.
+    let app = App::new("fixture").doctypes(files![
+        ("other/widget.toml", "name = \"widget\"\nlabel = \"W\"\n"),
+        (
+            "tests/fixtures/doctypes/gizmo.toml",
+            "name = \"gizmo\"\nlabel = \"G\"\n"
+        ),
+    ]);
+    assert_doctypes_listed(&app, env!("CARGO_MANIFEST_DIR"), FIXTURE_DOCTYPES);
 }
 
 #[test]
 #[should_panic(expected = "cannot read DocType directory")]
 fn the_guard_fails_for_a_missing_directory() {
-    assert_doctypes_listed(&fixture_app(), "/nonexistent/forgebase/doctypes");
+    assert_doctypes_listed(
+        &fixture_app(),
+        env!("CARGO_MANIFEST_DIR"),
+        "no/such/doctypes",
+    );
 }
 
 // ---- hooks across apps ------------------------------------------------------------------------
@@ -215,12 +237,12 @@ impl DocTypeHooks for Recorder {
     }
 }
 
-fn recorder(who: &'static str, log: &Log, rejects_banned: bool) -> Arc<dyn DocTypeHooks> {
-    Arc::new(Recorder {
+fn recorder(who: &'static str, log: &Log, rejects_banned: bool) -> impl DocTypeHooks + 'static {
+    Recorder {
         who,
         log: log.clone(),
         rejects_banned,
-    })
+    }
 }
 
 /// crm owns `customer`; sales owns `order` and extends `customer` with hooks of its own.
@@ -511,7 +533,11 @@ async fn a_changed_migration_is_refused_before_anything_else_is_applied() {
         .app(crm_with(EDITED).doctypes(files![("doctypes/widget.toml", WIDGET)]))
         .app(sales_with(SALES_MIGRATIONS));
     for dry_run in [false, true] {
-        let error = db.migrate(&edited, dry_run).await.expect_err("refused");
+        let error = db
+            .migrate(&edited, dry_run)
+            .await
+            .expect_err("refused")
+            .to_string();
         assert!(
             error
                 .contains("migration 1 (create_log) of app `crm` was changed after it was applied"),
@@ -547,7 +573,11 @@ async fn a_failing_migration_is_rolled_back_and_stops_the_run() {
     let broken = Forgebase::new()
         .app(crm_with(CRM_MIGRATIONS))
         .app(sales_with(BROKEN));
-    let error = db.migrate(&broken, false).await.expect_err("fails");
+    let error = db
+        .migrate(&broken, false)
+        .await
+        .expect_err("fails")
+        .to_string();
     assert!(
         error.contains("migration 2 (boom) of app `sales` failed and was rolled back")
             && error.contains("earlier migrations stay applied")
@@ -603,7 +633,11 @@ async fn a_migration_the_app_no_longer_declares_is_refused_and_absent_apps_are_l
     let behind = Forgebase::new()
         .app(crm_with(&CRM_MIGRATIONS[..1]))
         .app(sales_with(SALES_MIGRATIONS));
-    let error = db.migrate(&behind, false).await.expect_err("refused");
+    let error = db
+        .migrate(&behind, false)
+        .await
+        .expect_err("refused")
+        .to_string();
     assert!(
         error.contains("migration 2 (second) of app `crm`") && error.contains("does not declare"),
         "{error}"
@@ -632,7 +666,8 @@ async fn migrate_reports_startup_errors_without_touching_the_database() {
     let error = db
         .migrate(&invalid, false)
         .await
-        .expect_err("startup error");
+        .expect_err("startup error")
+        .to_string();
     assert!(
         error.contains("app `sales` depends on `crm`, which is not registered"),
         "{error}"
@@ -641,5 +676,100 @@ async fn migrate_reports_startup_errors_without_touching_the_database() {
         db.rows("SELECT to_regclass('fb_migration')::text").await,
         rows(&[&["NULL"]])
     );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_migration_and_its_record_commit_or_roll_back_together() {
+    // The SQL creates a table and then writes the very row the framework records the migration
+    // with (same app, same version), so recording it fails with a unique violation. The table
+    // must not survive: SQL and record are one transaction.
+    const CLASH: &[MigrationFile] = &[migration(
+        1,
+        "clash",
+        "CREATE TABLE zz_atomic (n integer); \
+         INSERT INTO fb_app_migration (app, version, name, checksum) VALUES ('crm', 1, 'mine', 'x')",
+    )];
+    let db = TestDb::new().await;
+    let binary = Forgebase::new().app(crm_with(CLASH));
+    let error = db.migrate(&binary, false).await.expect_err("fails");
+    assert!(
+        error.to_string().contains("fb_app_migration_pkey"),
+        "{error}"
+    );
+    assert_eq!(
+        db.rows("SELECT to_regclass('zz_atomic')::text").await,
+        rows(&[&["NULL"]]),
+        "the migration SQL was committed without its record"
+    );
+    assert_eq!(
+        db.rows("SELECT count(*)::text FROM fb_app_migration").await,
+        rows(&[&["0"]]),
+        "something was recorded"
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_pending_migration_below_an_applied_version_is_refused_and_nothing_is_applied() {
+    // crm has 1 and 3 applied (a gap is fine).
+    const APPLIED: &[MigrationFile] = &[
+        migration(
+            1,
+            "create_log",
+            "CREATE TABLE zz_log (id serial PRIMARY KEY, entry text NOT NULL)",
+        ),
+        migration(3, "three", "INSERT INTO zz_log (entry) VALUES ('crm 3')"),
+    ];
+    let db = TestDb::new().await;
+    db.migrate(&Forgebase::new().app(crm_with(APPLIED)), false)
+        .await
+        .expect("migrate");
+
+    // The new release declares a migration 2, below the applied 3, and also new work that would
+    // otherwise run: a later app's migration and a new DocType.
+    const WITH_TWO: &[MigrationFile] = &[
+        APPLIED[0],
+        migration(2, "two", "INSERT INTO zz_log (entry) VALUES ('crm 2')"),
+        APPLIED[1],
+    ];
+    const WIDGET: &str = "name = \"widget\"\nlabel = \"W\"\n";
+    let newer = Forgebase::new()
+        .app(crm_with(WITH_TWO).doctypes(files![("doctypes/widget.toml", WIDGET)]))
+        .app(sales_with(SALES_MIGRATIONS));
+    for dry_run in [false, true] {
+        let error = db
+            .migrate(&newer, dry_run)
+            .await
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            error.contains(
+                "migration 2 (two) of app `crm` is not applied, but migration 3 of the app is"
+            ) && error.contains("renumber it above 3")
+                && error.contains("nothing was applied"),
+            "{error}"
+        );
+    }
+    assert_eq!(log_entries(&db).await, rows(&[&["crm 3"]]));
+    assert_eq!(
+        db.rows("SELECT app, version::text FROM fb_app_migration ORDER BY app, version")
+            .await,
+        rows(&[&["crm", "1"], &["crm", "3"]])
+    );
+    assert_eq!(
+        db.rows("SELECT to_regclass('doc_widget')::text").await,
+        rows(&[&["NULL"]])
+    );
+
+    // Renumbered above the applied versions it runs.
+    const RENUMBERED: &[MigrationFile] = &[
+        APPLIED[0],
+        APPLIED[1],
+        migration(4, "two", "INSERT INTO zz_log (entry) VALUES ('crm 2')"),
+    ];
+    let fixed = Forgebase::new().app(crm_with(RENUMBERED));
+    let done = db.migrate(&fixed, false).await.expect("migrate");
+    assert_eq!(done.app_migrations, applied(&[("crm", 4, "two")]));
     db.cleanup().await;
 }

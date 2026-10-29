@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 /// Forgebase command-line tool.
 ///
@@ -67,6 +68,50 @@ impl Command {
             ) => Some(doctypes),
             Command::User(_) | Command::Token(_) => None,
         }
+    }
+}
+
+impl Command {
+    /// The names of the (sub)commands that select this command, for example `["doc", "get"]`.
+    fn path(&self) -> [&'static str; 2] {
+        match self {
+            Command::Migrate { .. } => ["migrate", ""],
+            Command::Serve { .. } => ["serve", ""],
+            Command::User(_) => ["user", ""],
+            Command::Token(_) => ["token", ""],
+            Command::Doc(doc) => [
+                "doc",
+                match doc {
+                    DocCommand::Insert { .. } => "insert",
+                    DocCommand::Get { .. } => "get",
+                    DocCommand::List { .. } => "list",
+                    DocCommand::Update { .. } => "update",
+                    DocCommand::Submit { .. } => "submit",
+                    DocCommand::Cancel { .. } => "cancel",
+                    DocCommand::Amend { .. } => "amend",
+                    DocCommand::Delete { .. } => "delete",
+                },
+            ],
+        }
+    }
+
+    /// The usage error for a command that needs `--doctypes` and did not get it (a binary without
+    /// apps has no other source of DocTypes). It is the error clap itself would give for a
+    /// required option, so it shows the usage of the subcommand.
+    pub fn missing_doctypes_error(&self) -> clap::Error {
+        let mut root = Cli::command();
+        root.build();
+        let mut command = &root;
+        for name in self.path().into_iter().filter(|name| !name.is_empty()) {
+            command = command.find_subcommand(name).unwrap_or(command);
+        }
+        command
+            .clone()
+            .mut_arg("doctypes", |arg| arg.required(true))
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                "the following required arguments were not provided:\n  --doctypes <DIR>",
+            )
     }
 }
 
@@ -261,8 +306,9 @@ pub struct VersionArg {
 #[derive(Debug, Args)]
 pub struct DocTypesDir {
     /// Directory with one DocType `*.toml` file per DocType (not searched recursively). It
-    /// becomes the app `local`, which depends on every app compiled into the binary. The stock
-    /// `forgebase` binary has no apps, so it needs this option; a binary with apps does not.
+    /// becomes the app `local`, which depends on every app compiled into the binary. Required
+    /// when the binary has no apps (the stock `forgebase` binary); a binary with apps does not
+    /// need it.
     #[arg(long, value_name = "DIR")]
     pub doctypes: Option<PathBuf>,
 }
