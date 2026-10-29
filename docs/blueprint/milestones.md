@@ -84,7 +84,7 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
 
 ## M7 Site management
 
-- **Scope:** site configuration file; the multi-site database decision (lean: database per site, see [architecture, section 9](architecture.md)); per-site app install; backups. Capability 1.
+- **Scope:** site configuration file; the multi-site database decision (lean: database per site, see [architecture, section 9](architecture.md#9-multi-site-undecided)); per-site app install; backups. Capability 1.
 - **Exit criteria:** (to be set in the M7 plan) tests for site isolation.
 - **Non-goals:** runtime app install ([ADR 0006](../adr/0006-extension-model.md)).
 
