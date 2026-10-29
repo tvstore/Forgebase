@@ -69,8 +69,9 @@ pub struct AppConfig {
     /// The largest request body in bytes; a larger one is `413 payload_too_large`.
     pub body_limit_bytes: usize,
     /// How many logins may hash a password at the same time; more are `503 too_many_logins`
-    /// with `Retry-After`. Argon2 uses about 19 MiB each, so this bounds memory and keeps
-    /// database connections free for other requests.
+    /// with `Retry-After`. Argon2 uses about 19 MiB each, so this bounds memory. The effective
+    /// limit is at most half of the pool's maximum size (at least 1), whatever is set here, so
+    /// that logins can never hold every database connection.
     pub max_concurrent_logins: usize,
 }
 
@@ -108,7 +109,10 @@ impl AppState {
             .iter()
             .map(|h| h.trim().to_ascii_lowercase())
             .collect();
-        let logins = Semaphore::new(config.max_concurrent_logins.max(1));
+        let logins = Semaphore::new(login_permits(
+            config.max_concurrent_logins,
+            pool.status().max_size,
+        ));
         Self {
             inner: Arc::new(Inner {
                 pool,
@@ -144,6 +148,12 @@ impl AppState {
     pub(crate) fn logins(&self) -> &Semaphore {
         &self.inner.logins
     }
+}
+
+/// The number of concurrent logins: `configured`, but at most half of the pool's maximum size
+/// and at least 1, so that logins can never take all the connections other requests need.
+fn login_permits(configured: usize, pool_max_size: usize) -> usize {
+    configured.min((pool_max_size / 2).max(1)).max(1)
 }
 
 /// Builds the router with every route and the Host check.
@@ -248,7 +258,66 @@ fn is_port(text: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::host_part;
+    use super::{AppConfig, AppState, host_part, login_permits, router};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use forgebase_core::meta::Registry;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[test]
+    fn login_permits_never_take_every_connection() {
+        assert_eq!(login_permits(8, 16), 8);
+        assert_eq!(login_permits(8, 8), 4);
+        assert_eq!(login_permits(8, 9), 4);
+        assert_eq!(login_permits(8, 4), 2);
+        // A pool of one or two still allows one login at a time.
+        assert_eq!(login_permits(8, 2), 1);
+        assert_eq!(login_permits(8, 1), 1);
+        assert_eq!(login_permits(8, 0), 1);
+        // 0 configured still means 1; a small setting is kept.
+        assert_eq!(login_permits(0, 16), 1);
+        assert_eq!(login_permits(2, 64), 2);
+    }
+
+    /// A pool that never connects: deadpool creates it lazily.
+    fn lazy_pool(max_size: usize) -> forgebase_db::Pool {
+        use deadpool_postgres::{Config, PoolConfig, Runtime, tokio_postgres::NoTls};
+        let mut config = Config::new();
+        config.url = Some("postgres://nobody@127.0.0.1:1/none".to_owned());
+        config.pool = Some(PoolConfig::new(max_size));
+        config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("lazy pool")
+    }
+
+    #[tokio::test]
+    async fn a_login_over_the_bound_is_503_without_touching_the_database() {
+        let config = AppConfig {
+            max_concurrent_logins: 1,
+            ..AppConfig::default()
+        };
+        let state = AppState::new(lazy_pool(2), Arc::new(Registry::new()), config);
+        assert_eq!(state.logins().available_permits(), 1);
+        let _taken = state.logins().try_acquire().expect("the only permit");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/login")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"username":"a","password":"b"}"#))
+            .expect("request");
+        let response = router(state.clone())
+            .oneshot(request)
+            .await
+            .expect("infallible");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8_lossy(&body).contains("too_many_logins"));
+    }
 
     #[test]
     fn host_part_drops_port_and_case() {

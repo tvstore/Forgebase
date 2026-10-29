@@ -419,23 +419,19 @@ async fn user(url: &str, command: UserCommand) -> Result<(), CliError> {
     write_stdout(&text)
 }
 
-/// Runs `serve`: the HTTP API until Ctrl-C. Prints the listening address (never the database
-/// URL or any secret). It does not run migrations.
+/// How long `serve` waits for open connections after the first stop signal.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Runs `serve`: the HTTP API until Ctrl-C or SIGTERM. Prints the listening address (never the
+/// database URL or any secret). It does not run migrations.
+///
+/// The first signal stops accepting connections and lets running requests finish, for at most
+/// [`SHUTDOWN_GRACE`]; a second signal, or the end of the grace period, exits at once.
 async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
     let registry = registry(doctypes)?;
     let listen = env_or("FORGEBASE_LISTEN", "127.0.0.1:8000");
     let hosts = env_or("FORGEBASE_ALLOWED_HOSTS", "localhost,127.0.0.1");
-    let allowed_hosts: Vec<String> = hosts
-        .split(',')
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if allowed_hosts.is_empty() {
-        return Err(CliError::Config(
-            "FORGEBASE_ALLOWED_HOSTS has no host name".to_owned(),
-        ));
-    }
+    let allowed_hosts = parse_allowed_hosts(&hosts)?;
     let insecure = std::env::var("FORGEBASE_DEV_INSECURE_COOKIES").is_ok_and(|v| v == "1");
     if insecure {
         let _ = writeln!(
@@ -454,13 +450,115 @@ async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
         .await
         .map_err(|e| CliError::Config(format!("cannot listen on {listen}: {e}")))?;
     let address = listener.local_addr().map_err(CliError::Serve)?;
+    let signals = stop_signals().map_err(CliError::Serve)?;
     write_stdout(&format!("listening on http://{address}\n"))?;
     let state = AppState::new(pool, Arc::new(registry), config);
-    forgebase_http::serve(listener, state, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
-    .map_err(CliError::Serve)
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = forgebase_http::serve(listener, state, async {
+        let _ = stopped.await;
+    });
+    run_until_stopped(server, stop, signals, SHUTDOWN_GRACE)
+        .await
+        .map_err(CliError::Serve)
+}
+
+/// The host names of `FORGEBASE_ALLOWED_HOSTS`: comma separated, trimmed, no empty entry. An
+/// entry with a port can never match (the port of the `Host` header is ignored), so it is
+/// refused at startup instead of silently locking everyone out.
+fn parse_allowed_hosts(text: &str) -> Result<Vec<String>, CliError> {
+    let hosts: Vec<String> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if hosts.is_empty() {
+        return Err(CliError::Config(
+            "FORGEBASE_ALLOWED_HOSTS has no host name".to_owned(),
+        ));
+    }
+    for host in &hosts {
+        // `[::1]` is a host name with colons; anything after its `]`, or a colon outside
+        // brackets, is a port (or an unbracketed IPv6 address).
+        let bad = if host.starts_with('[') {
+            !host.ends_with(']')
+        } else {
+            host.contains(':')
+        };
+        if bad {
+            return Err(CliError::Config(format!(
+                "FORGEBASE_ALLOWED_HOSTS entry {host:?} must be a host name without a port \
+                 (the port of the Host header is ignored; write IPv6 as [::1])"
+            )));
+        }
+    }
+    Ok(hosts)
+}
+
+/// A channel that receives one message per stop signal (Ctrl-C, and SIGTERM on Unix).
+fn stop_signals() -> std::io::Result<tokio::sync::mpsc::UnboundedReceiver<()>> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = interrupt.recv() => {}
+                    _ = terminate.recv() => {}
+                }
+                if sender.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            if sender.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(receiver)
+}
+
+/// Runs `server` until it ends. After the first message on `signals` it sends `stop` (the
+/// server's graceful shutdown) and waits for it at most `grace`; a second message or the end of
+/// `grace` stops waiting, which drops the server and its open connections.
+async fn run_until_stopped(
+    server: impl std::future::Future<Output = std::io::Result<()>>,
+    stop: tokio::sync::oneshot::Sender<()>,
+    mut signals: tokio::sync::mpsc::UnboundedReceiver<()>,
+    grace: Duration,
+) -> std::io::Result<()> {
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => return result,
+        Some(()) = signals.recv() => {}
+    }
+    let _ = stop.send(());
+    let _ = writeln!(
+        std::io::stderr(),
+        "shutting down: waiting up to {} s for open requests (send the signal again to exit now)",
+        grace.as_secs()
+    );
+    tokio::select! {
+        result = &mut server => result,
+        Some(()) = signals.recv() => forced("second signal"),
+        () = tokio::time::sleep(grace) => forced("grace period over"),
+    }
+}
+
+fn forced(why: &str) -> std::io::Result<()> {
+    let _ = writeln!(
+        std::io::stderr(),
+        "exiting now ({why}); open connections are dropped"
+    );
+    Ok(())
 }
 
 fn env_or(name: &str, default: &str) -> String {
@@ -562,4 +660,73 @@ fn write_stdout(text: &str) -> Result<(), CliError> {
     out.write_all(text.as_bytes())
         .and_then(|()| out.flush())
         .map_err(CliError::Output)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::{parse_allowed_hosts, run_until_stopped};
+
+    #[test]
+    fn allowed_hosts_are_trimmed_and_refuse_ports() {
+        assert_eq!(
+            parse_allowed_hosts(" a.example , [::1],,localhost ").expect("valid"),
+            ["a.example", "[::1]", "localhost"]
+        );
+        for bad in ["", " , ", "localhost:8000", "[::1]:8000", "::1", "a,b:1"] {
+            assert!(parse_allowed_hosts(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A server that ignores the stop request, like one with a stuck connection.
+    async fn stuck() -> std::io::Result<()> {
+        pending().await
+    }
+
+    #[tokio::test]
+    async fn a_second_signal_exits_at_once() {
+        let (stop, _stopped) = oneshot::channel();
+        let (signals, receiver) = mpsc::unbounded_channel();
+        signals.send(()).expect("open");
+        signals.send(()).expect("open");
+        let started = Instant::now();
+        run_until_stopped(stuck(), stop, receiver, Duration::from_secs(60))
+            .await
+            .expect("ok");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn the_grace_period_ends_the_wait() {
+        let (stop, _stopped) = oneshot::channel();
+        let (signals, receiver) = mpsc::unbounded_channel();
+        signals.send(()).expect("open");
+        let started = Instant::now();
+        run_until_stopped(stuck(), stop, receiver, Duration::from_millis(50))
+            .await
+            .expect("ok");
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn the_first_signal_asks_the_server_to_stop() {
+        let (stop, stopped) = oneshot::channel::<()>();
+        let (signals, receiver) = mpsc::unbounded_channel();
+        let server = async move {
+            let _ = stopped.await;
+            Ok(())
+        };
+        signals.send(()).expect("open");
+        // The server ends by itself after the request, well before the grace period.
+        let started = Instant::now();
+        run_until_stopped(server, stop, receiver, Duration::from_secs(60))
+            .await
+            .expect("ok");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }

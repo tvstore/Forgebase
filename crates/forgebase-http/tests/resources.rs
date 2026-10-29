@@ -131,10 +131,26 @@ async fn the_authorization_matrix_over_http() {
         .send(
             req(Method::PATCH, &uri("secret", &secret))
                 .token(&writer)
-                .json(json!({"version": 1, "data": {"nope": 5}})),
+                .json(json!({"version": 1, "data": {"x": 5}})),
         )
         .await;
-    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    // `x` is a Data field, so without the pre-check this would be a 422 naming it.
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.text);
+    assert_eq!(reply.code(), "permission_denied");
+    // Write without Read is refused too (an update returns the document, so it needs Read):
+    // the pre-check asks for both rights.
+    env.user("dropper", &["Dropper"]).await;
+    let dropper = env.api_token("dropper").await;
+    let drop = env.admin_insert(&admin, "dropbox", json!({"x": "a"})).await;
+    let reply = env
+        .send(
+            req(Method::PATCH, &uri("dropbox", &drop))
+                .token(&dropper)
+                .json(json!({"version": 1, "data": {"x": 5}})),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.text);
+    assert_eq!(reply.code(), "permission_denied");
     let reply = env
         .send(
             get("/api/v1/resource/secret?filters=%5B%7B%22field%22%3A%22nope%22%7D%5D")
@@ -510,6 +526,45 @@ async fn bodies_and_parameters_are_checked() {
         assert!(reply.status.is_client_error(), "{}", reply.text);
         assert_eq!(reply.code(), code, "{}", reply.text);
     }
+}
+
+#[tokio::test]
+async fn repeated_and_unknown_query_parameters_are_refused_everywhere() {
+    let (env, admin) = setup().await;
+    let note = env
+        .admin_insert(&admin, "note", json!({"title": "n"}))
+        .await;
+    let one = uri("note", &note);
+    let list = "/api/v1/resource/note";
+    let cases = [
+        // A repeated parameter is refused, whichever value a parser would keep.
+        get(&format!("{list}?limit=1&limit=500")),
+        get(&format!("{list}?limit=500&limit=1")),
+        get(&format!("{list}?sort=title&sort=points")),
+        req(Method::DELETE, &format!("{one}?version=1&version=2")),
+        // Routes without parameters refuse any, for consistency.
+        get(&format!("{one}?x=1")),
+        post(&format!("{list}?x=1")).json(json!({"title": "t"})),
+        req(Method::PATCH, &format!("{one}?x=1")).json(json!({"version": 1, "data": {}})),
+        post(&format!("{one}/submit?x=1")).json(json!({"version": 1})),
+        post(&format!("{one}/cancel?x=1")).json(json!({"version": 1})),
+        post(&format!("{one}/amend?x=1")).json(json!({"version": 1})),
+    ];
+    for request in cases {
+        let reply = env.send(request.session(&admin)).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text);
+        assert_eq!(reply.code(), "invalid_query", "{}", reply.text);
+    }
+    // Nothing was created, and a single parameter still works.
+    let reply = env
+        .send(get(&format!("{list}?limit=1")).session(&admin))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    assert_eq!(reply.data().as_array().expect("list").len(), 1);
+    let reply = env
+        .send(req(Method::DELETE, &format!("{one}?version=1")).session(&admin))
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

@@ -219,13 +219,13 @@ Security rules for the API are in [security-model](security-model.md).
 
 ### The HTTP layer (M3.3, implemented in `forgebase-http`)
 
-`forgebase serve --doctypes DIR` runs it (`FORGEBASE_LISTEN`, default `127.0.0.1:8000`; `FORGEBASE_ALLOWED_HOSTS`, default `localhost,127.0.0.1`; `FORGEBASE_DEV_INSECURE_COOKIES=1` for local development over plain HTTP, with a warning). It loads and checks the DocType registry like `migrate` but **does not run migrations**; Ctrl-C shuts it down gracefully. Library entry points: `forgebase_http::{AppConfig, AppState, router, serve}`.
+`forgebase serve --doctypes DIR` runs it (`FORGEBASE_LISTEN`, default `127.0.0.1:8000`; `FORGEBASE_ALLOWED_HOSTS`, default `localhost,127.0.0.1`; `FORGEBASE_DEV_INSECURE_COOKIES=1` for local development over plain HTTP, with a warning). It loads and checks the DocType registry like `migrate` but **does not run migrations**; Ctrl-C or SIGTERM shuts it down gracefully (running requests get up to 10 seconds; a second signal or the end of the period exits at once). `FORGEBASE_ALLOWED_HOSTS` entries must not contain a port (startup error). Library entry points: `forgebase_http::{AppConfig, AppState, router, serve}`.
 
 **Routes** (all JSON, prefix `/api/v1`; success bodies are `{"data": ...}`):
 
 | Route | Success | Notes |
 |---|---|---|
-| `POST /login` | 200 `{"data": {"username", "roles", "csrf_token"}}` + `Set-Cookie` | body `{"username", "password"}`; failure is the uniform 401; concurrent logins are bounded (`max_concurrent_logins`, default 8; excess is 503 `too_many_logins` with `Retry-After: 1`) |
+| `POST /login` | 200 `{"data": {"username", "roles", "csrf_token"}}` + `Set-Cookie` | body `{"username", "password"}`; failure is the uniform 401; concurrent logins are bounded (`max_concurrent_logins`, default 8, capped at half of the pool's maximum size and at least 1; excess is 503 `too_many_logins` with `Retry-After: 1`) |
 | `POST /logout` | 204, cookie cleared (`Max-Age=0`) | cookie session only, CSRF required; with an API token it is 400 (a token has no session; revoke it with `forgebase token revoke`) |
 | `GET /resource/{doctype}` | 200 `{"data": [...]}` | query: `filters` (the JSON array of the CLI's `--filter`), `sort` (`field[:desc],field2`), `limit`, `offset`; any other parameter is `invalid_query` |
 | `POST /resource/{doctype}` | 201 `{"data": doc}` | body is the document |

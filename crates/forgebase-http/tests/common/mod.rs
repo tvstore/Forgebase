@@ -189,9 +189,24 @@ name = "x"
 type = "data"
 "#;
 
+/// `Dropper` may write and create but not read: the update pre-check must refuse it.
+const DROPBOX: &str = r#"
+name = "dropbox"
+label = "Dropbox"
+[[fields]]
+name = "x"
+type = "data"
+[[permissions]]
+role = "Dropper"
+write = true
+create = true
+"#;
+
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
-    for text in [ITEM, HOLDER, VAULT, LOCKED, NOTE, NOTE_LINE, BILL, SECRET] {
+    for text in [
+        ITEM, HOLDER, VAULT, LOCKED, NOTE, NOTE_LINE, BILL, SECRET, DROPBOX,
+    ] {
         registry
             .add(DocType::from_toml_str(text).expect("valid DocType"))
             .expect("valid registry");

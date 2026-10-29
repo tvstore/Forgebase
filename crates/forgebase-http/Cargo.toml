@@ -22,5 +22,6 @@ time = { workspace = true, features = ["parsing", "formatting"] }
 tokio = { workspace = true, features = ["net", "sync"] }
 
 [dev-dependencies]
+deadpool-postgres.workspace = true
 tower.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

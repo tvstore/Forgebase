@@ -1640,6 +1640,7 @@ fn serve_dev_mode_and_configuration() {
     // An unusable host list or address ends the command with exit code 1 and no secret.
     for (name, value) in [
         ("FORGEBASE_ALLOWED_HOSTS", " , "),
+        ("FORGEBASE_ALLOWED_HOSTS", "localhost:8000"),
         ("FORGEBASE_LISTEN", "not an address"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))

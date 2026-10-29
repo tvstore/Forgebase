@@ -28,6 +28,9 @@ const COOKIE_MAX_AGE_SECS: u32 = 7 * 24 * 3600;
 
 type Reply = Result<Response, ApiError>;
 
+/// The raw query string as ordered pairs, so that a repeated parameter is still visible.
+type RawQuery = Result<Query<Vec<(String, String)>>, QueryRejection>;
+
 /// A JSON request body. Unlike axum's own rejections, a failure is an [`ApiError`] (the
 /// envelope): 413 over the body limit, 415 for another content type, 400 for bad JSON.
 pub struct ApiJson(Json);
@@ -117,20 +120,33 @@ fn version(map: &Map<String, Json>) -> Result<i64, ApiError> {
 }
 
 fn version_param(query: &BTreeMap<String, String>) -> Result<i64, ApiError> {
-    unknown_params(query, &["version"])?;
     query
         .get("version")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| ApiError::invalid_query("`version` must be an integer"))
 }
 
-fn unknown_params(query: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), ApiError> {
-    match query.keys().find(|k| !allowed.contains(&k.as_str())) {
-        Some(key) => Err(ApiError::invalid_query(format!(
-            "unknown parameter {key:?}"
-        ))),
-        None => Ok(()),
+/// The query parameters as a map, `invalid_query` for a parameter that is not in `allowed` or
+/// that is repeated (`?limit=1&limit=500` must not depend on which one a parser keeps).
+fn params(
+    pairs: Vec<(String, String)>,
+    allowed: &[&str],
+) -> Result<BTreeMap<String, String>, ApiError> {
+    let mut map = BTreeMap::new();
+    for (key, value) in pairs {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ApiError::invalid_query(format!(
+                "unknown parameter {key:?}"
+            )));
+        }
+        if map.contains_key(&key) {
+            return Err(ApiError::invalid_query(format!(
+                "duplicate parameter {key:?}"
+            )));
+        }
+        map.insert(key, value);
     }
+    Ok(map)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -189,7 +205,7 @@ pub async fn list(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<String>, PathRejection>,
-    query: Result<Query<BTreeMap<String, String>>, QueryRejection>,
+    query: RawQuery,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &name)?;
@@ -199,7 +215,7 @@ pub async fn list(
         &[Right::Read],
         Right::Read,
     )?;
-    unknown_params(&query, &["filters", "sort", "limit", "offset"])?;
+    let query = params(query, &["filters", "sort", "limit", "offset"])?;
     let list_query = ListQuery {
         filters: match query.get("filters") {
             Some(text) => parse_filters(doctype, text).map_err(query_error)?,
@@ -243,9 +259,10 @@ pub async fn create(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<String>, PathRejection>,
+    query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    let Path(name) = path?;
+    let (Path(name), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &name)?;
     require(
         doctype,
@@ -253,6 +270,7 @@ pub async fn create(
         &[Right::Create],
         Right::Create,
     )?;
+    params(query, &[])?;
     let input = input_from_json(state.registry(), doctype, body)?;
     let document = Document {
         name: None,
@@ -276,9 +294,11 @@ pub async fn read(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
 ) -> Reply {
-    let Path((doctype_name, name)) = path?;
+    let (Path((doctype_name, name)), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &doctype_name)?;
+    params(query, &[])?;
     let mut client = state.client().await?;
     let stored = forgebase_db::get(
         &mut **client,
@@ -302,9 +322,10 @@ pub async fn update(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    let Path((doctype_name, name)) = path?;
+    let (Path((doctype_name, name)), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &doctype_name)?;
     require(
         doctype,
@@ -312,6 +333,7 @@ pub async fn update(
         &[Right::Write, Right::Read],
         Right::Write,
     )?;
+    params(query, &[])?;
     let mut map = object(body, &["version", "data"])?;
     let expected_version = version(&map)?;
     let changes = map
@@ -341,11 +363,11 @@ pub async fn delete(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
-    query: Result<Query<BTreeMap<String, String>>, QueryRejection>,
+    query: RawQuery,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &doctype_name)?;
-    let expected_version = version_param(&query)?;
+    let expected_version = version_param(&params(query, &["version"])?)?;
     let mut client = state.client().await?;
     forgebase_db::delete(
         &mut **client,
@@ -371,10 +393,12 @@ async fn transition(
     state: AppState,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
     body: Json,
 ) -> Reply {
-    let Path((doctype_name, name)) = path?;
+    let (Path((doctype_name, name)), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &doctype_name)?;
+    params(query, &[])?;
     let expected_version = version(&object(body, &["version"])?)?;
     let caller = authenticated.caller();
     let mut client = state.client().await?;
@@ -405,9 +429,10 @@ pub async fn submit(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    transition(Transition::Submit, state, authenticated, path, body).await
+    transition(Transition::Submit, state, authenticated, path, query, body).await
 }
 
 /// `POST /api/v1/resource/{doctype}/{name}/cancel`: body `{"version": N}`.
@@ -415,9 +440,10 @@ pub async fn cancel(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    transition(Transition::Cancel, state, authenticated, path, body).await
+    transition(Transition::Cancel, state, authenticated, path, query, body).await
 }
 
 /// `POST /api/v1/resource/{doctype}/{name}/amend`: body `{"version": N}`; 201 with the new
@@ -426,7 +452,8 @@ pub async fn amend(
     State(state): State<AppState>,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    transition(Transition::Amend, state, authenticated, path, body).await
+    transition(Transition::Amend, state, authenticated, path, query, body).await
 }

@@ -398,6 +398,7 @@ name = "forgebase-http"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "deadpool-postgres",
  "forgebase-core",
  "forgebase-db",
  "rust_decimal",
