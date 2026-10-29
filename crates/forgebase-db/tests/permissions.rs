@@ -1141,7 +1141,6 @@ async fn hooks_receive_the_username_and_the_owner_is_the_username() {
         ]
     );
     // A refused operation runs no hook.
-    let before = seen.len();
     let denied = insert(
         client,
         &reg,
@@ -1152,6 +1151,140 @@ async fn hooks_receive_the_username_and_the_owner_is_the_username() {
     .await
     .unwrap_err();
     assert!(matches!(denied, DbError::PermissionDenied { .. }));
-    assert_eq!(before, 5);
     assert!(log.lock().unwrap().is_empty());
+}
+
+/// Links already stored on a document do not block `update` and `submit` when the caller cannot
+/// read their targets; only new or changed Link values get the caller's read check.
+#[tokio::test]
+async fn stored_links_to_unreadable_targets_do_not_block_update_or_submit() {
+    let (db, reg) = setup().await;
+    let hidden = make_party(&db, &reg, "hidden@x.y", &sys()).await;
+    let other = make_party(&db, &reg, "other@x.y", &sys()).await;
+    let u = user("u", &["Writer", "Submitter", "OwnReader", "PartyCreator"]);
+    let mut client = db.pool.get().await.unwrap();
+    let client = &mut **client;
+    let own = insert(
+        client,
+        &reg,
+        "party",
+        doc(&[("email", text("own@x.y"))]),
+        &u,
+    )
+    .await
+    .unwrap();
+    // `u` cannot read `hidden` and `other`, but can read `own`.
+    assert!(
+        get(client, &reg, "party", &hidden.name, &u)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let made = insert(
+        client,
+        &reg,
+        "ticket",
+        ticket_linking(&hidden.name, Some(&hidden.name)),
+        &sys(),
+    )
+    .await
+    .unwrap();
+
+    // Only the title changes: the stored Links (document and row) are kept.
+    let updated = update(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        made.version,
+        &change("title", text("changed")),
+        &u,
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.values["customer"], text(&hidden.name));
+
+    // Replacing the rows: a stored name is kept, a new unreadable one is reported as missing.
+    let rows = |contacts: &[&str]| Changes {
+        values: BTreeMap::new(),
+        tables: BTreeMap::from([(
+            "lines".to_owned(),
+            contacts.iter().map(|c| row(Some(c))).collect::<Vec<_>>(),
+        )]),
+    };
+    let error = update(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        updated.version,
+        &rows(&[&hidden.name, &other.name]),
+        &u,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        link_not_found(&error),
+        vec![("lines[2].contact:party".to_owned(), other.name.clone())]
+    );
+    let updated = update(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        updated.version,
+        &rows(&[&hidden.name, &own.name]),
+        &u,
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.tables["lines"].len(), 2);
+
+    // Changing the document Link to another unreadable party is still refused; to an own one
+    // it works.
+    let error = update(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        updated.version,
+        &change("customer", text(&other.name)),
+        &u,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        link_not_found(&error),
+        vec![("customer:party".to_owned(), other.name.clone())]
+    );
+    let updated = update(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        updated.version,
+        &change("customer", text(&own.name)),
+        &u,
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.values["customer"], text(&own.name));
+
+    // Submit with stored Links to unreadable targets (a second ticket, rows included).
+    let second = insert(
+        client,
+        &reg,
+        "ticket",
+        ticket_linking(&hidden.name, Some(&hidden.name)),
+        &sys(),
+    )
+    .await
+    .unwrap();
+    let submitted = submit(client, &reg, "ticket", &second.name, second.version, &u)
+        .await
+        .unwrap();
+    assert_eq!(
+        submitted.docstatus,
+        Some(forgebase_core::document::DocStatus::Submitted)
+    );
 }

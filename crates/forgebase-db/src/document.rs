@@ -226,6 +226,7 @@ async fn insert_in(
         caller,
         doctype,
         (&doc.values, &doc.tables),
+        None,
         &mut errors,
     )
     .await?;
@@ -384,7 +385,10 @@ async fn get_in(
 /// and the hooks change nothing). Every change to child rows bumps the version.
 ///
 /// A hook error is [`DbError::Hook`] and nothing is written. The DocType rules, the transaction
-/// and the Link handling are those of [`insert`].
+/// and the Link handling are those of [`insert`], except that the caller's read check on the
+/// target applies only to **new or changed** Link values: a Link equal to the stored one (for
+/// rows: a name among the stored values of that field in that table) is kept and resolved
+/// without it.
 ///
 /// **Docstatus.** For a submittable DocType: a draft is updated as above; a cancelled document
 /// cannot be updated ([`DbError::InvalidDocStatus`]); a **submitted** document is locked: only
@@ -502,6 +506,7 @@ async fn update_in(
         caller,
         doctype,
         (&columns, &changed_tables),
+        Some(&current),
         &mut errors,
     )
     .await?;
@@ -695,7 +700,9 @@ fn require_status(
 /// (with [`Operation::Submit`]), then the `before_submit` hooks, and both may modify it; the
 /// framework validates the whole result; Links are resolved; the column values and the changed
 /// tables are written like an update does (so a value a hook changed is persisted), with
-/// `docstatus` 1. A hook error is [`DbError::Hook`] and nothing is changed. The transaction
+/// `docstatus` 1 (Links already stored are kept without the caller's read check on the target,
+/// as for [`update`]; only values a hook changed are checked). A hook error is [`DbError::Hook`]
+/// and nothing is changed. The transaction
 /// and optimistic concurrency are those of [`update`].
 pub async fn submit(
     client: &mut impl GenericClient,
@@ -755,6 +762,7 @@ async fn submit_in(
         caller,
         doctype,
         (&columns, &changed_tables),
+        Some(&current),
         &mut errors,
     )
     .await?;
@@ -1290,12 +1298,18 @@ struct TableWrite<'a> {
 /// Resolves the Links of the document's values and of every row. Returns the ids of the
 /// document's Links and the rows to write; a Link name that does not exist is added to `errors`.
 /// A target the caller cannot read counts as missing (decision 9, see [`resolve_links`]).
+///
+/// With `stored` (update and submit), a Link value that is already stored is kept: a document
+/// Link that equals the stored one, and a row Link whose name is among the stored values of the
+/// same field in the same table, is resolved with full access (the caller already sees that name
+/// through `get`). Only new or changed Link values get the caller's read check.
 async fn resolve<'a>(
     client: &impl GenericClient,
     registry: &'a Registry,
     caller: &Caller,
     doctype: &DocType,
     (values, tables): (&BTreeMap<String, Value>, &'a BTreeMap<String, Vec<Row>>),
+    stored: Option<&StoredDocument>,
     errors: &mut Vec<ValidationError>,
 ) -> Result<(BTreeMap<String, Uuid>, Vec<TableWrite<'a>>), DbError> {
     // Fields that already have a problem are not looked up (their value may not even be
@@ -1305,7 +1319,18 @@ async fn resolve<'a>(
         .filter(|e| !matches!(e, ValidationError::InRow { .. }))
         .map(|e| e.field().to_owned())
         .collect();
-    let (links, found) = resolve_links(client, registry, caller, doctype, values, &skip).await?;
+    let kept_value = |field: &str, link: &str| {
+        stored.is_some_and(|s| s.values.get(field) == Some(&Value::Text(link.to_owned())))
+    };
+    let (links, found) = resolve_links(
+        client,
+        (registry, caller),
+        doctype,
+        values,
+        &skip,
+        &kept_value,
+    )
+    .await?;
     errors.extend(found);
 
     let mut writes = Vec::new();
@@ -1328,7 +1353,14 @@ async fn resolve<'a>(
                     _ => None,
                 })
                 .collect();
-            let (ids, found) = resolve_links(client, registry, caller, child, row, &skip).await?;
+            let kept_row = |field: &str, link: &str| {
+                let link = Value::Text(link.to_owned());
+                stored
+                    .and_then(|s| s.tables.get(name))
+                    .is_some_and(|rows| rows.iter().any(|r| r.get(field) == Some(&link)))
+            };
+            let (ids, found) =
+                resolve_links(client, (registry, caller), child, row, &skip, &kept_row).await?;
             errors.extend(found.into_iter().map(|error| ValidationError::InRow {
                 field: name.clone(),
                 row: position,
@@ -1346,7 +1378,8 @@ async fn resolve<'a>(
 
 /// Resolves the Link values in `values` (name -> target `id`), locking each target row against
 /// deletion. A name that does not exist is returned as [`ValidationError::LinkNotFound`].
-/// Fields in `skip` are not looked up.
+/// Fields in `skip` are not looked up. A value for which `kept(field, name)` is true is already
+/// stored on the document: it is resolved with full access, without the caller's read check.
 ///
 /// **Decision 9.** The lookup uses the caller's *read* access on the **target** DocType, so a
 /// target the caller cannot read gives exactly the error of a missing one: with no read access to
@@ -1354,11 +1387,11 @@ async fn resolve<'a>(
 /// `AND "owner" = $2` (bound, in SQL). The error is built in one place for both cases.
 async fn resolve_links(
     client: &impl GenericClient,
-    registry: &Registry,
-    caller: &Caller,
+    (registry, caller): (&Registry, &Caller),
     doctype: &DocType,
     values: &BTreeMap<String, Value>,
     skip: &BTreeSet<String>,
+    kept: &(dyn Fn(&str, &str) -> bool + Sync),
 ) -> Result<(BTreeMap<String, Uuid>, Vec<ValidationError>), DbError> {
     let mut ids = BTreeMap::new();
     let mut errors = Vec::new();
@@ -1376,7 +1409,12 @@ async fn resolve_links(
             "SELECT \"id\" FROM {} WHERE \"name\" = $1::text",
             quote_ident(&table_name(target))
         );
-        let found = match evaluate(target_type, caller, Right::Read) {
+        let access = if kept(field, target_name) {
+            Access::All
+        } else {
+            evaluate(target_type, caller, Right::Read)
+        };
+        let found = match access {
             Access::Denied => None,
             Access::All => {
                 sql.push_str(" FOR KEY SHARE");
