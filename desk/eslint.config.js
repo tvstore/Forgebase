@@ -55,4 +55,9 @@ export default defineConfig(
       ],
     },
   },
+  {
+    // The smoke test looks INTO the browser storage to prove that the desk left nothing there.
+    files: ['e2e/**/*.ts', 'playwright.config.ts'],
+    rules: { 'no-restricted-properties': 'off', 'no-restricted-globals': 'off' },
+  },
 );

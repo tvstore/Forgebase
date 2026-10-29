@@ -2,13 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ApiError,
+  createDocument,
+  deleteDocument,
   getDocTypeMeta,
+  getDocument,
   getSession,
   listDocuments,
   login,
   logout,
   setCsrfToken,
   setUnauthenticatedHandler,
+  transitionDocument,
+  updateDocument,
 } from './api';
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
@@ -229,5 +234,64 @@ describe('no browser storage', () => {
     await getSession();
     await logout();
     expect(touched).toEqual([]);
+  });
+});
+
+describe('document requests', () => {
+  const doc = { name: 'SO-1', version: 1 };
+
+  it('reads, creates, updates, deletes and transitions with the CSRF header and encoded names', async () => {
+    setCsrfToken('tok');
+    mockFetch((_url, init) =>
+      init.method === 'DELETE' ? new Response(null, { status: 204 }) : json(init.method === 'POST' ? 201 : 200, { data: doc }),
+    );
+    expect(await getDocument('sales order', 'a/b c')).toEqual(doc);
+    expect(calls[0]?.url).toBe('/api/v1/resource/sales%20order/a%2Fb%20c');
+    expect(header(calls[0], 'X-Forgebase-CSRF')).toBeUndefined(); // a GET needs none
+
+    await createDocument('note', { title: 't' });
+    expect(calls[1]?.url).toBe('/api/v1/resource/note');
+    expect(calls[1]?.init.method).toBe('POST');
+    expect(calls[1]?.init.body).toBe('{"title":"t"}');
+    expect(header(calls[1], 'X-Forgebase-CSRF')).toBe('tok');
+
+    await updateDocument('note', 'n 1', 3, { title: 'u' });
+    expect(calls[2]?.url).toBe('/api/v1/resource/note/n%201');
+    expect(calls[2]?.init.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[2]?.init.body))).toEqual({ version: 3, data: { title: 'u' } });
+
+    expect(await deleteDocument('note', 'n', 4)).toBeUndefined();
+    expect(calls[3]?.url).toBe('/api/v1/resource/note/n?version=4');
+    expect(calls[3]?.init.method).toBe('DELETE');
+
+    for (const action of ['submit', 'cancel', 'amend'] as const) {
+      await transitionDocument('note', 'n', action, 5);
+      const call = calls[calls.length - 1];
+      expect(call?.url).toBe(`/api/v1/resource/note/n/${action}`);
+      expect(call?.init.method).toBe('POST');
+      expect(JSON.parse(String(call?.init.body))).toEqual({ version: 5 });
+    }
+  });
+
+  it('never requests the path of a name that cannot be addressed', async () => {
+    mockFetch(() => json(200, { data: doc }));
+    expect(() => getDocument('note', '..')).toThrow(/no REST path/);
+    expect(() => getDocument('note', '.')).toThrow(/no REST path/);
+    expect(() => deleteDocument('note', '..', 1)).toThrow(/no REST path/);
+    expect(() => transitionDocument('note', '.', 'submit', 1)).toThrow(/no REST path/);
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps the details of a validation error and the code of a conflict', async () => {
+    mockFetch(() =>
+      json(422, { error: { code: 'validation_failed', message: 'validation failed', details: ['field `a` is required'] } }),
+    );
+    await expect(updateDocument('note', 'n', 1, {})).rejects.toMatchObject({
+      status: 422,
+      code: 'validation_failed',
+      details: ['field `a` is required'],
+    });
+    mockFetch(() => json(409, { error: { code: 'conflict', message: 'changed' } }));
+    await expect(deleteDocument('note', 'n', 1)).rejects.toMatchObject({ status: 409, code: 'conflict' });
   });
 });

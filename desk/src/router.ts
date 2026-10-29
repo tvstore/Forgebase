@@ -72,12 +72,48 @@ export function navigate(href: string, replace = false): void {
   else window.location.hash = href;
 }
 
-function subscribe(callback: () => void): () => void {
-  window.addEventListener('hashchange', callback);
-  return () => window.removeEventListener('hashchange', callback);
+// The hash the app shows. It follows `hashchange`, except while a form with unsaved changes has
+// installed a blocker: the blocker is told the address the user went to, the address bar is put
+// back, and the form asks in the page whether to leave (then it navigates there itself).
+// Known limit: a browser Back or Forward blocked this way leaves the history entry it moved to
+// pointing at the form (the entries are not rearranged), so a second Back may land on the form.
+let shown: string | null = null;
+let attached = false;
+let blocker: ((next: string) => boolean) | null = null;
+const listeners = new Set<() => void>();
+
+function onHashChange(): void {
+  const next = window.location.hash;
+  if (next === shown) return;
+  if (blocker?.(next)) {
+    window.history.replaceState(window.history.state, '', shown ?? '#/');
+    return;
+  }
+  shown = next;
+  listeners.forEach((listener) => listener());
 }
 
-const snapshot = (): string => window.location.hash;
+/**
+ * While set, a change of the address is offered to `block(nextHash)` first; when it returns true
+ * the change is undone and nothing else happens. Pass null to remove it.
+ */
+export function setNavigationBlocker(block: ((next: string) => boolean) | null): void {
+  blocker = block;
+}
+
+function subscribe(callback: () => void): () => void {
+  if (!attached) {
+    shown = window.location.hash;
+    window.addEventListener('hashchange', onHashChange);
+    attached = true;
+  }
+  listeners.add(callback);
+  return () => {
+    listeners.delete(callback);
+  };
+}
+
+const snapshot = (): string => shown ?? window.location.hash;
 
 /** The hash of the address bar as a string (a primitive, so React can compare snapshots). */
 export function useHash(): string {

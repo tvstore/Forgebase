@@ -212,9 +212,12 @@ pub async fn session(
     authenticated: Authenticated,
     headers: HeaderMap,
 ) -> Reply {
-    let marked = headers
-        .get("x-forgebase-csrf")
-        .is_some_and(|v| v.as_bytes() == b"refresh");
+    // Exactly one value: a repeated header must not depend on which one a parser keeps.
+    let mut values = headers.get_all("x-forgebase-csrf").iter();
+    let marked = matches!(
+        (values.next(), values.next()),
+        (Some(value), None) if value.as_bytes() == b"refresh"
+    );
     if !marked {
         return Err(ApiError::bad_request(
             "this request needs the header X-Forgebase-CSRF: refresh",

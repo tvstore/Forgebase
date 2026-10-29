@@ -220,3 +220,127 @@ tbody th {
   gap: 1rem;
   margin: 1rem 0;
 }
+
+.hint {
+  color: var(--muted);
+  margin: 0.25rem 0;
+}
+
+.doc-status {
+  margin: 0 0 0.75rem;
+}
+
+.alert {
+  border: 2px solid var(--danger);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 0.5rem 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.alert p,
+.alert ul {
+  margin: 0.25rem 0;
+}
+
+.status-line {
+  min-height: 1.5em;
+  margin: 0.5rem 0;
+  color: var(--muted);
+}
+
+.prompt {
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 0.5rem 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.fields {
+  display: grid;
+  gap: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+  max-width: 40rem;
+}
+
+.field.check {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.field-error {
+  margin: 0;
+}
+
+.field input[aria-invalid='true'],
+.field select[aria-invalid='true'],
+.field textarea[aria-invalid='true'],
+td input[aria-invalid='true'] {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  min-width: 0;
+}
+
+input[readonly],
+textarea[readonly] {
+  background: #eef1f5;
+}
+
+.table-field {
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.table-field .table-wrap {
+  margin-bottom: 0.5rem;
+}
+
+.details dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 0.5rem;
+}
+
+.details dt {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.details dd {
+  margin: 0;
+}

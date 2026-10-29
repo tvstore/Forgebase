@@ -1,0 +1,150 @@
+import { useEffect, useRef } from 'react';
+
+import { FieldControl } from './FieldControl';
+import { errorKey, blankRow } from '../fields';
+import type { Errors, FormRow, FormValue } from '../fields';
+import { focusAfterRemove } from '../filters';
+import type { FieldMeta } from '../types';
+
+interface Props {
+  /** The Table field; `field.fields` are the columns. */
+  field: FieldMeta;
+  rows: FormRow[];
+  onChange: (rows: FormRow[]) => void;
+  readOnly: boolean;
+  errors: Errors;
+  /** The prefix of the element ids (unique per form). */
+  idBase: string;
+}
+
+/** Where focus goes after the rows changed (set by the buttons, applied after the render). */
+type Focus = { kind: 'cell'; row: number } | { kind: 'remove'; row: number } | { kind: 'add' };
+
+/**
+ * The rows of a Table field as a native `<table>`: one row per child row (the order is the
+ * display order), the child fields as the same native controls, "Add row" and a "Remove row N"
+ * button per row. Every control is named by its column and row; a problem of a cell is linked
+ * with `aria-describedby`. Child tables cannot nest, so no cell is a table.
+ */
+export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: Props) {
+  const columns = field.fields ?? [];
+  const wrap = useRef<HTMLDivElement>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const pending = useRef<Focus | null>(null);
+
+  // Runs after every render; acts only when a button asked for a focus move.
+  useEffect(() => {
+    const focus = pending.current;
+    pending.current = null;
+    if (!focus) return;
+    if (focus.kind === 'add') addButton.current?.focus();
+    else {
+      const tr = wrap.current?.querySelectorAll('tbody tr')[focus.row];
+      const target =
+        focus.kind === 'cell'
+          ? tr?.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), textarea')
+          : tr?.querySelector<HTMLElement>('button.remove');
+      target?.focus();
+    }
+  });
+
+  const setCell = (index: number, name: string, value: FormValue) =>
+    onChange(rows.map((row, i) => (i === index ? { ...row, values: { ...row.values, [name]: value } } : row)));
+
+  const tableError = errors[errorKey(field.name)];
+  const errorId = `${idBase}-error`;
+
+  return (
+    <div>
+      {rows.length > 0 ? (
+        <div className="table-wrap" ref={wrap}>
+          <table>
+            <caption className="visually-hidden">{field.label}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Row</th>
+                {columns.map((c) => (
+                  <th key={c.name} scope="col">
+                    {c.label}
+                    {c.required ? <span aria-hidden="true"> *</span> : null}
+                  </th>
+                ))}
+                {readOnly ? null : (
+                  <th scope="col">
+                    <span className="visually-hidden">Remove</span>
+                  </th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={row.key}>
+                  <th scope="row">{index + 1}</th>
+                  {columns.map((c) => {
+                    const key = errorKey(field.name, index + 1, c.name);
+                    const message = errors[key];
+                    const cellId = `${idBase}-${row.key}-${c.name}`;
+                    return (
+                      <td key={c.name}>
+                        <FieldControl
+                          id={cellId}
+                          field={c}
+                          value={row.values[c.name] ?? ''}
+                          onChange={(value) => setCell(index, c.name, value)}
+                          readOnly={readOnly}
+                          invalid={message !== undefined}
+                          describedBy={message ? `${cellId}-error` : undefined}
+                          ariaLabel={`${c.label}, row ${index + 1}`}
+                        />
+                        {message ? (
+                          <p id={`${cellId}-error`} className="error field-error">
+                            {message}
+                          </p>
+                        ) : null}
+                      </td>
+                    );
+                  })}
+                  {readOnly ? null : (
+                    <td>
+                      <button
+                        type="button"
+                        className="remove"
+                        onClick={() => {
+                          onChange(rows.filter((_, i) => i !== index));
+                          const next = focusAfterRemove(index, rows.length);
+                          pending.current = next.kind === 'add' ? { kind: 'add' } : { kind: 'remove', row: next.index };
+                        }}
+                      >
+                        Remove row {index + 1}
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p>{readOnly ? 'No rows.' : 'No rows yet.'}</p>
+      )}
+      {tableError ? (
+        <p id={errorId} className="error field-error">
+          {tableError}
+        </p>
+      ) : null}
+      {readOnly ? null : (
+        <button
+          type="button"
+          ref={addButton}
+          aria-describedby={tableError ? errorId : undefined}
+          onClick={() => {
+            onChange([...rows, blankRow(columns)]);
+            pending.current = { kind: 'cell', row: rows.length };
+          }}
+        >
+          Add row
+        </button>
+      )}
+    </div>
+  );
+}

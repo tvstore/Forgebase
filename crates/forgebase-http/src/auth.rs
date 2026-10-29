@@ -65,11 +65,12 @@ impl FromRequestParts<AppState> for Authenticated {
             .await?
             .ok_or_else(ApiError::unauthenticated)?;
         if !matches!(parts.method, Method::GET | Method::HEAD) {
-            let csrf = parts
-                .headers
-                .get(CSRF_HEADER)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(ApiError::csrf_failed)?;
+            // Exactly one value, like the `Authorization` header.
+            let mut values = parts.headers.get_all(CSRF_HEADER).iter();
+            let (Some(value), None) = (values.next(), values.next()) else {
+                return Err(ApiError::csrf_failed());
+            };
+            let csrf = value.to_str().map_err(|_| ApiError::csrf_failed())?;
             if !auth::check_csrf(&**client, token, csrf).await? {
                 return Err(ApiError::csrf_failed());
             }

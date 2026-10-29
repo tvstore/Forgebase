@@ -1,20 +1,88 @@
+import { useEffect, useState } from 'react';
+
+import { isAddressable } from '../access';
+import { ApiError, getDocTypeMeta, getDocument } from '../api';
+import { DocumentForm } from '../components/DocumentForm';
 import { listHref } from '../router';
+import type { DocTypeMeta, DocumentRow } from '../types';
 
 interface Props {
   doctype: string;
   /** The document's name, or null for "New". */
   docName: string | null;
+  /** The logged-in user (for the rights that apply to the user's own documents only). */
+  username: string;
 }
 
-/** A placeholder: the form view arrives in M4.2. */
-export function Form({ doctype, docName }: Props) {
-  return (
-    <main>
-      <h1>{docName === null ? `New ${doctype}` : `${doctype}: ${docName}`}</h1>
-      <p>The form view arrives in M4.2.</p>
-      <p>
-        <a href={listHref(doctype)}>Back to the list</a>
-      </p>
-    </main>
-  );
+type Load =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; meta: DocTypeMeta; doc: DocumentRow | null };
+
+const message = (e: unknown): string =>
+  e instanceof ApiError ? e.message : 'Cannot reach the server.';
+
+/** Loads the metadata (and the document) of the route, then shows the form. */
+export function Form({ doctype, docName, username }: Props) {
+  // A name that has no REST path is never requested.
+  const addressable = docName === null || isAddressable(docName);
+  const [load, setLoad] = useState<Load>({ status: 'loading' });
+
+  useEffect(() => {
+    if (!addressable) return;
+    let cancelled = false;
+    const work = async (): Promise<Load> => {
+      const meta = await getDocTypeMeta(doctype);
+      const doc = docName === null ? null : await getDocument(doctype, docName);
+      return { status: 'ready', meta, doc };
+    };
+    work().then(
+      (next) => {
+        if (!cancelled) setLoad(next);
+      },
+      (e: unknown) => {
+        if (!cancelled) setLoad({ status: 'error', message: message(e) });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [doctype, docName, addressable]);
+
+  if (!addressable) {
+    return (
+      <main>
+        <h1>{doctype}</h1>
+        <p role="alert" className="error">
+          The document name {JSON.stringify(docName)} cannot be opened in the desk: a REST path cannot
+          address a document named "." or "..".
+        </p>
+        <p>
+          <a href={listHref(doctype)}>Back to the list</a>
+        </p>
+      </main>
+    );
+  }
+  if (load.status === 'loading') {
+    return (
+      <main>
+        <h1>{docName ?? `New ${doctype}`}</h1>
+        <p>Loading...</p>
+      </main>
+    );
+  }
+  if (load.status === 'error') {
+    return (
+      <main>
+        <h1>{docName ?? `New ${doctype}`}</h1>
+        <p role="alert" className="error">
+          {load.message}
+        </p>
+        <p>
+          <a href={listHref(doctype)}>Back to the list</a>
+        </p>
+      </main>
+    );
+  }
+  return <DocumentForm meta={load.meta} initial={load.doc} username={username} />;
 }

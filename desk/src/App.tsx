@@ -94,19 +94,26 @@ export function App() {
           Log out
         </button>
       </header>
-      <Page route={route} />
+      <Page route={route} username={auth.username} />
     </>
   );
 }
 
-function Page({ route }: { route: Route }) {
+function Page({ route, username }: { route: Route; username: string }) {
   switch (route.name) {
     case 'list':
       return <List key={route.doctype} doctype={route.doctype} params={route.params} />;
     case 'new':
-      return <Form doctype={route.doctype} docName={null} />;
+      return <Form key={`new/${route.doctype}`} doctype={route.doctype} docName={null} username={username} />;
     case 'form':
-      return <Form doctype={route.doctype} docName={route.docName} />;
+      return (
+        <Form
+          key={`form/${route.doctype}/${route.docName}`}
+          doctype={route.doctype}
+          docName={route.docName}
+          username={username}
+        />
+      );
     case 'login': // being redirected to the home page
     case 'home':
       return <Home />;
