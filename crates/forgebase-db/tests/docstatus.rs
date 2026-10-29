@@ -1109,3 +1109,80 @@ async fn a_hook_cannot_rename_an_amendment() {
     assert!(matches!(error, DbError::Naming(_)), "{error}");
     assert_eq!(count(&db, "doc_quote").await, 1);
 }
+
+const TICKET: &str = r#"
+name = "ticket"
+label = "Ticket"
+submittable = true
+[[fields]]
+name = "code"
+type = "data"
+unique = true
+"#;
+
+/// A hook that gives an amendment a new value for the unique `code` field.
+struct NewCode;
+
+impl DocTypeHooks for NewCode {
+    fn before_insert(&self, ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+        if ctx.operation == Operation::Amend {
+            doc.values.insert("code".to_owned(), text("T-2"));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn amending_a_unique_field_needs_a_hook_that_changes_the_value() {
+    let db = TestDb::migrated().await;
+    let plain = registry(&[TICKET]);
+    db.sync(&plain).await.expect("sync");
+    let mut client = db.pool.get().await.unwrap();
+    let c = &mut **client;
+    let doc = Document {
+        name: None,
+        values: BTreeMap::from([("code".to_owned(), text("T-1"))]),
+        tables: BTreeMap::new(),
+    };
+    let stored = insert(c, &plain, "ticket", doc, "ann").await.unwrap();
+    let stored = submit(c, &plain, "ticket", &stored.name, stored.version, "ann")
+        .await
+        .unwrap();
+    let cancelled = cancel(c, &plain, "ticket", &stored.name, stored.version, "ann")
+        .await
+        .unwrap();
+
+    // The copy repeats `code`, which the cancelled original still holds.
+    let error = amend(
+        c,
+        &plain,
+        "ticket",
+        &cancelled.name,
+        cancelled.version,
+        "ann",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, DbError::UniqueViolation { .. }), "{error}");
+    assert_eq!(count(&db, "doc_ticket").await, 1);
+
+    // A hook that checks `Operation::Amend` and changes the value makes it work.
+    let mut hooked = registry(&[TICKET]);
+    hooked.add_hooks("ticket", Arc::new(NewCode)).unwrap();
+    let amended = amend(
+        c,
+        &hooked,
+        "ticket",
+        &cancelled.name,
+        cancelled.version,
+        "ann",
+    )
+    .await
+    .unwrap();
+    assert_eq!(amended.values["code"], text("T-2"));
+    assert_eq!(
+        amended.amended_from.as_deref(),
+        Some(cancelled.name.as_str())
+    );
+    assert_eq!(count(&db, "doc_ticket").await, 2);
+}

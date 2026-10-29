@@ -248,16 +248,20 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
             expected_version,
             actor,
         } => {
-            let args = (&registry, doctype.as_str(), name.as_str(), expected_version);
+            let doctype = doctype.as_str();
+            let name = name.as_str();
             match kind {
                 StatusKind::Submit => {
-                    forgebase_db::submit(client, args.0, args.1, args.2, args.3, &actor).await?
+                    forgebase_db::submit(client, &registry, doctype, name, expected_version, &actor)
+                        .await?
                 }
                 StatusKind::Cancel => {
-                    forgebase_db::cancel(client, args.0, args.1, args.2, args.3, &actor).await?
+                    forgebase_db::cancel(client, &registry, doctype, name, expected_version, &actor)
+                        .await?
                 }
                 StatusKind::Amend => {
-                    forgebase_db::amend(client, args.0, args.1, args.2, args.3, &actor).await?
+                    forgebase_db::amend(client, &registry, doctype, name, expected_version, &actor)
+                        .await?
                 }
             }
         }

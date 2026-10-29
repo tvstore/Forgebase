@@ -132,6 +132,14 @@ pub struct StoredDocument {
 /// the pipeline, after the hooks and the validation, so a document that is refused earlier does
 /// not take a number.
 ///
+/// **A name collision blocks the series.** If the rendered name already exists (for example
+/// after the pattern changed to another prefix that renders a used name), the insert fails with
+/// [`DbError::UniqueViolation`] and the rollback returns the number, so every later insert
+/// retries the same number and fails too. Move the counter by hand, for example
+/// `UPDATE fb_series SET current = <n> WHERE prefix = '<prefix>'`. Numbering is gapless per
+/// rendered prefix (the `fb_series` key): two DocTypes whose patterns render the same prefix
+/// share one counter and each sees gaps; use a distinct prefix per DocType.
+///
 /// **Docstatus.** A document of a submittable DocType starts as a draft (`docstatus` 0, no
 /// `amended_from`); neither can be set through `doc` (they are not fields, so a value for them is
 /// an unknown field).
@@ -786,6 +794,18 @@ async fn cancel_in(
 /// and amends it, the call fails with [`DbError::AlreadyAmended`] (delete the amendment to amend
 /// again). Concurrent amendments of the same document serialize on its row lock
 /// (`FOR NO KEY UPDATE`).
+///
+/// **Edge case: stale `AlreadyAmended`.** `amended_from` has no foreign key and the check
+/// looks only at the document with the new name. If a cancelled document in a chain is deleted
+/// and re-created by amending its predecessor, a later amend can name an amendment of the
+/// deleted document: `X`, `X-1`, `X-2`; delete `X-1`; amend `X` again (a new `X-1`), submit and
+/// cancel it; amending it then fails with `AlreadyAmended { amended_by: "X-2" }`. Delete `X-2`
+/// to amend again. There is no code change for this.
+///
+/// **Edge case: `unique` fields.** The copy repeats every value, and the cancelled original
+/// still holds them, so a DocType with a `unique` field fails with [`DbError::UniqueViolation`]
+/// unless a `before_insert` or `validate` hook checks `ctx.operation == Operation::Amend` and
+/// changes the value (or the original is deleted first).
 ///
 /// **Pipeline.** The cancelled document is read and locked, as for [`submit`]; then the
 /// **insert** pipeline of [`insert`] runs on the copy: the `before_insert` and `validate` hooks
