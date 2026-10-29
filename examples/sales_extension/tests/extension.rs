@@ -59,7 +59,7 @@ fn a_total_below_the_minimum_is_refused() {
     for total in ["0.00", "5.00", "9.99", "-1.00"] {
         let value = Value::Decimal(Decimal::from_str(total).expect("decimal"));
         let error = validate(&mut with_total(Some(value))).expect_err(total);
-        assert_eq!(error.message(), "a sales order must total at least 10");
+        assert_eq!(error.message(), "a sales order must total at least 10.00");
     }
 }
 
@@ -113,13 +113,15 @@ async fn env() -> Env {
 #[tokio::test]
 async fn the_extension_hook_runs_after_the_sales_hook() {
     let env = env().await;
-    // 1 x 5.00: the client sends no `total` and no `amount`, so only the sales hook can have
-    // computed the 5.00 that the extension hook rejects.
+    // 1 x 5.00, but the client claims a `total` of 100.00. The sales hook overwrites it with
+    // the computed 5.00. If the extension hook ran before the sales hook, it would see the
+    // user's 100.00 and accept the order, after which the sales hook would compute 5.00. A
+    // refusal therefore proves the sales hook ran first.
     let small = env
         .user
         .post(
             "/api/v1/resource/sales_order",
-            json!({"customer": "ada@example.com",
+            json!({"customer": "ada@example.com", "total": "100.00",
                    "items": [{"description": "Pen", "qty": 1, "rate": "5.00"}]}),
         )
         .await;
@@ -129,7 +131,7 @@ async fn the_extension_hook_runs_after_the_sales_hook() {
         small
             .error_message()
             .expect("message")
-            .contains("a sales order must total at least 10"),
+            .contains("a sales order must total at least 10.00"),
         "{:?}",
         small.body
     );

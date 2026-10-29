@@ -10,7 +10,9 @@ use forgebase::{App, Decimal, DocTypeHooks, Document, HookContext, HookError, Va
 /// A constant, because hooks have no database access: they cannot read a setting. A real
 /// deployment that needs a configurable minimum waits for the hook capabilities of a later
 /// milestone, or changes the constant and rebuilds.
-pub const MIN_ORDER_TOTAL: Decimal = Decimal::TEN;
+///
+/// It is 1000 with scale 2 (10.00); `from_parts` is the const constructor.
+pub const MIN_ORDER_TOTAL: Decimal = Decimal::from_parts(1000, 0, 0, false, 2);
 
 /// The app. It depends on `sales`, which must be registered before it in `main.rs`.
 pub fn app() -> App {
@@ -24,6 +26,10 @@ pub fn app() -> App {
 }
 
 /// Refuses a sales order whose total is below [`MIN_ORDER_TOTAL`].
+///
+/// In the composed binary, every save of a sales order (draft included) needs a total of at
+/// least 10.00. A draft without items (total 0) can therefore no longer be saved, unlike with
+/// `sales` alone.
 pub struct MinimumOrder;
 
 impl DocTypeHooks for MinimumOrder {

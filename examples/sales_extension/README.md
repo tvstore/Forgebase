@@ -6,7 +6,7 @@ It shows:
 
 - **`depends_on(&["sales"])`**: `sales` must be registered before it in `main.rs`; apps are never sorted.
 - **A DocType of its own** (`doctypes/customer_visit.toml`) with a Link to `customer`, a DocType of `sales`.
-- **A hook on another app's DocType** (`MinimumOrder` on `sales_order`): `validate` refuses an order whose `total` is below `MIN_ORDER_TOTAL` (10.00). Hooks of one DocType run in app order, so it runs after the `sales` hook that computes `total`. The minimum is a constant because hooks have no database access.
+- **A hook on another app's DocType** (`MinimumOrder` on `sales_order`): `validate` refuses an order whose `total` is below `MIN_ORDER_TOTAL` (10.00). Hooks of one DocType run in app order, so it runs after the `sales` hook that computes `total`. The minimum is a constant because hooks have no database access. In the composed binary, every save of a sales order (draft included) needs a total of at least 10.00, so a draft without items (total 0) can no longer be saved, unlike with `sales` alone.
 - **The composed binary** (`src/main.rs`): the framework, then `sales`, then this app.
 - **Tests** (`tests/extension.rs`): the hooks without a database, and both apps together against a real PostgreSQL (hook order, the cross-app Link, the `"app"` of each DocType in `GET /api/v1/meta`, permissions).
 

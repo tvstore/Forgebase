@@ -79,6 +79,10 @@ Chosen while implementing M5.2; to be reviewed with that change, not owner decis
 - **Proof.** The CI job `app-template` builds the stock binary, generates `demo` outside the checkout, runs `cargo test` in it, builds it, and with the binary of the app runs `migrate`, creates a user with the sample role, serves, logs in with `curl` and reads `GET /api/v1/meta/demo_note`, which must say `"app":"demo"`. It sets `RUSTUP_TOOLCHAIN` to the toolchain of the checkout's `rust-toolchain.toml`, because the generated crate is outside the checkout. A Rust test generates without building (`tests/new_app.rs`): building needs the network and minutes, so it is the job's work. Run it locally as CONTRIBUTING.md says.
 - **Follow-ups of M5.1.** `testing::AppliedMigration` (apps build it to compare) is `#[non_exhaustive]` with `AppliedMigration::new`; `Migrated` and `Reply` are `#[non_exhaustive]` and their fields stay public to read (nothing outside the crate builds them, so no constructor and no getters are needed). `assert_doctypes_listed` ignores a leading `./` on listed paths too. The dry run of `migrate_apps` while framework migrations are pending verifies and lists the app migrations when `fb_app_migration` exists (decided with `to_regclass`, exposed as `forgebase_db::app_migration_tables_exist`, an internal item), instead of listing every declared migration as pending; with only migrations up to 0004 in the tree the case cannot happen for real yet, so it is tested twice: the decision itself, and a simulation (migration 0004 is made pending again while the app tables, moved to another schema on the search path, exist) in which a dry run reports a changed applied migration and lists only the truly pending ones.
 
+## Implementation details (M5.3)
+
+Two example apps, `examples/sales` and `examples/sales_extension` (workspace members), exist as the proof that the public `forgebase` API is enough: the M5.3 change touches no file under `crates/`, and the apps depend on the `forgebase` crate only.
+
 ## Alternatives considered
 
 - **Several public crates** (`forgebase-core`, `-db`, `-http` all public): a larger compatibility surface to keep stable for no benefit; rejected by the owner in favour of one entry crate.
@@ -95,7 +99,3 @@ Chosen while implementing M5.2; to be reviewed with that change, not owner decis
 - The internal crates can be refactored freely as long as the public surface above holds.
 - A DocType can only be extended by hooks and, later (M10), by an overlay; it cannot be redefined by another app.
 - The app model adds one migration (0004) and two small tables; uninstalling an app is out of scope.
-
-## Implementation details (M5.3)
-
-Two example apps, `examples/sales` and `examples/sales_extension` (workspace members), exist as the proof that the public `forgebase` API is enough: the M5.3 change touches no file under `crates/`, and the apps depend on the `forgebase` crate only.
