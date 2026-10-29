@@ -89,7 +89,8 @@ async fn the_auth_tables_have_the_documented_columns() {
         [
             "username text/NO",
             "failures integer/NO",
-            "locked_until timestamp with time zone/YES"
+            "locked_until timestamp with time zone/YES",
+            "last_failure_at timestamp with time zone/YES"
         ]
     );
     assert_eq!(
@@ -354,7 +355,9 @@ async fn unknown_usernames_are_locked_too() {
 async fn concurrent_failures_cannot_exceed_the_limit() {
     let db = setup().await;
     let mut tasks = Vec::new();
-    for _ in 0..10 {
+    // 7 is deliberately not a multiple of the limit (5): without the row lock the attempts would
+    // read the same count and overwrite each other, ending at a different (non-zero) count.
+    for _ in 0..7 {
         let pool = db.pool.clone();
         tasks.push(tokio::spawn(async move {
             let mut client = pool.get().await.unwrap();
@@ -365,7 +368,8 @@ async fn concurrent_failures_cannot_exceed_the_limit() {
         let error = task.await.unwrap().unwrap_err();
         assert!(matches!(error, AuthError::InvalidCredentials));
     }
-    // Exactly five attempts were counted; the other five met the lock and were not counted.
+    // Exactly five attempts were counted (failures reset to 0, locked); the other two met the lock
+    // and were not counted. A no-lock implementation would end with failures = 2.
     assert_eq!(
         db.rows("SELECT failures::text, (locked_until > now())::text FROM fb_login_failure")
             .await,
@@ -574,7 +578,21 @@ async fn csrf_tokens_belong_to_their_session() {
     );
     assert!(!check_csrf(client, &first.token, "").await.unwrap());
     assert!(!check_csrf(client, "nope", &first.csrf_token).await.unwrap());
-    // An expired session has no valid CSRF token either.
+    // An idle-expired session has no valid CSRF token either (and the check does not touch it).
+    db.exec("UPDATE fb_session SET last_seen_at = now() - interval '24 hours 1 second'")
+        .await;
+    assert!(
+        !check_csrf(client, &first.token, &first.csrf_token)
+            .await
+            .unwrap()
+    );
+    db.exec("UPDATE fb_session SET last_seen_at = now()").await;
+    assert!(
+        check_csrf(client, &first.token, &first.csrf_token)
+            .await
+            .unwrap()
+    );
+    // Nor has an absolutely expired one.
     db.exec("UPDATE fb_session SET expires_at = now() - interval '1 second'")
         .await;
     assert!(
@@ -636,10 +654,184 @@ async fn api_tokens_validate_until_revoked() {
             .unwrap()
             .is_some()
     );
-    let error = revoke_api_token(client, "unknown").await.unwrap_err();
+    let unknown = "00000000000000000000000000000000";
+    let error = revoke_api_token(client, unknown).await.unwrap_err();
     assert!(matches!(error, AuthError::TokenNotFound(_)));
     let error = create_api_token(client, "nobody").await.unwrap_err();
     assert!(matches!(error, AuthError::UserNotFound(_)));
+}
+
+#[tokio::test]
+async fn revoking_a_malformed_key_never_echoes_it() {
+    let db = setup().await;
+    let client = db.pool.get().await.unwrap();
+    let client = &**client;
+    let token = create_api_token(client, "alice").await.unwrap();
+    // Someone pastes `key:secret` instead of the key.
+    let pasted = format!("{}:{}", token.key, token.secret);
+    for bad in [
+        pasted.as_str(),
+        "nope",
+        "",
+        &token.secret,
+        &token.key.to_uppercase(),
+    ] {
+        let error = revoke_api_token(client, bad).await.unwrap_err();
+        assert!(matches!(error, AuthError::InvalidTokenKey), "{bad}");
+        let text = format!("{error} {error:?}");
+        for part in [&token.secret, &token.key, bad] {
+            assert!(bad.is_empty() || !text.contains(part), "{text}");
+        }
+    }
+    // The token is still valid: nothing was revoked.
+    assert!(
+        validate_api_token(client, &token.key, &token.secret)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn no_api_token_for_a_disabled_user() {
+    let db = setup().await;
+    {
+        let mut client = db.pool.get().await.unwrap();
+        set_enabled(&mut **client, "alice", false).await.unwrap();
+    }
+    let client = db.pool.get().await.unwrap();
+    let error = create_api_token(&**client, "alice").await.unwrap_err();
+    assert!(matches!(error, AuthError::UserDisabled(_)), "{error}");
+    assert_eq!(
+        scalar(&db, "SELECT count(*)::text FROM fb_api_token").await,
+        "0"
+    );
+}
+
+#[tokio::test]
+async fn failures_only_count_within_fifteen_minutes_of_each_other() {
+    let db = setup().await;
+    for _ in 0..3 {
+        try_login(&db, "alice", "wrong password").await.unwrap_err();
+    }
+    assert_eq!(
+        scalar(&db, "SELECT failures::text FROM fb_login_failure").await,
+        "3"
+    );
+    // The last failure is older than 15 minutes: the count restarts at 1 (not 4).
+    db.exec("UPDATE fb_login_failure SET last_failure_at = now() - interval '15 minutes 1 second'")
+        .await;
+    try_login(&db, "alice", "wrong password").await.unwrap_err();
+    assert_eq!(
+        db.rows("SELECT failures::text, (now() - last_failure_at < interval '1 minute')::text, (locked_until IS NULL)::text FROM fb_login_failure")
+            .await,
+        vec![vec!["1".to_owned(), "true".into(), "true".into()]]
+    );
+    // Within the window the chain continues: 1 + 3 more = 4 (not locked), the 5th locks.
+    for expected in ["2", "3", "4"] {
+        try_login(&db, "alice", "wrong password").await.unwrap_err();
+        assert_eq!(
+            scalar(&db, "SELECT failures::text FROM fb_login_failure").await,
+            expected
+        );
+    }
+    try_login(&db, "alice", "wrong password").await.unwrap_err();
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT (failures = 0 AND locked_until > now())::text FROM fb_login_failure"
+        )
+        .await,
+        "true"
+    );
+}
+
+/// Regression test for the login vs. password-change race.
+///
+/// A `BEFORE INSERT` trigger on `fb_session` holds the login open (after it verified the old
+/// password and read the user row) until the test opens a gate, so the interleaving does not
+/// depend on timing: `set_password` starts while the login is stuck inside its transaction. The
+/// test waits until `set_password` either waits for the login (the correct behaviour with
+/// `FOR SHARE`) or has finished (the racy behaviour), then opens the gate.
+///
+/// Without the lock, `set_password` commits and deletes sessions while the login's session is not
+/// yet committed, so the old-password session survives. With it, `set_password` waits and then
+/// deletes the new session. Either way the returned token must not be valid afterwards.
+#[tokio::test]
+async fn a_login_racing_a_password_change_leaves_no_old_password_session() {
+    use std::time::Duration;
+
+    let db = setup().await;
+    db.exec(
+        "CREATE TABLE test_gate (open boolean NOT NULL);          INSERT INTO test_gate VALUES (false);          CREATE FUNCTION test_wait() RETURNS trigger LANGUAGE plpgsql AS $$          BEGIN            FOR i IN 1..400 LOOP              EXIT WHEN (SELECT open FROM test_gate);              PERFORM pg_sleep(0.025);            END LOOP;            RETURN NEW;          END $$;          CREATE TRIGGER test_wait BEFORE INSERT ON fb_session            FOR EACH ROW EXECUTE FUNCTION test_wait();",
+    )
+    .await;
+
+    let login_task = {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            let mut client = pool.get().await.unwrap();
+            login(&mut **client, "alice", PASSWORD).await
+        })
+    };
+    // Wait until the login is inside the trigger.
+    wait_for(&db, "wait_event = 'PgSleep'").await;
+
+    let change_task = {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            let mut client = pool.get().await.unwrap();
+            set_password(&mut **client, "alice", "a brand new password").await
+        })
+    };
+    // Wait until set_password is blocked on a lock, or has finished.
+    for _ in 0..800 {
+        let blocked = db
+            .rows(
+                "SELECT count(*)::text FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .await[0][0]
+            != "0";
+        if blocked || change_task.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    db.exec("UPDATE test_gate SET open = true").await;
+
+    change_task.await.unwrap().unwrap();
+    match login_task.await.unwrap() {
+        // The login finished first: its session must have been deleted by set_password.
+        Ok(session) => assert!(
+            session_user(&db, &session.token).await.is_none(),
+            "a session from the old password survived"
+        ),
+        // Or it lost the race and failed against the new hash.
+        Err(error) => assert!(matches!(error, AuthError::InvalidCredentials), "{error}"),
+    }
+    assert_eq!(
+        scalar(&db, "SELECT count(*)::text FROM fb_session").await,
+        "0"
+    );
+    try_login(&db, "alice", "a brand new password")
+        .await
+        .unwrap();
+}
+
+/// Polls `pg_stat_activity` of the test database until a backend matches `condition`.
+async fn wait_for(db: &TestDb, condition: &str) {
+    for _ in 0..800 {
+        let sql = format!(
+            "SELECT count(*)::text FROM pg_stat_activity \
+             WHERE datname = current_database() AND {condition}"
+        );
+        if db.rows(&sql).await[0][0] != "0" {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting for: {condition}");
 }
 
 #[tokio::test]

@@ -20,6 +20,9 @@ getrandom.workspace = true
 rust_decimal = { workspace = true, features = ["db-tokio-postgres"] }
 thiserror.workspace = true
 time.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 tokio-postgres.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

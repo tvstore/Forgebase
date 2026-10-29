@@ -16,14 +16,14 @@ Status: **Proposed** unless stated; of the sections below identifier and value h
 | Browser sessions | Opaque random token (32 bytes from the operating system, 64 hex characters). **Implemented (M3.1):** only the SHA-256 digest is stored in `fb_session`, with a CSRF token digest, the user, an absolute expiry (7 days) and an idle expiry (24 hours since last use); every login creates a new session; logout, password change and disabling the user delete sessions. **M3.3:** carried in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie; the CSRF check for cookie-authenticated state-changing requests (`check_csrf` exists since M3.1). |
 | API tokens (machine clients) | **Implemented (M3.1):** public key (32 hex) and secret (64 hex); only the secret's SHA-256 digest is stored; the secret is shown once; tokens do not expire and can be revoked; a disabled user's tokens stop working. |
 | Passwords | **Implemented (M3.1):** Argon2id (`argon2` 0.6) with m = 19456 KiB, t = 2, p = 1, random 16-byte salt, PHC string; verified with the parameters inside the string; 8 to 1024 bytes; hashing runs on the blocking thread pool. |
-| Login lockout | **Implemented (M3.1):** per submitted username (also unknown ones), 5 failures lock it for 15 minutes; counting is committed even when the login fails; concurrent attempts are serialized by a row lock. Unknown, disabled, wrong-password and locked all give one uniform error and spend one Argon2 verification (a dummy hash when there is no real one). |
+| Login lockout | **Implemented (M3.1):** per submitted username (also unknown ones), 5 consecutive failures, each within 15 minutes of the previous one (`last_failure_at`; an older failure restarts the count at 1), lock it for 15 minutes; counting is committed even when the login fails; concurrent attempts are serialized by a row lock. Unknown, disabled, wrong-password and locked all give one uniform error and spend one Argon2 verification (a dummy hash when there is no real one). |
 | Deferred | OAuth/SSO, 2FA, password reset by email. |
 
 JWT for first-party browser sessions is avoided (revocation complexity).
 
-**Secrets rule.** No password, session token, CSRF token or API secret is stored in plaintext, logged, or part of an error, `Debug` or `Display` output. The only exceptions are the one-time return values of `login` and `create_api_token` and the one-time output of `forgebase token create`. Types that carry a secret implement `Debug` by hand and redact it; tests assert this.
+**Secrets rule.** No password, session token, CSRF token or API secret is stored in plaintext, and Forgebase itself never logs it or puts it in an error, `Debug` or `Display` output (PostgreSQL parameter logging is a known limit below). The only exceptions are the one-time return values of `login` and `create_api_token` and the one-time output of `forgebase token create`. Types that carry a secret implement `Debug` by hand and redact it; tests assert this.
 
-**Known limits (M3.1).** The lockout can be used to lock a known user out (denial of service); `fb_login_failure` has one small row per failed username that is not cleaned up automatically; a caller that runs `login` inside its own transaction loses the failure counting if that transaction rolls back (call it on a pooled client); digests are compared by PostgreSQL, not in constant time (acceptable for 256-bit random values); there is no password complexity or breach check; Argon2 memory use (about 19 MiB per verification) needs concurrency limits in the HTTP layer.
+**Known limits (M3.1).** The lockout can be used to lock a known user out (denial of service); `fb_login_failure` has one small row per failed username that is not cleaned up automatically (deferred: a later job can delete rows whose `last_failure_at` and `locked_until` are older than 15 minutes); `create_api_token` refuses a disabled user; a caller that runs `login` inside its own transaction loses the failure counting if that transaction rolls back (call it on a pooled client); digests are compared by PostgreSQL, not in constant time (acceptable for 256-bit random values); there is no password complexity or breach check; Argon2 memory use (about 19 MiB per verification) and connection-pool exhaustion (parallel logins for one username each hold a pooled connection while they wait on the row lock) both need bounded login concurrency, which M3.3 must provide; **PostgreSQL parameter logging:** plaintext session tokens, CSRF tokens and API secrets reach PostgreSQL as bind parameters (`sha256()` runs in SQL) and there is no TLS to PostgreSQL yet, so PostgreSQL can log them with `log_statement = all` or `log_min_duration_statement` - operators should set `log_parameter_max_length = 0` and `log_parameter_max_length_on_error = 0` and use a local or private network until TLS arrives.
 
 ## Authorization
 
@@ -56,7 +56,7 @@ Options, lean (database-per-site) and the day-one site/pool context constraint a
 
 ## Secrets
 
-Config file and environment variables only; never in DB metadata or logs. Session tokens and API secrets are stored hashed.
+Config file and environment variables only; never in DB metadata or logs. Session tokens and API secrets are stored hashed. Forgebase never logs them, but PostgreSQL may log bind parameters; see the known limits above.
 
 ## The command-line tool (M1.3)
 

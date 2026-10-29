@@ -106,11 +106,12 @@ DocTypes are TOML files, one per DocType, in the directory given by `--doctypes`
 
 ### Users and tokens
 
-Passwords are read from the first line of **standard input**, never from an argument or an environment variable. API tokens are printed once as `key:secret`; only a digest is stored, so the secret cannot be shown again. These commands have no authentication of their own: whoever can run `forgebase` with the database URL can create users and tokens.
+Passwords are read from the first line of **standard input**, never from an argument or an environment variable. API tokens are printed once as `key:secret`; only a digest is stored, so the secret cannot be shown again. Reading a password from stdin does not hide it: on a terminal it is echoed as you type, so use `read -s` (see below) or a pipe. These commands have no authentication of their own: whoever can run `forgebase` with the database URL can create users and tokens.
 
 ```sh
 # Create a user with two roles (usernames: 1-140 ASCII letters, digits and _ . @ -; passwords: 8-1024 bytes)
 printf '%s\n' 'a long password' | cargo run -p forgebase-cli -- user create ann --role Sales --role Accounts
+# Without echo on a terminal: read -s -r PW && printf '%s\n' "$PW" | cargo run -p forgebase-cli -- user create ann
 cargo run -p forgebase-cli -- user add-role ann Admin
 cargo run -p forgebase-cli -- user remove-role ann Admin
 printf '%s\n' 'another password' | cargo run -p forgebase-cli -- user set-password ann   # also ends all sessions
@@ -121,7 +122,7 @@ cargo run -p forgebase-cli -- token create ann
 cargo run -p forgebase-cli -- token revoke <key>
 ```
 
-Five failed logins for a username lock it for 15 minutes; see [ADR 0010](docs/adr/0010-authentication-and-sessions.md) and the [security model](docs/blueprint/security-model.md).
+Five consecutive failed logins for a username (each within 15 minutes of the previous one) lock it for 15 minutes; see [ADR 0010](docs/adr/0010-authentication-and-sessions.md) and the [security model](docs/blueprint/security-model.md).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks. To get oriented, read the blueprint in this order: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [milestones](docs/blueprint/milestones.md). Contributors and agents must follow [AGENTS.md](AGENTS.md).
 

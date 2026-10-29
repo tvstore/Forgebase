@@ -1177,7 +1177,7 @@ fn user_commands_manage_users_and_roles() {
         "{}",
         stderr(&out)
     );
-    assert!(!stderr(&out).contains("short\n"));
+    assert!(!stderr(&out).contains("short"));
     let out = db.forgebase_with_stdin(&["user", "create", "bob"], Some(""));
     assert_eq!(code(&out), Some(1));
     assert!(
@@ -1280,10 +1280,32 @@ fn token_create_prints_the_secret_once_and_revoke_works() {
         Some("true".into())
     );
 
-    let out = db.forgebase(&["token", "revoke", "nope"]);
+    // A well-formed but unknown key.
+    let out = db.forgebase(&["token", "revoke", "00000000000000000000000000000000"]);
     assert_eq!(code(&out), Some(1));
-    assert!(stderr(&out).contains("API token `nope` not found"));
+    assert!(stderr(&out).contains("not found"), "{}", stderr(&out));
+    // A malformed key, also a pasted `key:secret`, is rejected without being echoed.
+    let pasted = format!("{key}:{secret}");
+    for bad in ["nope", pasted.as_str()] {
+        let out = db.forgebase(&["token", "revoke", bad]);
+        assert_eq!(code(&out), Some(1));
+        assert!(
+            stderr(&out).contains("invalid API token key"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(!stderr(&out).contains(bad), "{}", stderr(&out));
+        assert!(!stderr(&out).contains(secret), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "");
+    }
     let out = db.forgebase(&["token", "create", "nobody"]);
     assert_eq!(code(&out), Some(1));
+    assert_eq!(stdout(&out), "");
+    // A disabled user gets no token.
+    let out = db.forgebase(&["user", "disable", "alice"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let out = db.forgebase(&["token", "create", "alice"]);
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("is disabled"), "{}", stderr(&out));
     assert_eq!(stdout(&out), "");
 }

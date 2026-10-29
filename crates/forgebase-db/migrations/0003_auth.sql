@@ -42,9 +42,11 @@ CREATE TABLE fb_api_token (
 CREATE INDEX fb_api_token_user_id_idx ON fb_api_token (user_id);
 
 -- Failed login accounting, keyed by the submitted username (also for unknown users, so the
--- lockout does not reveal which usernames exist).
+-- lockout does not reveal which usernames exist). A failure only counts with the previous ones if
+-- `last_failure_at` is at most 15 minutes ago; otherwise the count restarts at 1.
 CREATE TABLE fb_login_failure (
-    username     text PRIMARY KEY,
-    failures     integer NOT NULL,
-    locked_until timestamptz
+    username        text PRIMARY KEY,
+    failures        integer NOT NULL,
+    locked_until    timestamptz,
+    last_failure_at timestamptz
 );

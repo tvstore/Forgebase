@@ -10,9 +10,16 @@
 //! API secrets are 32 random bytes (from the operating system through `getrandom`) written as 64
 //! lowercase hex characters; only their SHA-256 digest (computed by PostgreSQL) is stored. An API
 //! key (the public identifier of an API token) is 16 random bytes as 32 hex characters. No
-//! password, token or secret is ever stored in plaintext, logged, or part of an error, `Debug`
-//! or `Display` output; the only places that return a secret are [`login`] and
+//! password, token or secret is ever stored in plaintext, or logged, or part of an error, `Debug`
+//! or `Display` output **by Forgebase**; the only places that return a secret are [`login`] and
 //! [`create_api_token`], once.
+//!
+//! **Known limit: PostgreSQL logging.** Because `sha256()` runs in SQL, a plaintext session token,
+//! CSRF token or API secret reaches PostgreSQL as a bind parameter, and there is no TLS to
+//! PostgreSQL yet. PostgreSQL itself can log bind parameters (`log_statement = all`,
+//! `log_min_duration_statement`, statements that fail). Operators should set
+//! `log_parameter_max_length = 0` and `log_parameter_max_length_on_error = 0`, and keep the
+//! connection on a local or private network until TLS is supported (see ADR 0010).
 //!
 //! **Rules.** A username is 1 to 140 characters, ASCII letters, digits and `_ . @ -`, and is
 //! case-sensitive (`Alice` and `alice` are two users). A role is 1 to 140 characters, not blank,
@@ -42,10 +49,14 @@ use crate::error::DbError;
 /// The id of a user.
 pub type UserId = Uuid;
 
-/// Failed logins of one username before it is locked.
+/// Failed logins of one username, each within [`FAILURE_WINDOW_SECS`] of the previous one, before
+/// it is locked.
 const MAX_FAILURES: i32 = 5;
 /// How long a locked username cannot log in, in seconds (15 minutes).
 const LOCK_SECS: f64 = 15.0 * 60.0;
+/// A failure only counts with the previous one if that was at most this long ago, in seconds
+/// (15 minutes). Otherwise the count restarts at 1.
+const FAILURE_WINDOW_SECS: f64 = 15.0 * 60.0;
 /// Absolute lifetime of a session, in seconds (7 days from login).
 const SESSION_ABSOLUTE_SECS: f64 = 7.0 * 24.0 * 3600.0;
 /// A session with no use for this long expires, in seconds (24 hours).
@@ -94,6 +105,13 @@ pub enum AuthError {
     /// No API token has this key.
     #[error("API token `{0}` not found")]
     TokenNotFound(String),
+    /// The API token key is malformed. The message never repeats the input: a pasted
+    /// `key:secret` must not leak its secret.
+    #[error("invalid API token key: must be 32 lowercase hex characters")]
+    InvalidTokenKey,
+    /// The user is disabled, so no API token can be created for it.
+    #[error("user `{0}` is disabled")]
+    UserDisabled(String),
     /// Hashing or verifying a password failed for a reason other than a wrong password.
     #[error("password hashing failed")]
     Hash,
@@ -242,14 +260,22 @@ fn hash_blocking(password: &[u8]) -> Result<String, AuthError> {
     Ok(hash.to_string())
 }
 
-/// A hash of a random password nobody knows, verified for unknown and disabled users so that
-/// they cost the same time as a real check. Computed once.
-fn dummy_hash() -> &'static str {
-    static DUMMY: OnceLock<String> = OnceLock::new();
-    DUMMY.get_or_init(|| {
-        let password = random_hex(32).unwrap_or_default();
-        hash_blocking(password.as_bytes()).unwrap_or_default()
-    })
+/// A hash of a constant password with a constant salt and the current parameters, verified for
+/// unknown and disabled users so that they cost the same time as a real check. It is not secret
+/// (it protects nothing, and [`verify_password`] never reports a match for it). Computed once;
+/// it is never empty: a failure to compute it is an error, not a cheap verification.
+fn dummy_hash() -> Result<&'static str, AuthError> {
+    static DUMMY: OnceLock<Option<String>> = OnceLock::new();
+    DUMMY
+        .get_or_init(|| {
+            argon2()
+                .ok()?
+                .hash_password_with_salt(b"forgebase dummy password", b"forgebase-dummy!")
+                .ok()
+                .map(|hash| hash.to_string())
+        })
+        .as_deref()
+        .ok_or(AuthError::Hash)
 }
 
 async fn hash_password(password: &str) -> Result<String, AuthError> {
@@ -265,16 +291,19 @@ async fn verify_password(password: &str, hash: Option<String>) -> Result<bool, A
     let password = password.to_owned();
     tokio::task::spawn_blocking(move || {
         let real = hash.is_some();
-        let hash = hash.unwrap_or_else(|| dummy_hash().to_owned());
+        let hash = match hash {
+            Some(hash) => hash,
+            None => dummy_hash()?.to_owned(),
+        };
         let matches = argon2().is_ok_and(|argon2| {
             argon2
                 .verify_password(password.as_bytes(), hash.as_str())
                 .is_ok()
         });
-        matches && real
+        Ok(matches && real)
     })
     .await
-    .map_err(|_| AuthError::Hash)
+    .map_err(|_| AuthError::Hash)?
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -451,14 +480,21 @@ async fn load_user(
 /// are other errors.
 ///
 /// **Lockout.** Failed attempts are counted per submitted username in `fb_login_failure`, also
-/// for names that do not exist. The fifth failure locks the username for 15 minutes and resets
-/// the counter; while it is locked every attempt fails without checking the password (the
+/// for names that do not exist. A failure counts with the previous ones only if the previous
+/// failure (`last_failure_at`) was at most 15 minutes ago; otherwise the count restarts at 1. The
+/// fifth failure in such a chain locks the username for 15 minutes and resets the counter; while it is locked every attempt fails without checking the password (the
 /// correct password too) and does not extend the lock. A successful login deletes the counter.
 /// The counting runs in a transaction of its own that holds the username's row lock until the
 /// outcome is known, so concurrent attempts for one username are serialized and cannot exceed
 /// the limit. The counting is committed even though the login fails. For that this function must
 /// get a pooled client, **not** a caller-owned transaction (see the module documentation).
-/// Rows for unknown usernames are not cleaned up automatically.
+/// Rows for unknown usernames are not cleaned up automatically (a later job may delete rows whose
+/// `last_failure_at` and `locked_until` are both older than 15 minutes: ADR 0010).
+///
+/// **Password change race.** The user row is read with `FOR SHARE` and kept locked until the
+/// session exists, so a concurrent [`set_password`] (or [`set_enabled`]) waits for this login to
+/// finish and then deletes its session, or has finished first and this login verifies against
+/// the new hash. A session authenticated with an old password therefore never survives.
 ///
 /// **Session.** A successful login always creates a new session (new token, new CSRF token);
 /// it is valid until 7 days after login, and expires earlier after
@@ -492,7 +528,7 @@ pub async fn login(
 
     let user = tx
         .query_opt(
-            "SELECT id, password_hash, enabled FROM fb_user WHERE username = $1",
+            "SELECT id, password_hash, enabled FROM fb_user WHERE username = $1 FOR SHARE",
             &[&username],
         )
         .await?;
@@ -503,12 +539,17 @@ pub async fn login(
     let verified = verify_password(password, hash).await?;
     let Some(id) = found.filter(|_| verified) else {
         tx.execute(
-            "UPDATE fb_login_failure SET \
-             failures = CASE WHEN failures + 1 >= $2 THEN 0 ELSE failures + 1 END, \
-             locked_until = CASE WHEN failures + 1 >= $2 \
-                 THEN now() + make_interval(secs => $3::float8) ELSE locked_until END \
-             WHERE username = $1",
-            &[&username, &MAX_FAILURES, &LOCK_SECS],
+            "UPDATE fb_login_failure f SET \
+             failures = CASE WHEN c.n >= $2 THEN 0 ELSE c.n END, \
+             locked_until = CASE WHEN c.n >= $2 \
+                 THEN now() + make_interval(secs => $3::float8) ELSE f.locked_until END, \
+             last_failure_at = now() \
+             FROM (SELECT username, \
+                 CASE WHEN last_failure_at > now() - make_interval(secs => $4::float8) \
+                      THEN failures ELSE 0 END + 1 AS n \
+                 FROM fb_login_failure WHERE username = $1) c \
+             WHERE f.username = c.username",
+            &[&username, &MAX_FAILURES, &LOCK_SECS, &FAILURE_WINDOW_SECS],
         )
         .await?;
         tx.commit().await?;
@@ -636,7 +677,8 @@ pub async fn logout(client: &impl GenericClient, token: &str) -> Result<bool, Au
 // ---------------------------------------------------------------------------------------------
 
 /// Creates an API token for a user. The secret is returned here only; the database keeps its
-/// SHA-256 digest. A token does not expire; revoke it with [`revoke_api_token`].
+/// SHA-256 digest. A token does not expire; revoke it with [`revoke_api_token`]. A disabled user
+/// gets no token ([`AuthError::UserDisabled`]); an unknown one is [`AuthError::UserNotFound`].
 pub async fn create_api_token(
     client: &impl GenericClient,
     username: &str,
@@ -650,13 +692,22 @@ pub async fn create_api_token(
                 "INSERT INTO fb_api_token (key, secret_hash, user_id) \
                  SELECT $1, ",
                 digest!("2"),
-                ", id FROM fb_user WHERE username = $3"
+                ", id FROM fb_user WHERE username = $3 AND enabled"
             ),
             &[&key, &secret, &username],
         )
         .await?;
     if inserted == 0 {
-        return Err(AuthError::UserNotFound(username.to_owned()));
+        // Nothing inserted: the user is unknown or disabled.
+        let exists = client
+            .query_opt("SELECT 1 FROM fb_user WHERE username = $1", &[&username])
+            .await?
+            .is_some();
+        return Err(if exists {
+            AuthError::UserDisabled(username.to_owned())
+        } else {
+            AuthError::UserNotFound(username.to_owned())
+        });
     }
     Ok(ApiTokenSecret { key, secret })
 }
@@ -689,8 +740,12 @@ pub async fn validate_api_token(
 }
 
 /// Revokes an API token. Revoking a revoked token succeeds; an unknown key is
-/// [`AuthError::TokenNotFound`].
+/// [`AuthError::TokenNotFound`]. A key of the wrong shape is [`AuthError::InvalidTokenKey`],
+/// checked first and without repeating the input (so a pasted `key:secret` leaks nothing).
 pub async fn revoke_api_token(client: &impl GenericClient, key: &str) -> Result<(), AuthError> {
+    if !is_hex(key, KEY_HEX_LEN) {
+        return Err(AuthError::InvalidTokenKey);
+    }
     let updated = client
         .execute(
             "UPDATE fb_api_token SET revoked_at = coalesce(revoked_at, now()) WHERE key = $1",
@@ -767,6 +822,22 @@ mod tests {
                 .is_err()
         );
         assert_ne!(hash, hash_blocking(b"correct horse").unwrap());
+    }
+
+    #[test]
+    fn the_dummy_hash_is_a_constant_valid_hash_with_the_current_parameters() {
+        let hash = dummy_hash().unwrap();
+        assert!(
+            hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{hash}"
+        );
+        assert_eq!(hash, dummy_hash().unwrap());
+        assert!(
+            argon2()
+                .unwrap()
+                .verify_password(b"forgebase dummy password", hash)
+                .is_ok()
+        );
     }
 
     #[test]
