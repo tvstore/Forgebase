@@ -136,3 +136,16 @@ export function parseFilters(text: string | null): FilterRow[] {
   }
   return rows;
 }
+
+/** Where keyboard focus goes after a filter row is removed or added. */
+export type FocusTarget = { kind: 'row'; index: number } | { kind: 'add' };
+
+/**
+ * After removing row `removed` of `count` rows: the row that took its place (the next one), or
+ * the one before it when the last row was removed, or the "Add filter" button when none is left.
+ */
+export function focusAfterRemove(removed: number, count: number): FocusTarget {
+  const remaining = count - 1;
+  if (remaining <= 0) return { kind: 'add' };
+  return { kind: 'row', index: Math.min(removed, remaining - 1) };
+}

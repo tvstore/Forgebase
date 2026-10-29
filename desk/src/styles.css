@@ -62,7 +62,8 @@ button,
   display: inline-block;
 }
 
-button:disabled {
+button:disabled,
+button[aria-disabled='true'] {
   cursor: not-allowed;
   opacity: 0.5;
 }
@@ -205,6 +206,12 @@ th button.sort {
 
 tbody th {
   font-weight: 600;
+}
+
+.loading {
+  min-height: 1.5em;
+  margin: 0.5rem 0;
+  color: #555;
 }
 
 .paging {

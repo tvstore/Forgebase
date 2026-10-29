@@ -275,11 +275,57 @@ async fn meta_needs_authentication_and_a_valid_host_and_takes_get_only() {
     assert_eq!(names(&reply.data()), ["holder", "item", "note"]);
 }
 
+/// `GET /session` as the desk sends it: with the header that marks a deliberate refresh.
+fn refresh(uri: &str) -> common::Req {
+    get(uri).header("X-Forgebase-CSRF", "refresh")
+}
+
+#[tokio::test]
+async fn the_session_route_needs_the_refresh_header_and_does_not_rotate_without_it() {
+    let env = env_with_users().await;
+    let login = env.login("clerk").await;
+    // Without the header, or with another value: 400 and nothing is rotated.
+    for request in [
+        get("/api/v1/session"),
+        get("/api/v1/session").header("X-Forgebase-CSRF", ""),
+        get("/api/v1/session").header("X-Forgebase-CSRF", "Refresh"),
+        get("/api/v1/session").header("X-Forgebase-CSRF", &login.csrf),
+    ] {
+        let reply = env.send(request.cookie(&login)).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text);
+        assert_eq!(reply.code(), "bad_request");
+        assert!(!reply.text.contains("csrf_token"));
+    }
+    // The old token still works.
+    let created = env
+        .send(
+            post("/api/v1/resource/item")
+                .session(&login)
+                .json(json!({"code": "R-1"})),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.text);
+    // With the header it rotates, and then the old token stops working.
+    let reply = env.send(refresh("/api/v1/session").cookie(&login)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    let stale = env
+        .send(
+            post("/api/v1/resource/item")
+                .session(&login)
+                .json(json!({"code": "R-2"})),
+        )
+        .await;
+    assert_eq!(stale.code(), "csrf_failed");
+    // Not logged in: still the uniform 401, header or not.
+    let reply = env.send(get("/api/v1/session")).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn the_session_route_rotates_the_csrf_token() {
     let env = env_with_users().await;
     let login = env.login("clerk").await;
-    let reply = env.send(get("/api/v1/session").cookie(&login)).await;
+    let reply = env.send(refresh("/api/v1/session").cookie(&login)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
     assert_eq!(reply.header("cache-control").as_deref(), Some("no-store"));
     assert!(reply.set_cookies().is_empty());
@@ -314,7 +360,10 @@ async fn the_session_route_rotates_the_csrf_token() {
     assert_eq!(new.status, StatusCode::CREATED, "{}", new.text);
 
     // Another call replaces it again; a GET with the old token is fine (GET needs none).
-    let second = env.send(get("/api/v1/session").cookie(&login)).await.data();
+    let second = env
+        .send(refresh("/api/v1/session").cookie(&login))
+        .await
+        .data();
     assert_ne!(second["csrf_token"].as_str(), Some(fresh.as_str()));
     let stale = env
         .send(
@@ -348,7 +397,7 @@ async fn the_session_route_needs_a_valid_cookie_session() {
     let env = env_with_users().await;
     // An API token has no session.
     let token = env.api_token("clerk").await;
-    let reply = env.send(get("/api/v1/session").token(&token)).await;
+    let reply = env.send(refresh("/api/v1/session").token(&token)).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert_eq!(reply.code(), "bad_request");
     assert!(!reply.text.contains("csrf_token"));
@@ -359,7 +408,7 @@ async fn the_session_route_needs_a_valid_cookie_session() {
     env.db
         .exec("UPDATE fb_session SET expires_at = now() - interval '1 second'")
         .await;
-    let reply = env.send(get("/api/v1/session").cookie(&absolute)).await;
+    let reply = env.send(refresh("/api/v1/session").cookie(&absolute)).await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
     assert_eq!(reply.code(), "unauthenticated");
 
@@ -367,12 +416,12 @@ async fn the_session_route_needs_a_valid_cookie_session() {
     env.db
         .exec("UPDATE fb_session SET last_seen_at = now() - interval '25 hours'")
         .await;
-    let reply = env.send(get("/api/v1/session").cookie(&idle)).await;
+    let reply = env.send(refresh("/api/v1/session").cookie(&idle)).await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
 
     let gone = env.login("biller").await;
     let out = env.send(post("/api/v1/logout").session(&gone)).await;
     assert_eq!(out.status, StatusCode::NO_CONTENT);
-    let reply = env.send(get("/api/v1/session").cookie(&gone)).await;
+    let reply = env.send(refresh("/api/v1/session").cookie(&gone)).await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
 }

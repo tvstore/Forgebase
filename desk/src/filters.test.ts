@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildFilters, opsFor, parseFilters } from './filters';
+import { buildFilters, focusAfterRemove, opsFor, parseFilters } from './filters';
 import type { FilterField, FilterRow } from './filters';
 import type { FieldType } from './types';
 
@@ -147,5 +147,20 @@ describe('parseFilters', () => {
     for (const text of [null, '', 'nope', '{}', '"x"', '[1]', '[null]', '[{"field":1,"op":"="}]', '[{"field":"a","op":"drop"}]']) {
       expect(parseFilters(text), String(text)).toEqual([]);
     }
+  });
+});
+
+describe('focusAfterRemove', () => {
+  it('moves to the row that took the place of the removed one', () => {
+    expect(focusAfterRemove(0, 3)).toEqual({ kind: 'row', index: 0 });
+    expect(focusAfterRemove(1, 3)).toEqual({ kind: 'row', index: 1 });
+  });
+
+  it('moves to the previous row when the last one was removed', () => {
+    expect(focusAfterRemove(2, 3)).toEqual({ kind: 'row', index: 1 });
+  });
+
+  it('moves to "Add filter" when no row remains', () => {
+    expect(focusAfterRemove(0, 1)).toEqual({ kind: 'add' });
   });
 });

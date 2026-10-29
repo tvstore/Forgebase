@@ -89,7 +89,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Check the Node version
-        run: node -e 'if (Number(process.versions.node.split(".")[0]) < 20) { console.error("Node 20 or newer is required, found " + process.version); process.exit(1); }'
+        run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
+      # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck

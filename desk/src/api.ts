@@ -40,6 +40,8 @@ interface Options {
   body?: unknown;
   /** The request is allowed to be 401 without meaning "the session ended" (login, session probe). */
   expectUnauthenticated?: boolean;
+  /** `GET /api/v1/session` only: the header that marks a deliberate refresh of the CSRF token. */
+  refresh?: boolean;
   /** Internal: this request is the retry after a CSRF refresh. */
   retried?: boolean;
 }
@@ -68,6 +70,14 @@ async function refreshCsrf(): Promise<void> {
   // One refresh at a time: two parallel refreshes would invalidate each other's token.
   refreshing ??= getSession()
     .then(() => undefined)
+    .catch((e: unknown) => {
+      // No session any more: the same as any other 401, so the user lands on the login page.
+      if (e instanceof ApiError && e.status === 401) {
+        csrfToken = null;
+        onUnauthenticated?.();
+      }
+      throw e;
+    })
     .finally(() => {
       refreshing = null;
     });
@@ -79,6 +89,9 @@ async function request<T>(method: string, path: string, options: Options = {}): 
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   // Only changing requests carry the token; a GET never needs it.
   if (method !== 'GET' && csrfToken !== null) headers[CSRF_HEADER] = csrfToken;
+  // The server rotates the token only for this header, which a navigation or an <img> of
+  // another site cannot send.
+  if (options.refresh) headers[CSRF_HEADER] = 'refresh';
 
   const response = await fetch(path, {
     method,
@@ -119,6 +132,7 @@ export async function login(username: string, password: string): Promise<Session
 export async function getSession(): Promise<SessionInfo> {
   const session = await request<SessionInfo>('GET', '/api/v1/session', {
     expectUnauthenticated: true,
+    refresh: true,
   });
   csrfToken = session.csrf_token;
   return session;

@@ -23,7 +23,17 @@ interface Props {
 }
 
 type MetaState = { doctype: string; meta?: DocTypeMeta; error?: string };
-type RowsState = { key: string; rows?: DocumentRow[]; error?: string };
+/**
+ * The last answer. `rows` stay on screen (and keep the keyboard focus on the controls) while the
+ * next request loads; `offset` is the offset they belong to; `error` is that of request `key`.
+ */
+type RowsState = {
+  doctype: string;
+  key: string;
+  offset: number;
+  rows?: DocumentRow[];
+  error?: string;
+};
 
 const message = (e: unknown): string =>
   e instanceof ApiError ? e.message : 'Cannot reach the server.';
@@ -71,10 +81,16 @@ export function List({ doctype, params }: Props) {
       offset,
     }).then(
       (rows) => {
-        if (!cancelled) setRowsState({ key, rows });
+        if (!cancelled) setRowsState({ doctype, key, offset, rows });
       },
       (e: unknown) => {
-        if (!cancelled) setRowsState({ key, error: message(e) });
+        if (cancelled) return;
+        // Keep the rows of the last answer, so the controls stay where they are.
+        setRowsState((last) => ({
+          ...(last?.doctype === doctype ? last : { doctype, offset, rows: undefined }),
+          key,
+          error: message(e),
+        }));
       },
     );
     return () => {
@@ -103,9 +119,12 @@ export function List({ doctype, params }: Props) {
     );
   }
 
-  const current = rowsState?.key === key ? rowsState : null;
-  const shown = current?.rows?.slice(0, PAGE_SIZE) ?? [];
-  const hasNext = (current?.rows?.length ?? 0) > PAGE_SIZE;
+  // The last answer for this DocType stays on screen while a new request loads.
+  const answer = rowsState?.doctype === doctype ? rowsState : null;
+  const loading = answer?.key !== key;
+  const shown = answer?.rows?.slice(0, PAGE_SIZE) ?? [];
+  const shownOffset = answer?.offset ?? offset;
+  const hasNext = (answer?.rows?.length ?? 0) > PAGE_SIZE;
 
   return (
     <main>
@@ -119,21 +138,24 @@ export function List({ doctype, params }: Props) {
       </div>
 
       <FilterBar
-        key={filtersText ?? ''}
+        initialKey={filtersText ?? ''}
         fields={fields}
         initial={parseFilters(filtersText)}
         onApply={(next) => go({ ...state, filters: next, offset: 0 })}
       />
 
-      {current?.error ? (
+      {!loading && answer?.error ? (
         <p role="alert" className="error">
-          {current.error}
+          {answer.error}
         </p>
       ) : null}
-      {current === null ? <p>Loading...</p> : null}
+      {/* Always in the page, so that a screen reader announces the change. */}
+      <p role="status" aria-live="polite" className="loading">
+        {loading ? 'Loading...' : ''}
+      </p>
 
-      {current?.rows ? (
-        shown.length === 0 && offset === 0 ? (
+      {answer?.rows ? (
+        shown.length === 0 && shownOffset === 0 ? (
           <p>No documents.</p>
         ) : (
           <div className="table-wrap">
@@ -147,7 +169,7 @@ export function List({ doctype, params }: Props) {
                       <th
                         key={column.key}
                         scope="col"
-                        aria-sort={sorted ? (state.sort.desc ? 'descending' : 'ascending') : 'none'}
+                        aria-sort={sorted ? (state.sort.desc ? 'descending' : 'ascending') : undefined}
                       >
                         <button
                           type="button"
@@ -155,7 +177,9 @@ export function List({ doctype, params }: Props) {
                           onClick={() => go({ ...state, sort: nextSort(state.sort, column.key), offset: 0 })}
                         >
                           {column.label}
-                          {sorted ? (state.sort.desc ? ' ▼' : ' ▲') : ''}
+                          {sorted ? (
+                            <span aria-hidden="true">{state.sort.desc ? ' ▼' : ' ▲'}</span>
+                          ) : null}
                         </button>
                       </th>
                     );
@@ -186,11 +210,27 @@ export function List({ doctype, params }: Props) {
       ) : null}
 
       <nav className="paging" aria-label="Pages">
-        <button type="button" disabled={offset === 0} onClick={() => go({ ...state, offset: Math.max(0, offset - PAGE_SIZE) })}>
+        {/* aria-disabled, not disabled: the button that was just used may become unavailable
+            (the first or last page) and must keep the keyboard focus. */}
+        <button
+          type="button"
+          aria-disabled={offset === 0}
+          onClick={() => {
+            if (offset > 0) go({ ...state, offset: Math.max(0, offset - PAGE_SIZE) });
+          }}
+        >
           Previous
         </button>
-        <span>{shown.length === 0 ? 'No rows' : `Rows ${offset + 1}–${offset + shown.length}`}</span>
-        <button type="button" disabled={!hasNext} onClick={() => go({ ...state, offset: offset + PAGE_SIZE })}>
+        <span>
+          {shown.length === 0 ? 'No rows' : `Rows ${shownOffset + 1}–${shownOffset + shown.length}`}
+        </span>
+        <button
+          type="button"
+          aria-disabled={!hasNext}
+          onClick={() => {
+            if (hasNext) go({ ...state, offset: offset + PAGE_SIZE });
+          }}
+        >
           Next
         </button>
       </nav>

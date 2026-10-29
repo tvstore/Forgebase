@@ -7,7 +7,7 @@ Workflow, approval gates, git safety and review rules are defined only in [AGENT
 - [rustup](https://rustup.rs/). The toolchain (1.99.1, with rustfmt and clippy) is selected automatically from `rust-toolchain.toml`.
 - For the MSRV check: `rustup toolchain install 1.97 --profile minimal`.
 - For the dependency check: `cargo install --locked cargo-deny --version 0.20.2`.
-- For the desk (`desk/`): Node.js 20 or newer with npm.
+- For the desk (`desk/`): Node.js `^20.19.0 || >=22.12.0` (Vite 8) with npm. `desk/.npmrc` sets `ignore-scripts=true`, so `npm ci` runs no install scripts of dependencies.
 
 ## Local checks
 

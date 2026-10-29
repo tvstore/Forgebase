@@ -11,6 +11,10 @@
 //   (minimatch) and CC-BY-4.0 (caniuse-lite, browser data used by build tools).
 // - A package with no license, a license expression or any other license fails the check.
 //
+// Limit: the lockfile "dev" flag is only as good as the imports. A dev-only package that is
+// imported from src/ would be bundled into the shipped desk although it is flagged dev here.
+// Reviewers check the imports in src/; there is deliberately no scanner of dist/.
+//
 // It also enforces an owner decision: the only runtime dependencies are react and react-dom.
 
 import { readFileSync } from 'node:fs';

@@ -26,7 +26,7 @@
 //! |---|---|
 //! | `POST /login` | 200 `{"data": {"username", "roles", "csrf_token"}}` and `Set-Cookie` |
 //! | `POST /logout` (cookie session only) | 204, cookie cleared |
-//! | `GET /session` (cookie session only) | 200 `{"data": {"username", "roles", "csrf_token"}}`, a **new** CSRF token (the old one stops working) |
+//! | `GET /session` (cookie session only, header `X-Forgebase-CSRF: refresh`, else 400) | 200 `{"data": {"username", "roles", "csrf_token"}}`, a **new** CSRF token (the old one stops working) |
 //! | `GET /meta` | 200 `{"data": [{"name", "label", "submittable", "rights"}]}`: the DocTypes the caller can read |
 //! | `GET /meta/{doctype}` | 200 `{"data": {"name", "label", "naming", "submittable", "fields", "rights"}}` |
 //! | `GET /resource/{doctype}` (`filters`, `sort`, `limit`, `offset`) | 200 `{"data": [..]}` |

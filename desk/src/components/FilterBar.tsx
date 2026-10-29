@@ -1,13 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 
-import { NO_VALUE_OPS, buildFilters, opsFor } from '../filters';
-import type { FilterField, FilterRow, Op } from '../filters';
+import { NO_VALUE_OPS, buildFilters, focusAfterRemove, opsFor } from '../filters';
+import type { FilterField, FilterRow, FocusTarget, Op } from '../filters';
 
 interface Props {
   fields: FilterField[];
-  /** The rows of the address. The parent changes `key` when they change. */
+  /** The rows of the address; when `initialKey` changes the bar starts again from them. */
   initial: FilterRow[];
+  /** Identifies `initial` (the `filters` text of the address). */
+  initialKey: string;
   /** Called with the `filters` JSON text, or null for no filter. */
   onApply: (filters: string | null) => void;
 }
@@ -22,9 +24,29 @@ function newRow(fields: FilterField[]): FilterRow | null {
 }
 
 /** A filter bar: add and remove rows of field, operator and value; Apply builds the JSON. */
-export function FilterBar({ fields, initial, onApply }: Props) {
+export function FilterBar({ fields, initial, initialKey, onApply }: Props) {
   const [rows, setRows] = useState<FilterRow[]>(initial);
   const [error, setError] = useState<string | null>(null);
+  // Follow the address (back button, a new link) without remounting the form, which would drop
+  // the keyboard focus: adjust the state while rendering when `initialKey` changed.
+  const [seenKey, setSeenKey] = useState(initialKey);
+  if (seenKey !== initialKey) {
+    setSeenKey(initialKey);
+    setRows(initial);
+    setError(null);
+  }
+
+  // Keyboard focus after Remove (its button is gone) and Add filter.
+  const form = useRef<HTMLFormElement>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const focusTarget = useRef<FocusTarget | null>(null);
+  useEffect(() => {
+    const target = focusTarget.current;
+    focusTarget.current = null;
+    if (target === null) return;
+    if (target.kind === 'add') addButton.current?.focus();
+    else form.current?.querySelector<HTMLElement>(`[data-row="${target.index}"] select`)?.focus();
+  }, [rows]);
 
   const change = (index: number, patch: Partial<FilterRow>) =>
     setRows((current) => current.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -33,6 +55,11 @@ export function FilterBar({ fields, initial, onApply }: Props) {
     const field = fields.find((f) => f.name === name);
     const op = field ? opsFor(field.type)[0] : undefined;
     if (field && op) change(index, { field: name, op, value: defaultValue(field) });
+  };
+
+  const remove = (index: number) => {
+    focusTarget.current = focusAfterRemove(index, rows.length);
+    setRows((current) => current.filter((_, i) => i !== index));
   };
 
   const submit = (event: FormEvent) => {
@@ -48,18 +75,20 @@ export function FilterBar({ fields, initial, onApply }: Props) {
 
   const add = () => {
     const row = newRow(fields);
-    if (row) setRows((current) => [...current, row]);
+    if (!row) return;
+    focusTarget.current = { kind: 'row', index: rows.length };
+    setRows((current) => [...current, row]);
   };
 
   return (
-    <form className="filters" onSubmit={submit}>
+    <form className="filters" ref={form} onSubmit={submit}>
       <fieldset>
         <legend>Filters</legend>
         {rows.map((row, index) => {
           const field = fields.find((f) => f.name === row.field);
           const number = index + 1;
           return (
-            <div className="filter-row" key={index}>
+            <div className="filter-row" key={index} data-row={index}>
               <select
                 aria-label={`Filter ${number} field`}
                 value={row.field}
@@ -98,7 +127,7 @@ export function FilterBar({ fields, initial, onApply }: Props) {
               <button
                 type="button"
                 aria-label={`Remove filter ${number}`}
-                onClick={() => setRows((current) => current.filter((_, i) => i !== index))}
+                onClick={() => remove(index)}
               >
                 Remove
               </button>
@@ -106,7 +135,7 @@ export function FilterBar({ fields, initial, onApply }: Props) {
           );
         })}
         <div className="filter-actions">
-          <button type="button" onClick={add}>
+          <button type="button" ref={addButton} onClick={add}>
             Add filter
           </button>
           <button type="submit" className="primary">

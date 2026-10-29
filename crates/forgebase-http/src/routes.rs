@@ -7,7 +7,7 @@ use axum::Json as AxumJson;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::header::SET_COOKIE;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::DocType;
@@ -202,7 +202,24 @@ pub async fn logout(State(state): State<AppState>, authenticated: Authenticated)
 /// working, and a request that fails with `csrf_failed` can call this once and retry. Safe
 /// because the response cannot be read cross-origin (no CORS) and the cookie is `SameSite=Lax`.
 /// An API token has no session: 400.
-pub async fn session(State(state): State<AppState>, authenticated: Authenticated) -> Reply {
+///
+/// The request must carry `X-Forgebase-CSRF: refresh`, else 400 `bad_request` and nothing is
+/// rotated. A navigation or an `<img>` cannot send a custom header, and a cross-origin `fetch`
+/// with it needs a preflight, which this server answers with 405 and no CORS headers; so a
+/// foreign page cannot make the desk's in-memory token stop working.
+pub async fn session(
+    State(state): State<AppState>,
+    authenticated: Authenticated,
+    headers: HeaderMap,
+) -> Reply {
+    let marked = headers
+        .get("x-forgebase-csrf")
+        .is_some_and(|v| v.as_bytes() == b"refresh");
+    if !marked {
+        return Err(ApiError::bad_request(
+            "this request needs the header X-Forgebase-CSRF: refresh",
+        ));
+    }
     let Credential::Session(token) = &authenticated.credential else {
         return Err(ApiError::bad_request(
             "a session needs a cookie; an API token has none",

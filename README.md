@@ -207,7 +207,7 @@ Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message"
 The desk is a React + TypeScript app in `desk/` (no UI component library; only `react` and `react-dom` at runtime). `forgebase serve` serves the **built** desk on the same origin when `FORGEBASE_DESK_DIR` is set (unset: no desk, `/desk/*` is a 404). M4.1 has the login page, the list of DocTypes the user can read and a list view per DocType (paging, sorting, filters). The form view arrives in M4.2.
 
 ```sh
-# Build the desk (Node.js 20 or newer): writes desk/dist
+# Build the desk (Node.js ^20.19.0 || >=22.12.0; desk/.npmrc ignores dependency install scripts): writes desk/dist
 cd desk && npm ci && npm run build && cd ..
 
 # Run it with the API from the HTTP API section above (a user and the tables must exist), then open http://localhost:8000/desk/

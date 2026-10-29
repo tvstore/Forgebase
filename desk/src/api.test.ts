@@ -138,6 +138,28 @@ describe('the CSRF token', () => {
     expect(posts).toBe(2);
   });
 
+  it('is requested with the refresh marker header, which the server requires', async () => {
+    setCsrfToken('old');
+    mockFetch(() => session('new'));
+    await getSession();
+    expect(calls[0]?.url).toBe('/api/v1/session');
+    expect(header(calls[0], 'X-Forgebase-CSRF')).toBe('refresh');
+  });
+
+  it('sends the user to the login page when the refresh itself is a 401', async () => {
+    setCsrfToken('stale');
+    const handler = vi.fn();
+    setUnauthenticatedHandler(handler);
+    mockFetch((url) =>
+      url === '/api/v1/session'
+        ? json(401, { error: { code: 'unauthenticated', message: 'authentication required' } })
+        : csrfFailed(),
+    );
+    const error = await logout().catch((e: unknown) => e);
+    expect(error).toMatchObject({ status: 401 });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it('is retried only once, then the error is reported', async () => {
     setCsrfToken('stale');
     mockFetch((url) => (url === '/api/v1/session' ? session('still-wrong') : csrfFailed()));

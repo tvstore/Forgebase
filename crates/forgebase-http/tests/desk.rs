@@ -12,8 +12,9 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
                    img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; \
                    base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
-/// A throwaway desk directory, removed on drop. `secret.txt` sits next to the desk directory, in
-/// its parent, which no request may ever reach.
+/// A throwaway desk directory, removed on drop. `secret.txt` and `secret.js` (an allowed
+/// extension) sit next to the desk directory, in its parent, which no request may ever reach;
+/// `index.js` and `top.js` sit in the desk root, outside `assets/`, which is not served either.
 struct DeskDir {
     root: PathBuf,
     desk: PathBuf,
@@ -31,6 +32,9 @@ impl DeskDir {
         let desk = root.join("dist");
         std::fs::create_dir_all(desk.join("assets/dir.js")).expect("directories");
         std::fs::write(root.join("secret.txt"), "TOP SECRET").expect("secret");
+        std::fs::write(root.join("secret.js"), "TOP SECRET").expect("secret js");
+        std::fs::write(desk.join("index.js"), "NOT AN ASSET").expect("root js");
+        std::fs::write(desk.join("top.js"), "NOT AN ASSET").expect("root js");
         std::fs::write(
             desk.join("index.html"),
             "<!doctype html><title>desk</title>",
@@ -135,6 +139,23 @@ async fn only_the_allow_list_is_served() {
     let env = dir.env().await;
     let hostile = [
         // Traversal in every spelling.
+        "/desk/assets/../secret.js",
+        "/desk/assets/../../secret.js",
+        "/desk/assets/%2e%2e%2fsecret.js",
+        "/desk/assets/%2E%2E%2Fsecret.js",
+        "/desk/assets/..%2fsecret.js",
+        "/desk/assets/a%2f..%2f..%2fsecret.js",
+        "/desk/assets/dir.js%2f..%2f..%2f..%2fsecret.js",
+        "/desk/assets/..%5csecret.js",
+        "/desk/assets/%2e%2e%5csecret.js",
+        "/desk/assets/..\\secret.js",
+        "/desk/assets/%2e%2e/secret.js",
+        "/desk/assets/..%2findex.js",
+        "/desk/assets/..%2f..%2fsecret.js",
+        "/desk/index.js",
+        "/desk/top.js",
+        "/desk/assets/../index.js",
+        "/desk/assets/../top.js",
         "/desk/assets/../secret.txt",
         "/desk/assets/../../secret.txt",
         "/desk/assets/%2e%2e/secret.txt",
