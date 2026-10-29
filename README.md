@@ -1,3 +1,13 @@
+<p align="center"><img src="docs/assets/logo-banner.svg" alt="Forgebase" width="480"></p>
+
+<p align="center"><strong>The foundation for business applications.</strong></p>
+
+<p align="center">
+  <img src="docs/assets/badge-rust-powered.svg" alt="Rust-powered">
+  <img src="docs/assets/badge-metadata-driven.svg" alt="Metadata-driven">
+  <img src="docs/assets/badge-full-stack.svg" alt="Full-stack">
+</p>
+
 # Forgebase
 
 Forgebase is a Rust framework for building business applications, inspired by the concepts and capabilities of the Frappe Framework. It is an independent implementation: no Frappe code is copied.
@@ -20,7 +30,7 @@ The repository is currently **private**. It is intended to be open source under 
 | [docs/blueprint/architecture.md](docs/blueprint/architecture.md) | Architecture (partly Accepted, mostly Proposed): crates, metadata, lifecycle, API, jobs, multi-site |
 | [docs/blueprint/dependency-evaluation.md](docs/blueprint/dependency-evaluation.md) | Rust dependency comparison, licenses, recommendations |
 | [docs/blueprint/security-model.md](docs/blueprint/security-model.md) | Authentication, authorization, injection defense, isolation |
-| [docs/blueprint/milestones.md](docs/blueprint/milestones.md) | M0 to M5 and later work, with exit criteria |
+| [docs/blueprint/milestones.md](docs/blueprint/milestones.md) | M0 to M10 (roadmap) and later work, with exit criteria |
 | [docs/blueprint/maintenance-policy.md](docs/blueprint/maintenance-policy.md) | Toolchain, dependency admission, testing, docs and review rules |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Prerequisites and local checks |
 | [examples/doctypes/](examples/doctypes/customer.toml) | Example DocTypes used by the quick start (a link, a child table) |
