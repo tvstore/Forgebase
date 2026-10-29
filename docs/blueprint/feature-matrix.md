@@ -54,16 +54,33 @@ Frappe URLs below are shortened: `fw/` = `https://docs.frappe.io/framework/user/
 | Permission levels, User Permissions, sharing | permlevel field groups; record filters by linked value; per-document sharing (DocShare, Unverified). Matching rules unverified. | Source-indexed: `fw/basics/users-and-permissions`, `https://docs.frappe.io/framework/get_query`; rules Unverified | Undecided | Phase 2, separate decision (Later); decide when the related milestone is planned. |
 | REST API | `/api/resource/{doctype}` CRUD with filters, paging (default 20); `/api/v1/` from v15. | Source-indexed: `fw/api/rest` | Implemented in M3.3 | `/api/v1/resource/{doctype}` (list with `filters`, `sort`, `limit`, `offset`; create; get; `PATCH` with `version`; `DELETE`; `submit`, `cancel`, `amend`); versioned prefix from day one; JSON only; error envelope; default page limit 20 with hard maximum 500. See [architecture, section 7](architecture.md#7-api-rest-resource-api-implemented-in-m33-the-rest-proposed). |
 | Whitelisted methods | `/api/method/{dotted.path}` for `@frappe.whitelist()` functions; no automatic DocType permission check. | Source-indexed: `https://docs.frappe.io/framework-git/security/security-best-practices` | Intentional difference | `/api/v1/method/{name}` for explicitly registered endpoints that must declare required permission. No RPC-by-dotted-path. Deferred by the owner: not implemented in M3.3 (404). |
-| Background jobs | Python RQ + Redis; `frappe.enqueue(...)`; queues short/default/long; `enqueue_after_commit`. | Source-indexed: `fw/api/background_jobs` | Planned (M5) | Postgres `SKIP LOCKED` queue; see [architecture, section 8](architecture.md#8-background-jobs-scheduler-realtime). No Redis. |
-| Scheduler | `scheduler_events` (hourly, daily, cron, ...) synced to Scheduled Job Type; long-running process enqueues jobs. | Source-indexed: `fw/api/background_jobs`, `fw/python-api/hooks` | Planned (M5) | Cron-like table, leader via Postgres advisory lock. |
+| Background jobs | Python RQ + Redis; `frappe.enqueue(...)`; queues short/default/long; `enqueue_after_commit`. | Source-indexed: `fw/api/background_jobs` | Planned (M6) | Postgres `SKIP LOCKED` queue; see [architecture, section 8](architecture.md#8-background-jobs-scheduler-realtime). No Redis. |
+| Scheduler | `scheduler_events` (hourly, daily, cron, ...) synced to Scheduled Job Type; long-running process enqueues jobs. | Source-indexed: `fw/api/background_jobs`, `fw/python-api/hooks` | Planned (M6) | Cron-like table, leader via Postgres advisory lock. |
 | Realtime | Node.js socket.io server fed via Redis pub/sub; `frappe.publish_realtime`. | Source-indexed: `fw/api/realtime` | Undecided | Deferred; decide when the related milestone is planned. Option: LISTEN/NOTIFY to SSE/WebSocket in the same binary. No Node, no Redis. |
 | Desk | Metadata-driven admin SPA: list, form, report views; timeline. | Source-indexed: `fw/desk`, `fw/api/list` | Planned (M4) | Minimal generic list + form in React + TS. UI library Undecided (decide in M4). |
 | Reports | Report Builder (no-code), Query Report (SQL), Script Report (Python). | Source-indexed: `fw/desk/reports/report-builder`, `.../query-report`, `.../script-report` | Not a priority | Proposed: saved list views/filters first; SQL query reports later with a read-only DB role; script reports: Out of scope ([architecture, section 11](architecture.md#11-desk-reports-workflow)). |
-| Workflows | Per-DocType states and transitions with roles and conditions, mapped onto docstatus. | Source-indexed: `erp/user/manual/en/workflows`, `erp/workflow` | Not a priority | After M5. |
+| Workflows | Per-DocType states and transitions with roles and conditions, mapped onto docstatus. | Source-indexed: `erp/user/manual/en/workflows`, `erp/workflow` | Not a priority | After M8 (workflow and reports). |
 | Version history | "Track Changes" writes `Version` records; Audit Trail across amendments. | Source-indexed: `erp/user/manual/en/document-versioning`, `fw/audit-trail` | Not a priority | `owner/modified_by/modified_at` from day one; full history deferred. |
 | Multi-site | One bench serves many sites; each site has its own database and `site_config.json`; `dns_multitenant` picks site by hostname. | Source-indexed: `fw/basics/site_config`, `https://docs.frappe.io/framework-git/administration/site-config`, `fw/bench/frappe-commands` | Undecided | Lean: database-per-site; decide before the multi-site milestone. See [architecture, section 9](architecture.md#9-multi-site-undecided). |
 | Server Scripts | Admin-editable Python/DocType Event scripts stored as DocTypes. | Source-indexed: `fwo/desk/scripting/server-script` | Out of scope | Runtime user code is a security and versioning burden. |
 | Database support | MariaDB primary; PostgreSQL status in the framework not confirmed by official docs. | Mostly Unverified (forum-sourced); `https://docs.frappe.io/books/installation` covers Frappe Books only | Intentional difference | PostgreSQL only ([ADR 0003](../adr/0003-postgresql-only.md)). |
+
+## Roadmap by capability
+
+The [Project Goal](vision.md#project-goal) lists ten core capabilities, delivered incrementally. Milestones after M3 are Proposed ([milestones](milestones.md)).
+
+| # | Capability | Milestones |
+|---|---|---|
+| 1 | App and site management | M7 |
+| 2 | Metadata-driven development | M1 to M2 (done) |
+| 3 | Document engine | M2 (done) |
+| 4 | Database and migrations | M1 (done) |
+| 5 | Security and permissions | M3 (done), M10 |
+| 6 | API and integration | M3 (done), M9 |
+| 7 | Frontend and Desk | M4 |
+| 8 | Business features (workflow, reports, jobs, scheduler, realtime as needed) | M6, M8; realtime on demand |
+| 9 | Developer experience | M5 |
+| 10 | Extensibility without core complexity | M5, M10 |
 
 ## Open verification questions
 

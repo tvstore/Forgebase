@@ -1,6 +1,39 @@
 # Vision
 
-Status: Proposed (awaiting owner review). Workflow and model policy: [AGENTS.md](../../AGENTS.md).
+Status: the Project Goal section is **Accepted (owner decision 2026-10-29)**; the other sections are Proposed (awaiting owner review). Workflow and model policy: [AGENTS.md](../../AGENTS.md).
+
+## Project Goal
+
+Accepted (owner decision 2026-10-29).
+
+**Vision.** Forgebase is intended to be an open-source (MIT) Rust framework for business applications, with full-stack capabilities comparable to the Frappe Framework (backend, frontend/Desk, developer tools and runtime) that stays simple, secure, modular and maintainable. The repository is private for now; it is not open source yet.
+
+**Main goal.** Developers build, extend, customize and operate business apps without rebuilding the foundations: metadata, database, authentication, permissions, API, UI, workflow and reporting.
+
+**Core capabilities** (delivered incrementally; milestone mapping in the [feature matrix](feature-matrix.md#roadmap-by-capability)):
+
+1. App and site management.
+2. Metadata-driven development.
+3. Document engine.
+4. Database and migrations.
+5. Security and permissions.
+6. API and integration.
+7. Frontend and Desk.
+8. Business features: workflow, reports, jobs, scheduler, realtime as needed.
+9. Developer experience: CLI, testing tools, docs, scaffolding.
+10. Extensibility without growing core complexity.
+
+**Success criteria.** A developer can:
+
+1. create and run a business app without building the foundation;
+2. define data and document behavior through metadata;
+3. manage data with consistent permissions and validation;
+4. use backend and frontend as one framework;
+5. add features without changing the core excessively;
+6. test, upgrade and maintain apps through a documented process;
+7. understand the framework without learning systems they do not need.
+
+**Strategy.** Research, blueprint, minimal implementation, tests, evaluation. Frappe is a behavioral reference, never a code source; intentional differences are allowed; scope expands only on validated needs.
 
 ## Purpose
 
@@ -30,7 +63,7 @@ These are assumptions, not validated research:
 - Server Scripts or admin-authored code stored in the database.
 - Microservices, Redis, a separate realtime server, GraphQL.
 - Supporting databases other than PostgreSQL.
-- Domain applications (accounting, ERP modules). Forgebase is the framework only.
+- Domain applications (accounting, ERP modules). Forgebase is the framework only; a small example app that validates the framework is allowed.
 
 The full list of what is deliberately not built is in [architecture](architecture.md#what-we-deliberately-do-not-build).
 

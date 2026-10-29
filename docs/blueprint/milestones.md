@@ -9,8 +9,15 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 | M2 | Relationships and lifecycle |
 | M3 | Auth, permissions, REST API |
 | M4 | Minimal Desk |
-| M5 | Jobs and scheduler |
+| M5 | App model and developer experience |
+| M6 | Jobs and scheduler |
+| M7 | Site management |
+| M8 | Workflow and reports |
+| M9 | Integration |
+| M10 | Customization |
 | Later | Items that each need their own plan |
+
+M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29, toward the [Project Goal](vision.md#project-goal)); the order is a proposal and every milestone is still **Proposed**. The jobs, scheduler and outbox milestone was renumbered from M5 to M6 on 2026-10-29; earlier documents (the ADRs) that say "M5" for jobs, the scheduler or the outbox mean M6. Realtime is on demand and not scheduled. Which capability each milestone serves: [feature matrix](feature-matrix.md#roadmap-by-capability).
 
 ## M0 Foundations
 
@@ -63,12 +70,42 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 - **Exit criteria:** a user can log in and list/create/edit a DocType document through the UI. (Detailed criteria to be set in the M4 plan.)
 - **Non-goals:** reports, workflow UI, realtime, custom pages, theming.
 
-## M5 Jobs and scheduler
+## M5 App model and developer experience
 
-- **Scope:** `SKIP LOCKED` queue, `forgebase worker`, scheduler with advisory-lock leader election, transactional outbox.
-- **Exit criteria:** (to be set in the M5 plan) at minimum tests for at-least-once delivery, retry/backoff, crashed-worker lease recovery and a single active scheduler leader.
+- **Scope:** a `forgebase new-app` template; one small example business app as a separate crate (DocTypes, hooks, permissions) that validates the framework, not a domain product; app test helpers; a "first app" guide.
+- **Exit criteria:** (to be set in the M5 plan) a developer follows the guide and gets a running app with tests, without touching framework crates. Proves success criteria 1 and 5 of the [Project Goal](vision.md#project-goal); capabilities 9 and 10.
+- **Non-goals:** runtime plugins ([ADR 0006](../adr/0006-extension-model.md)), domain modules beyond the small example.
+
+## M6 Jobs and scheduler
+
+- **Scope:** `SKIP LOCKED` queue, `forgebase worker`, scheduler with advisory-lock leader election, transactional outbox. Capability 8.
+- **Exit criteria:** (to be set in the M6 plan) at minimum tests for at-least-once delivery, retry/backoff, crashed-worker lease recovery and a single active scheduler leader.
 - **Non-goals:** Redis, a separate jobs service, realtime.
+
+## M7 Site management
+
+- **Scope:** site configuration file; the multi-site database decision (lean: database per site, see [architecture, section 9](architecture.md)); per-site app install; backups. Capability 1.
+- **Exit criteria:** (to be set in the M7 plan) tests for site isolation.
+- **Non-goals:** runtime app install ([ADR 0006](../adr/0006-extension-model.md)).
+
+## M8 Workflow and reports
+
+- **Scope:** per-DocType workflow mapped onto docstatus; saved list views and read-only reports ([architecture, section 11](architecture.md#11-desk-reports-workflow)). Capability 8.
+- **Exit criteria:** (to be set in the M8 plan).
+- **Non-goals:** script reports, Server Scripts.
+
+## M9 Integration
+
+- **Scope:** `/api/v1/method` for registered endpoints, webhooks through the outbox, import/export, fixtures. Capability 6.
+- **Exit criteria:** (to be set in the M9 plan) including authorization tests for every method endpoint.
+- **Non-goals:** GraphQL, RPC by dotted path.
+
+## M10 Customization
+
+- **Scope:** custom-field overlay, field-level permissions, user permissions. Capabilities 5 and 10.
+- **Exit criteria:** (to be set in the M10 plan) extends the authorization test matrix; schema sync stays aware of the overlay.
+- **Non-goals:** a Customize Form UI before a real need.
 
 ## Later
 
-Each item needs its own plan and approval: multi-site, custom-field overlay, field-level permissions / user permissions / sharing, reports, workflow, realtime, fixtures and import/export, file attachments.
+Each item needs its own plan and approval: realtime (on demand), sharing, file attachments.
