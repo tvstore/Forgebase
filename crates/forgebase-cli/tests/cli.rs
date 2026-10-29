@@ -1446,3 +1446,222 @@ fn token_create_prints_the_secret_once_and_revoke_works() {
     assert!(stderr(&out).contains("is disabled"), "{}", stderr(&out));
     assert_eq!(stdout(&out), "");
 }
+
+// ---- serve ---------------------------------------------------------------------------------
+
+/// A running `forgebase serve`, killed when dropped so a failing test leaves no process behind.
+struct Server {
+    child: std::process::Child,
+    address: String,
+}
+
+impl Server {
+    /// Starts `serve` on an ephemeral port and waits for its "listening on" line.
+    fn start(db: &TestDb, env: &[(&str, &str)]) -> Server {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_forgebase"));
+        command
+            .args(["serve", "--doctypes", DOCTYPES])
+            .env("FORGEBASE_DATABASE_URL", &db.url)
+            .env("FORGEBASE_LISTEN", "127.0.0.1:0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn().expect("start forgebase serve");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.as_mut().expect("stdout")),
+            &mut line,
+        )
+        .expect("read the listening line");
+        let address = line
+            .trim()
+            .strip_prefix("listening on http://")
+            .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+            .to_owned();
+        Server { child, address }
+    }
+
+    /// One HTTP/1.1 request; returns the status code, the head and the body.
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[&str],
+        body: &str,
+    ) -> (u16, String, String) {
+        use std::io::Read;
+        let mut stream = std::net::TcpStream::connect(&self.address).expect("connect");
+        let mut text = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+        for header in headers {
+            text.push_str(header);
+            text.push_str("\r\n");
+        }
+        text.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+        stream.write_all(text.as_bytes()).expect("send");
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).expect("read");
+        let (head, body) = reply.split_once("\r\n\r\n").expect("head and body");
+        let status = head
+            .split(' ')
+            .nth(1)
+            .expect("status")
+            .parse()
+            .expect("number");
+        (status, head.to_owned(), body.to_owned())
+    }
+
+    /// Stops the server and returns what it wrote to standard error.
+    fn stop(mut self) -> String {
+        use std::io::Read;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let mut text = String::new();
+        let _ = self
+            .child
+            .stderr
+            .take()
+            .expect("stderr")
+            .read_to_string(&mut text);
+        text
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn serve_answers_http_requests() {
+    let db = TestDb::new();
+    let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let out = db.forgebase_with_stdin(
+        &["user", "create", "root", "--role", "Administrator"],
+        Some("correct horse battery\n"),
+    );
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+
+    let server = Server::start(&db, &[]);
+    let host = server.address.clone();
+    let get =
+        |path: &str, host: &str, headers: &[&str]| server.request("GET", path, host, headers, "");
+    // No credential: the envelope with a 401.
+    let (status, _, body) = get("/api/v1/resource/customer", &host, &[]);
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("\"unauthenticated\""), "{body}");
+    // A Host that is not allowed: refused before anything else.
+    let (status, _, body) = get("/api/v1/resource/customer", "evil.example", &[]);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("\"invalid_host\""), "{body}");
+    // Login and read, with the cookie as a browser would send it.
+    let (status, head, body) = server.request(
+        "POST",
+        "/api/v1/login",
+        &host,
+        &["Content-Type: application/json"],
+        r#"{"username":"root","password":"correct horse battery"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    let cookie = head
+        .lines()
+        .find_map(|l| l.strip_prefix("set-cookie: "))
+        .expect("Set-Cookie");
+    assert!(
+        cookie.contains("; HttpOnly; Secure; SameSite=Lax;"),
+        "{cookie}"
+    );
+    let pair = cookie.split(';').next().expect("name=value");
+    let (status, _, body) = get(
+        "/api/v1/resource/customer",
+        &host,
+        &[&format!("Cookie: {pair}")],
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"{"data":[]}"#);
+    let errors = server.stop();
+    // Nothing secret on standard error, and no warning in the default mode.
+    assert!(!errors.contains("correct horse"), "{errors}");
+    assert!(!errors.contains(&db.url), "{errors}");
+    assert!(!errors.contains("warning"), "{errors}");
+}
+
+#[test]
+fn serve_dev_mode_and_configuration() {
+    let db = TestDb::new();
+    let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let out = db.forgebase_with_stdin(
+        &["user", "create", "root", "--role", "Administrator"],
+        Some("correct horse battery\n"),
+    );
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+
+    // Dev mode: no `Secure` on the cookie, and a warning at startup. The allowed hosts come
+    // from the environment.
+    let server = Server::start(
+        &db,
+        &[
+            ("FORGEBASE_DEV_INSECURE_COOKIES", "1"),
+            ("FORGEBASE_ALLOWED_HOSTS", "Erp.Local, localhost"),
+        ],
+    );
+    let (status, head, body) = server.request(
+        "POST",
+        "/api/v1/login",
+        "erp.local:8000",
+        &["Content-Type: application/json"],
+        r#"{"username":"root","password":"correct horse battery"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    let cookie = head
+        .lines()
+        .find_map(|l| l.strip_prefix("set-cookie: "))
+        .expect("Set-Cookie");
+    assert!(
+        cookie.ends_with("; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800"),
+        "{cookie}"
+    );
+    // 127.0.0.1 is not in this list.
+    let (status, _, _) = server.request("GET", "/api/v1/login", "127.0.0.1", &[], "");
+    assert_eq!(status, 400);
+    let errors = server.stop();
+    assert!(
+        errors.contains("FORGEBASE_DEV_INSECURE_COOKIES=1"),
+        "{errors}"
+    );
+
+    // An unusable host list or address ends the command with exit code 1 and no secret.
+    for (name, value) in [
+        ("FORGEBASE_ALLOWED_HOSTS", " , "),
+        ("FORGEBASE_LISTEN", "not an address"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+            .args(["serve", "--doctypes", DOCTYPES])
+            .env("FORGEBASE_DATABASE_URL", &db.url)
+            .env(name, value)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run");
+        assert_eq!(code(&output), Some(1), "{name}");
+        assert!(
+            stderr(&output).starts_with("error: "),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!stderr(&output).contains(&db.url), "{}", stderr(&output));
+    }
+    // `serve` needs the DocType directory like `migrate`.
+    let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+        .arg("serve")
+        .env("FORGEBASE_DATABASE_URL", &db.url)
+        .output()
+        .expect("run");
+    assert_eq!(code(&output), Some(2));
+}

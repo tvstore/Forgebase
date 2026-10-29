@@ -42,10 +42,20 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 
 ## M3 Auth, permissions, REST API
 
-- **Status:** In progress (the owner approved the M3 plan on 2026-10-29). Delivered as three PRs: **M3.1** users, roles, sessions, API tokens and login lockout (`forgebase_db::auth`, migration 0003, `forgebase user` and `forgebase token`; [ADR 0010](../adr/0010-authentication-and-sessions.md); merged), **M3.2** role permissions, enforced in every document operation, and the list query (`[[permissions]]`, `forgebase_core::permission`, `forgebase_db::list`, `forgebase doc list`; [ADR 0011](../adr/0011-permission-model-phase-1.md); this PR), **M3.3** the HTTP layer (`/api/v1/resource`, cookies, CSRF, login endpoints).
+- **Status:** Done (the owner approved the M3 plan on 2026-10-29). Delivered as three PRs: **M3.1** users, roles, sessions, API tokens and login lockout (`forgebase_db::auth`, migration 0003, `forgebase user` and `forgebase token`; [ADR 0010](../adr/0010-authentication-and-sessions.md); PR #11, merged), **M3.2** role permissions, enforced in every document operation, and the list query (`[[permissions]]`, `forgebase_core::permission`, `forgebase_db::list`, `forgebase doc list`; [ADR 0011](../adr/0011-permission-model-phase-1.md); PR #12, merged), **M3.3** the HTTP layer (`forgebase-http`: `/api/v1/resource`, login and logout, cookies, CSRF, `Host` validation, no CORS, the error envelope, `forgebase serve`; this PR, merged once its CI is green and its independent review reports PASS).
 - **Scope:** users and roles; sessions; API tokens; role permissions; permission-filtered queries; `/api/v1/resource`. See [security-model](security-model.md).
-- **Exit criteria:** authorization test matrix including negative tests.
-- **Non-goals:** OAuth/SSO, 2FA, field-level permissions, user permissions, sharing, GraphQL.
+- **Exit criteria:** authorization test matrix including negative tests. Met, with these tests (all against a real PostgreSQL 16; the full list per required negative test is in the [security model](security-model.md#required-negative-tests)):
+  - authorization matrix: every right with and without its role, `if_owner`, deny by default, union of roles, the system context (`forgebase-db/tests/permissions.rs`), and over HTTP with the right status codes (`forgebase-http/tests/resources.rs`: `the_authorization_matrix_over_http`, `the_lifecycle_and_its_error_codes`, `if_owner_hides_the_documents_of_others` with 404 for get, patch and delete);
+  - list visibility: a list, filter, sort or page never returns or reveals a row the caller cannot read (`forgebase-db/tests/list.rs`; over HTTP `if_owner_hides_the_documents_of_others`);
+  - injection: hostile DocType names, field names, sort keys and values are rejected or inert (`list.rs`; over HTTP `injection_attempts_are_inert`);
+  - sessions, tokens, CSRF and lockout: expired, idle, revoked, tampered and unknown credentials are the same 401, wrong, missing and foreign CSRF tokens are 403, token requests need no CSRF, the `Authorization` header wins over the cookie, lockout works over HTTP, the login concurrency bound answers 503 (`forgebase-db/tests/auth.rs`; `forgebase-http/tests/auth.rs`);
+  - `Host` validation, no CORS, the error envelope for every failure including extractor rejections, body limit, generic internal errors and no secrets in responses (`forgebase-http/tests/auth.rs`, `tests/protocol.rs`);
+  - decision 9 (no leaks through Links and delete errors) in the library (`permissions.rs`, including the kept-Link scoping per field and table and the hook-set Link) and over HTTP (`decision_9_no_leaks_through_links`);
+  - `forgebase serve` end to end on an ephemeral port: login, cookie, list, Host refusal, dev mode and configuration errors (`forgebase-cli/tests/cli.rs`);
+  - docs updated (architecture sections 1, 5 and 7, security model, dependency evaluation, feature matrix, ADR 0005 and 0011, README, CHANGELOG).
+
+  CI green and the independent review (AGENTS.md, Stage 3) are recorded per PR at merge (PR #11, PR #12 and the M3.3 PR).
+- **Non-goals:** OAuth/SSO, 2FA, field-level permissions, user permissions, sharing, GraphQL, CORS, `/api/v1/method`, rate limiting beyond the login bound and lockout, TLS in the application, OpenAPI documents, HTTP/2.
 
 ## M4 Minimal Desk
 

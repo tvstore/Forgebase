@@ -2,7 +2,7 @@
 //!
 //! Everything here works on the framework tables of migration 0003 (`fb_user`, `fb_user_role`,
 //! `fb_session`, `fb_api_token`, `fb_login_failure`). There is no HTTP, cookie or permission
-//! handling yet (M3.3): this module only stores and checks credentials. The roles it stores are
+//! handling here (`forgebase-http` has it, M3.3): this module only stores and checks credentials. The roles it stores are
 //! what the permission rules of M3.2 match against: [`AuthUser::caller`] turns an authenticated
 //! user into the [`Caller`] that the document functions take.
 //!
@@ -154,7 +154,7 @@ impl AuthUser {
 /// The result of a successful [`login`]. The tokens are returned only here and cannot be read
 /// back later: the database holds their digests only. `Debug` redacts them.
 pub struct LoginSession {
-    /// The session token: send it to the client (M3.3: in a cookie), never log it.
+    /// The session token: send it to the client (the HTTP API puts it in a cookie), never log it.
     pub token: String,
     /// The CSRF token that belongs to this session.
     pub csrf_token: String,

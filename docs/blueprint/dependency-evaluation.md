@@ -116,6 +116,19 @@ poem (3.1.12) and rocket (0.5.2) offer nothing Forgebase needs that axum lacks.
 **Recommendation (Accepted, [ADR 0005](../adr/0005-http-stack.md)): axum**, plus tower-http only as needed.
 Trade-off: 0.x breaking upgrades; mitigate by keeping axum types inside `forgebase-http`. Alternative: actix-web if a 1.0+-style stability promise outweighs about 90 extra packages.
 
+#### Admission notes for M3.3 (2026-10-29)
+
+Approved by the owner with the M3 plan ([ADR 0005](../adr/0005-http-stack.md)); licenses checked with `cargo deny --locked check` (licenses ok, no advisory); every new package has an MSRV at or below 1.85 (`hyper-util` 1.85 is the highest; project MSRV 1.97; `cargo +1.97 check --workspace --all-targets --locked` passes).
+
+| Dependency | Where | Need | Alternatives considered | Maintenance, weight |
+|---|---|---|---|---|
+| `axum` 0.8.9 (MIT, MSRV 1.80), `default-features = false`, features `http1`, `json`, `query`, `tokio` | `forgebase-http` | Routing, extractors, `DefaultBodyLimit`, `axum::serve` with graceful shutdown. `http2`, `form`, `matched-path`, `original-uri`, `tracing`, `macros`, `multipart`, `ws` and `tower-log` are off. | actix-web, poem, rocket (see above). | tokio-rs organisation; 0.x (expect a breaking step every 1-2 years; axum types stay inside the crate). |
+| `tower` 0.5.3 (MIT, MSRV 1.64), feature `util` only | `forgebase-http` **dev-dependency** | `ServiceExt::oneshot` to call the router in tests without a socket. | `axum::serve` on a port in every test: slower, port handling. | Already in the tree as an axum dependency (default-off features there). |
+| `tokio` features `net`, `sync` | `forgebase-http` | `TcpListener` (`serve`), `Semaphore` (login bound). | none. | Already in the tree. |
+| `tokio` features `net`, `signal` | `forgebase-cli` | Bind the listener and Ctrl-C for `serve`. `signal` adds `signal-hook-registry` and `errno`. | none. | Already in the tree. |
+
+New packages in `Cargo.lock` (22): `axum` 0.8.9, `axum-core` 0.5.6, `tower` 0.5.3, `tower-layer` 0.3.3, `tower-service` 0.3.3, `http` 1.5.0, `http-body` 1.1.0, `http-body-util` 0.1.5, `hyper` 1.12.0 (MIT, MSRV 1.63), `hyper-util` 0.1.21 (MIT, MSRV 1.85), `httparse` 1.10.1, `httpdate` 1.0.3, `matchit` 0.8.4 (MIT AND BSD-3-Clause), `mime` 0.3.17, `form_urlencoded` 1.2.2, `serde_urlencoded` 0.7.1, `serde_path_to_error` 0.1.20, `sync_wrapper` 1.0.2 (Apache-2.0), `atomic-waker` 1.1.2, `ryu` 1.0.23 (Apache-2.0 OR BSL-1.0), `signal-hook-registry` 1.4.8 and `errno` 0.3.14 (the last two from tokio's `signal`). All licenses are in the `deny.toml` allow list. `forgebase-http` has 144 packages in its normal dependency tree (includes `forgebase-db` and its dependencies). **No `tower-http` and no `cookie` crate**: the body limit is axum's own, CORS is deliberately absent (owner decision 8), and the session cookie is one formatted string and a small parser (the token is lowercase hex, so no escaping is needed; resolves open question 12). `http-body-util` is not a dependency of the crate: tests read bodies with `axum::body::to_bytes`.
+
 ### 2. Async runtime
 
 tokio 1.54.1 (MIT, MSRV 1.85). axum, tokio-postgres, deadpool, sqlx and tower-sessions all target tokio; async-std is deprecated (Source-indexed, https://github.com/launchbadge/sqlx/discussions/4271: sqlx 0.9 added smol / async-global-executor support as successors to it); smol/glommio would force their own stacks.
@@ -279,7 +292,7 @@ Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 
 
 | Concern | Recommendation | Main alternative |
 |---|---|---|
-| HTTP | axum (+ tower-http as needed) (Accepted) | actix-web |
+| HTTP | axum (+ tower-http as needed) (Accepted); admitted in M3.3 without tower-http | actix-web |
 | Runtime | tokio (explicit features) (Accepted) | none realistic (ecosystem tie-in accepted) |
 | CLI | clap (derive) (Accepted 2026-10-28) | lexopt |
 | DB | tokio-postgres + deadpool-postgres + in-house SQL/DDL builder (Accepted; confirmed by the M1 spike, see the spike result subsection) | sqlx (macros off); sea-query as builder |
@@ -330,7 +343,7 @@ Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md
 9. ~~argon2 0.6: API changes, audit status, current OWASP Argon2id parameters.~~ Partly resolved in M3.1: admitted at 0.6.0 (features `alloc`, `password-hash`), parameters m = 19456 KiB, t = 2, p = 1 (owner decision, ADR 0010). Audit status and a re-check of the current OWASP numbers stay Unverified.
 10. ~~Decimal and date/time types~~ Resolved (Accepted, owner decision 2026-10-28): `rust_decimal` and `time`, see the section in 4. Database access.
 11. serde_json `preserve_order` / `arbitrary_precision` workspace-wide implications.
-12. Session token hashing: `sha2` weight and license; cookie handling via `cookie`/`axum-extra` vs hand-written.
+12. ~~Session token hashing: `sha2` weight and license; cookie handling via `cookie`/`axum-extra` vs hand-written.~~ Resolved: hashing in PostgreSQL (M3.1), cookie hand-written (M3.3, see the admission notes).
 13. MSRV-aware resolver (resolver "3") behavior with the pinned toolchain.
 14. React license confirmation; frontend audit tooling.
 15. Re-run every `cargo info` check at decision time.

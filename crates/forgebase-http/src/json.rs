@@ -1,4 +1,4 @@
-//! JSON text <-> [`Value`] mapping for the CLI.
+//! JSON <-> [`Value`] mapping, shared by the HTTP API and the command-line tool.
 //!
 //! | Field type | JSON |
 //! |---|---|
@@ -19,7 +19,7 @@
 //! ±9999, `infinity`, `NaN`) cannot be read; see [`forgebase_db::DbError::Decode`]. Keys that are
 //! not fields of the DocType are passed on (with a null value) so that core validation reports
 //! them together with the other problems.
-//! This lives in the CLI for now and moves to a shared place when the HTTP API arrives (M3).
+//! The CLI reuses this module (`forgebase_http::json`) so both interfaces map identically.
 
 use std::collections::BTreeMap;
 
@@ -50,7 +50,7 @@ pub enum JsonError {
         /// What is wrong.
         problem: String,
     },
-    /// A `--filter` or `--sort` value cannot be used.
+    /// A filter or sort value cannot be used.
     #[error("{0}")]
     Query(String),
     /// The output document could not be serialized to JSON text (not expected to happen).
@@ -90,7 +90,16 @@ pub struct Input {
 /// Parses JSON text into field values and table rows for `doctype`. `registry` provides the
 /// child DocTypes of its Table fields.
 pub fn parse_input(registry: &Registry, doctype: &DocType, text: &str) -> Result<Input, JsonError> {
-    let Json::Object(object) = serde_json::from_str::<Json>(text)? else {
+    input_from_json(registry, doctype, serde_json::from_str::<Json>(text)?)
+}
+
+/// Like [`parse_input`] for JSON that is already parsed.
+pub fn input_from_json(
+    registry: &Registry,
+    doctype: &DocType,
+    json: Json,
+) -> Result<Input, JsonError> {
+    let Json::Object(object) = json else {
         return Err(JsonError::NotAnObject);
     };
     let mut input = Input::default();
@@ -325,13 +334,13 @@ pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
     Ok(Json::Object(object))
 }
 
-/// Parses the `--filter` JSON of `doc list`: an array of `{"field", "op", "value"}` objects.
+/// Parses the filter JSON (`doc list --filter`, the `filters` query parameter): an array of `{"field", "op", "value"}` objects.
 /// `value` is mapped by the field's type like in `--data` (a Link field takes the target's name;
 /// `docstatus` and `version` are integers, `created_at` and `modified_at` RFC 3339 strings);
 /// `in` takes an array of them, `like` a string, `is null` and `is not null` no value. Whether the
 /// field exists and the operator fits it is checked by `forgebase-db` before anything is run.
 pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonError> {
-    let query = |problem: String| JsonError::Query(format!("invalid --filter: {problem}"));
+    let query = |problem: String| JsonError::Query(format!("invalid filter: {problem}"));
     let Json::Array(items) = serde_json::from_str::<Json>(text)? else {
         return Err(query("expected a JSON array of filters".to_owned()));
     };
@@ -404,7 +413,7 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
     Ok(filters)
 }
 
-/// Parses the `--sort` values of `doc list`: `FIELD`, `FIELD:asc` or `FIELD:desc`.
+/// Parses the sort values (`doc list --sort`, the comma separated `sort` query parameter): `FIELD`, `FIELD:asc` or `FIELD:desc`.
 pub fn parse_sort(specs: &[String]) -> Result<Vec<Sort>, JsonError> {
     specs
         .iter()
@@ -413,7 +422,7 @@ pub fn parse_sort(specs: &[String]) -> Result<Vec<Sort>, JsonError> {
             Some((field, "asc")) => Ok(Sort::asc(field)),
             Some((field, "desc")) => Ok(Sort::desc(field)),
             Some(_) => Err(JsonError::Query(format!(
-                "invalid --sort {spec:?}: use FIELD, FIELD:asc or FIELD:desc"
+                "invalid sort {spec:?}: use FIELD, FIELD:asc or FIELD:desc"
             ))),
         })
         .collect()

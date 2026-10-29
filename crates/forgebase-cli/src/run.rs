@@ -9,15 +9,19 @@ use forgebase_core::permission::Caller;
 use forgebase_db::auth;
 use forgebase_db::{DbError, ListQuery, StoredDocument, SyncOptions};
 
+use std::sync::Arc;
+
+use forgebase_http::{AppConfig, AppState};
+
 use crate::args::{
     ActorArg, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
 };
 use crate::doctypes::load_dir;
 use crate::error::CliError;
-use crate::json::{
+use crate::report::migrate_report;
+use forgebase_http::json::{
     Input, document_to_json, documents_to_json, parse_filters, parse_input, parse_sort,
 };
-use crate::report::migrate_report;
 
 /// The system actor of commands that have no `--actor` (`doc get`, `doc list`): they only read.
 const DEFAULT_ACTOR: &str = "cli";
@@ -46,6 +50,7 @@ pub async fn run(command: Command) -> Result<(), CliError> {
         Command::Doc(command) => execute(&url, prepare(command)?).await,
         Command::User(command) => user(&url, command).await,
         Command::Token(command) => token(&url, command).await,
+        Command::Serve { doctypes } => serve(&url, &doctypes).await,
     }
 }
 
@@ -246,8 +251,8 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
             let documents =
                 forgebase_db::list(&*client, &registry, &doctype, &caller, &query).await?;
             let json = documents_to_json(&documents)?;
-            let text =
-                serde_json::to_string_pretty(&json).map_err(crate::json::JsonError::Serialize)?;
+            let text = serde_json::to_string_pretty(&json)
+                .map_err(forgebase_http::json::JsonError::Serialize)?;
             return write_stdout(&format!("{text}\n"));
         }
         Operation::Insert {
@@ -414,6 +419,57 @@ async fn user(url: &str, command: UserCommand) -> Result<(), CliError> {
     write_stdout(&text)
 }
 
+/// Runs `serve`: the HTTP API until Ctrl-C. Prints the listening address (never the database
+/// URL or any secret). It does not run migrations.
+async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
+    let registry = registry(doctypes)?;
+    let listen = env_or("FORGEBASE_LISTEN", "127.0.0.1:8000");
+    let hosts = env_or("FORGEBASE_ALLOWED_HOSTS", "localhost,127.0.0.1");
+    let allowed_hosts: Vec<String> = hosts
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if allowed_hosts.is_empty() {
+        return Err(CliError::Config(
+            "FORGEBASE_ALLOWED_HOSTS has no host name".to_owned(),
+        ));
+    }
+    let insecure = std::env::var("FORGEBASE_DEV_INSECURE_COOKIES").is_ok_and(|v| v == "1");
+    if insecure {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: FORGEBASE_DEV_INSECURE_COOKIES=1: the session cookie has no Secure attribute; \
+             use this for local development over plain HTTP only"
+        );
+    }
+    let config = AppConfig {
+        allowed_hosts,
+        secure_cookies: !insecure,
+        ..AppConfig::default()
+    };
+    let pool = forgebase_db::connect(url).await?;
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .map_err(|e| CliError::Config(format!("cannot listen on {listen}: {e}")))?;
+    let address = listener.local_addr().map_err(CliError::Serve)?;
+    write_stdout(&format!("listening on http://{address}\n"))?;
+    let state = AppState::new(pool, Arc::new(registry), config);
+    forgebase_http::serve(listener, state, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .map_err(CliError::Serve)
+}
+
+fn env_or(name: &str, default: &str) -> String {
+    match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => default.to_owned(),
+    }
+}
+
 /// Runs a `token` command. `create` prints `key:secret` and nothing else.
 async fn token(url: &str, command: TokenCommand) -> Result<(), CliError> {
     let pool = forgebase_db::connect(url).await?;
@@ -495,7 +551,8 @@ fn read_data(arg: &str) -> Result<String, CliError> {
 fn print_document(stored: &StoredDocument) -> Result<(), CliError> {
     let json = document_to_json(stored)?;
     // Serializing a `serde_json::Value` cannot fail (string keys only).
-    let text = serde_json::to_string_pretty(&json).map_err(crate::json::JsonError::Serialize)?;
+    let text =
+        serde_json::to_string_pretty(&json).map_err(forgebase_http::json::JsonError::Serialize)?;
     write_stdout(&format!("{text}\n"))
 }
 

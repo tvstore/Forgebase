@@ -33,3 +33,5 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
 getrandom = "0.4"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
