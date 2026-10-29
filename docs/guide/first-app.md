@@ -1,0 +1,220 @@
+# Your first Forgebase app
+
+This guide takes you from nothing to an app with tests that runs, extends another app and upgrades safely. Every command here was run against the repository at the time of writing. Background and decisions: [ADR 0012](../adr/0012-app-model-and-public-api-boundary.md) and [the architecture](../blueprint/architecture.md#the-app-model-m51-accepted-by-adr-0012).
+
+An app is a Rust crate with three kinds of content: **DocTypes** (TOML files that describe your data and who may use it), **hooks** (Rust code that runs at fixed points of a document operation) and **migrations** (SQL that changes data once per database). Apps are compiled into one binary that you build and run. There are no plugins and no runtime discovery: everything is listed explicitly in `src/lib.rs` and `src/main.rs`.
+
+## What you need
+
+- A Forgebase checkout (the repository is private; apps use it by path, see [the dependency](#the-forgebase-dependency)) and the Rust toolchain it needs (`rust-version` in its `Cargo.toml`).
+- A PostgreSQL 16 server. The tests need a superuser (or `CREATEDB`) URL; running the app needs an empty database.
+
+## 1. Create the app
+
+Build the stock binary once, then generate:
+
+```sh
+cargo build -p forgebase                      # in the Forgebase checkout
+target/debug/forgebase new-app crm --forgebase-path . --dir ~/apps
+```
+
+The name is the app name and the crate name: lowercase letters, digits and underscores, starting with a letter, at most 54 bytes (it is also the prefix of your DocTypes). The command refuses an existing directory, never overwrites, and needs no database. It creates `~/apps/crm`:
+
+```
+crm/
+  Cargo.toml              package, forgebase path dependency, its own [workspace]
+  Cargo.lock              copied from the Forgebase checkout
+  src/lib.rs              pub fn app() -> forgebase::App
+  src/main.rs             Forgebase::new().app(crm::app()).run()
+  doctypes/crm_note.toml  one sample DocType, with permissions for the role "Crm User"
+  migrations/README.md    how to add SQL data migrations
+  tests/app.rs            guard test, startup check, a hook test, an end-to-end test
+  README.md  AGENTS.md  .gitignore
+```
+
+`AGENTS.md` is for the people and agents who will maintain the app: where things live, and the rules (depend on `forgebase` only, list every DocType, additive DocType changes, append-only migrations, pure hooks). Keep it up to date.
+
+## 2. Test and run it
+
+```sh
+cd ~/apps/crm
+export FORGEBASE_TEST_DATABASE_URL=postgres://user:password@localhost:5432/postgres
+cargo test                                    # 4 tests; each creates and drops its own database
+```
+
+The tests that need PostgreSQL **fail** with a clear message when the variable is not set; they never skip. Then run it against an empty database:
+
+```sh
+export FORGEBASE_DATABASE_URL=postgres://user:password@localhost:5432/crm
+cargo run -- migrate                          # framework tables, schema sync, app migrations
+echo 'a long password' | cargo run -- user create ann --role "Crm User"
+FORGEBASE_DEV_INSECURE_COOKIES=1 cargo run -- serve    # http://127.0.0.1:8000/api/v1
+```
+
+Log in with `POST /api/v1/login` and `{"username": "ann", "password": "..."}`; the reply sets the session cookie. `GET /api/v1/meta/crm_note` then returns the DocType with `"app": "crm"`. `serve` does not migrate: run `migrate` after every change to DocTypes or migrations. `cargo run -- --help` lists the other commands. The binary of an app has all the commands of the stock `forgebase` binary, and does not need `--doctypes`.
+
+## 3. DocTypes are embedded
+
+`src/lib.rs` lists the files:
+
+```rust
+.doctypes(forgebase::doctypes!["doctypes/crm_note.toml"])
+```
+
+The files are read at **compile time**, with paths relative to the crate root, so the binary does not depend on the files at run time and a change to a file needs a rebuild. There is no directory scanning, so a file you forget to list would silently be missing; the test `every_doctype_file_is_listed` (it calls `forgebase::testing::assert_doctypes_listed`) fails instead. The file format is in [the architecture](../blueprint/architecture.md#doctype-file-format). Name every DocType with the app name as prefix: DocType names are global, and a name used by two apps is a startup error.
+
+Change DocTypes additively. Adding a field or a DocType is applied by `migrate`; changing a field's type or length is refused (nothing is changed); reshaping existing data is a job for a migration.
+
+## 4. Hooks
+
+A hook set implements `forgebase::DocTypeHooks` for a DocType and is registered with `.hooks("crm_note", NoteRules)`. The sample trims the title and rejects a blank one. Hooks receive the document and a `HookContext`, run inside the operation's transaction, and have **no database access**. They run before the framework's own validation, so a value may be missing or of another kind: look before you change. The order of the hooks in each operation is in [ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md) and in the documentation of `DocTypeHooks` (`cargo doc -p forgebase --open`). A hook is tested without a database by calling it with `HookContext::new(..)`, as the sample test does.
+
+## 5. Extend another app
+
+Make a second app, `tasks`, that links to the notes of `crm` and adds a rule to them.
+
+```sh
+target/debug/forgebase new-app tasks --forgebase-path . --dir ~/apps
+```
+
+In `tasks`, replace the sample DocType with `doctypes/tasks_task.toml`:
+
+```toml
+name = "tasks_task"
+label = "Task"
+
+[[fields]]
+name = "subject"
+type = "data"
+required = true
+
+[[fields]]
+name = "note"
+type = "link"          # a Link to a DocType of an app we depend on
+target = "crm_note"
+
+[[permissions]]
+role = "Tasks User"
+read = true
+write = true
+create = true
+```
+
+Then `Cargo.toml` gets `crm = { path = "../crm" }` under `[dependencies]`, and `src/lib.rs` becomes:
+
+```rust
+use forgebase::{App, DocTypeHooks, Document, HookContext, HookError, Value};
+
+pub fn app() -> App {
+    App::new("tasks")
+        .version(env!("CARGO_PKG_VERSION"))
+        .depends_on(&["crm"])
+        .doctypes(forgebase::doctypes!["doctypes/tasks_task.toml"])
+        .hooks("crm_note", NoDrafts) // a hook on a DocType of crm
+}
+
+/// Rejects a note whose title starts with `DRAFT:`.
+pub struct NoDrafts;
+
+impl DocTypeHooks for NoDrafts {
+    fn validate(&self, _ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+        if let Some(Value::Text(title)) = doc.values.get("title")
+            && title.starts_with("DRAFT:")
+        {
+            return Err(HookError::new("a draft note cannot be saved"));
+        }
+        Ok(())
+    }
+}
+```
+
+`src/main.rs` lists the dependency first:
+
+```rust
+forgebase::Forgebase::new().app(crm::app()).app(tasks::app()).run()
+```
+
+and the tests build the same binary (`Forgebase::new().app(crm::app()).app(tasks::app())`) and log in a user with both roles. The rules of the model:
+
+- `depends_on` names apps that must be registered **earlier**. Nothing is sorted; a wrong order is an error.
+- An app may link to, and register hooks for, DocTypes of **itself and its dependencies** only.
+- An app **cannot change another app's DocType** (adding a field to `crm_note` from `tasks`, for example). Extend by hooks and by DocTypes of your own; custom fields on another app's DocType are planned for a later milestone.
+- Hooks of one DocType run in app order, then in registration order: the hook of `tasks` runs after the hooks of `crm`, and can reject what `crm` accepted.
+- Every DocType reports its owner in the metadata API (`"app"`).
+
+## 6. Upgrade with migrations
+
+`migrate` applies the schema changes of your DocTypes by itself. For changes to *data* (a backfill, a rename of a value) add a SQL migration: a file `migrations/0001_trim_subjects.sql`, listed in `src/lib.rs`:
+
+```rust
+.migrations(forgebase::migrations![
+    (1, "trim_subjects", "migrations/0001_trim_subjects.sql"),
+])
+```
+
+`forgebase migrate` runs them after the schema sync, in app order and version order, **once per database**, each in its own transaction together with the row in `fb_app_migration` that records it. A failing migration is rolled back and stops the run; the ones before it stay applied. The SQL must not contain `BEGIN` or `COMMIT`.
+
+Migrations are **append-only**. The checksum of every applied migration is verified at every `migrate` (also with `--dry-run`), before anything but the framework migrations is changed:
+
+- an applied migration that was **edited** is refused (`was changed after it was applied`);
+- an applied migration that you **removed** from the list is refused;
+- a **new** migration with a version lower than one already applied is refused (`a new migration must have a version above every applied one`), so number new migrations above the highest one. The numbers need not be consecutive.
+
+`forgebase migrate --dry-run` shows what would be applied and changes nothing. Two `migrate` runs at the same time wait for each other (`--lock-timeout-ms`). `fb_app` records each app and the version it declared at its last migrate.
+
+## The public API boundary
+
+Apps depend on the `forgebase` crate **only**. `forgebase-core`, `forgebase-db` and `forgebase-http` are internal: they change without notice, and an app that uses them will break. `forgebase` re-exports everything an app needs (the list is in [ADR 0012](../adr/0012-app-model-and-public-api-boundary.md#the-public-surface-crate-root-of-forgebase)): `App`, `Forgebase`, `doctypes!`, `migrations!`, `DocTypeHooks`, `HookContext`, `HookError`, `Operation`, `Document`, `Value` and the helpers of `forgebase::testing` (enable the cargo feature `testing` in `[dev-dependencies]` only, as the template does, so it is not in your binary). The version is 0.x: the API may still change between minor versions, and every change is in the [changelog](../../CHANGELOG.md). If you need something that is not exported, ask for it; do not work around it.
+
+## The Forgebase dependency
+
+The generated `Cargo.toml` points at your checkout: `forgebase = { path = "<checkout>/crates/forgebase" }`. A relative `--forgebase-path` is written as an absolute path, because it is relative to where you ran the command, not to the new crate. To depend on a git revision instead, replace the two `forgebase` lines with `forgebase = { git = "https://github.com/agilma/Forgebase", rev = "<commit>" }` (the second one with `features = ["testing"]`); the repository is private, so that needs git access to it.
+
+The app is its own Cargo workspace (`[workspace]` in its `Cargo.toml`), so a `Cargo.toml` in a parent directory does not take it over. `new-app` copies the checkout's `Cargo.lock` into the app, so your first build uses the dependency versions Forgebase is tested and license-checked with, not whatever is newest. Cargo drops the entries the app does not use and adds the app itself on first use, so the first command must not be `--locked`; after that it can be. Commit `Cargo.lock`. Updating dependencies later is your decision (`cargo update`).
+
+The toolchain: `rust-version` in the generated `Cargo.toml` is the minimum Forgebase supports. The Forgebase checkout pins a toolchain in its `rust-toolchain.toml`, which does not apply to an app outside the checkout; use the same one (`rustup toolchain install <version>` and `cargo +<version> ...`, or your own `rust-toolchain.toml`).
+
+## Common errors
+
+Everything about how the apps fit together is checked **before any command runs**, and all problems are reported together (exit code 1). Real examples:
+
+```
+error: invalid app setup:
+  - app `tasks` depends on `crm`, which is registered after it; register `crm` first (apps are never sorted)
+```
+
+```
+error: invalid app setup:
+  - app `tasks`: doctypes/tasks_task.toml: field `note` of doctype `tasks_task` refers to `crm_note`, which belongs to app `crm`; app `tasks` does not depend on `crm` (add .depends_on(&["crm"]), registered before `tasks`)
+  - app `tasks`: hooks registered for DocType `crm_note` of app `crm`, which `tasks` does not depend on
+```
+
+```
+error: invalid app setup:
+  - app `tasks`: hooks registered for unknown DocType `crm_notes`
+```
+
+```
+error: cannot load DocType files:
+  - app `tasks`: doctypes/tasks_task.toml: doctype `crm_note` is already defined by app `crm` (doctypes/crm_note.toml); a DocType belongs to one app
+```
+
+A DocType file that is not listed is caught by the test, not at startup:
+
+```
+app `tasks`: the embedded DocType list and .../tasks/doctypes differ; in the directory but not in doctypes![..]: ["doctypes/tasks_other.toml"]; in doctypes![..] but not in the directory: []
+```
+
+Migration errors (from `migrate`):
+
+```
+error: migration 1 (trim_subjects) of app `tasks` was changed after it was applied: expected checksum 1aded17b..., database has 80f843fe...
+error: migration 2 (late) of app `tasks` is not applied, but migration 3 of the app is; a new migration must have a version above every applied one (renumber it above 3); nothing was applied
+```
+
+Other things you may meet:
+
+- `FORGEBASE_TEST_DATABASE_URL is not set ... Tests never skip.`: set it to a superuser or `CREATEDB` URL (`postgres://user:password@localhost:5432/postgres`).
+- `FORGEBASE_DATABASE_URL is not set`: the app's own database for `migrate`, `serve`, `user` and `doc`.
+- `new-app`: `... is not a Forgebase checkout`: `--forgebase-path` must be the repository root (it contains `crates/forgebase`); `... already exists; new-app never overwrites`: choose another name or `--dir`.
+- A hook cannot reach the database or the network on purpose ([ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md)). Compute from the document, or reject the operation.

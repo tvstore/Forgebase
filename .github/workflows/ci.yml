@@ -79,6 +79,77 @@ jobs:
       - run: cargo install --locked cargo-deny --version 0.20.2
       - run: cargo deny --locked check
 
+  # `forgebase new-app` (M5.2): generates an app from the stock binary, outside the checkout, and
+  # proves the generated crate works as created: its own tests pass, and its binary migrates,
+  # serves, logs a user in and reports the sample DocType in the metadata API as owned by the
+  # app. The generated crate depends on this checkout by path; its Cargo.lock is the checkout's.
+  # The password below is for a throwaway user of the service container.
+  app-template:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forgebase
+          POSTGRES_PASSWORD: forgebase
+          POSTGRES_DB: demo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forgebase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The tests create and drop their own databases; the app itself uses the database `demo`.
+      FORGEBASE_TEST_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/postgres
+      FORGEBASE_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/demo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      # The generated crate is outside the checkout, so rust-toolchain.toml does not apply there:
+      # use the same toolchain explicitly.
+      - name: Use the pinned toolchain everywhere
+        run: echo "RUSTUP_TOOLCHAIN=$(rustup show active-toolchain | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - run: cargo build --locked -p forgebase
+      - name: Generate the app
+        run: target/debug/forgebase new-app demo --forgebase-path "$GITHUB_WORKSPACE" --dir "$RUNNER_TEMP"
+      - name: Test the generated app
+        working-directory: ${{ runner.temp }}/demo
+        run: cargo test
+      - name: Build the generated app
+        working-directory: ${{ runner.temp }}/demo
+        run: cargo build
+      - name: Migrate, serve, log in and read the metadata
+        working-directory: ${{ runner.temp }}/demo
+        run: |
+          set -eu
+          target/debug/demo migrate
+          echo 'a long password' | target/debug/demo user create ann --role "Demo User"
+          FORGEBASE_DEV_INSECURE_COOKIES=1 target/debug/demo serve > server.log 2>&1 &
+          server=$!
+          # Any answer, whatever its status, means the server is up.
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:8000/api/v1/meta; then break; fi
+            sleep 1
+          done
+          curl -fsS -c jar -H 'Content-Type: application/json' \
+            -d '{"username":"ann","password":"a long password"}' http://127.0.0.1:8000/api/v1/login
+          curl -fsS -b jar http://127.0.0.1:8000/api/v1/meta/demo_note | tee meta.json
+          grep -q '"app":"demo"' meta.json
+          kill "$server"
+      - name: Show the server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/demo/server.log"
+
   # The desk (React + TypeScript, desk/). Uses the Node that ships with the runner (no extra
   # action). Also runs on the daily schedule, so a new npm advisory is noticed. `npm audit` fails
   # the job for high and critical advisories (low and moderate are reported only).

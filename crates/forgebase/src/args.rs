@@ -40,6 +40,21 @@ pub enum Command {
     /// Create and revoke API tokens.
     #[command(subcommand)]
     Token(TokenCommand),
+    /// Create a new app: a Rust crate (library and binary) with a sample DocType, a hook, tests,
+    /// a README and an AGENTS.md, in `<DIR>/<NAME>`. It builds and passes its tests as created. Needs
+    /// no database. Never overwrites: an existing target directory is an error.
+    NewApp {
+        /// The app and crate name: lower-case ASCII letters, digits and underscores, starting
+        /// with a letter (the rules of a DocType name), at most 54 bytes.
+        name: String,
+        /// The Forgebase checkout the app depends on (it contains `crates/forgebase`). Written
+        /// into the app's `Cargo.toml` as an absolute path.
+        #[arg(long, value_name = "DIR")]
+        forgebase_path: PathBuf,
+        /// The directory in which `<NAME>` is created.
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
+    },
     /// Serve the HTTP API (`/api/v1`) until Ctrl-C or SIGTERM (running requests get 10 seconds; a second signal exits at once). It does not run migrations: run `migrate`
     /// first. Environment: `FORGEBASE_LISTEN` (default `127.0.0.1:8000`),
     /// `FORGEBASE_ALLOWED_HOSTS` (comma separated host names without ports, default `localhost,127.0.0.1`) and
@@ -66,7 +81,7 @@ impl Command {
                 | DocCommand::Amend { doctypes, .. }
                 | DocCommand::Delete { doctypes, .. },
             ) => Some(doctypes),
-            Command::User(_) | Command::Token(_) => None,
+            Command::User(_) | Command::Token(_) | Command::NewApp { .. } => None,
         }
     }
 }
@@ -77,6 +92,7 @@ impl Command {
         match self {
             Command::Migrate { .. } => ["migrate", ""],
             Command::Serve { .. } => ["serve", ""],
+            Command::NewApp { .. } => ["new-app", ""],
             Command::User(_) => ["user", ""],
             Command::Token(_) => ["token", ""],
             Command::Doc(doc) => [

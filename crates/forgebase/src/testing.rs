@@ -45,7 +45,7 @@ use forgebase_db::{Pool, SyncOptions, auth, connect, quote_ident};
 use forgebase_http::{AppConfig, AppState, router};
 use tower::ServiceExt;
 
-use crate::app::{App, DocTypeFile};
+use crate::app::App;
 use crate::builder::Forgebase;
 use crate::compose::{StartupError, compose};
 use crate::doctypes::toml_files;
@@ -94,8 +94,11 @@ pub enum MigrateError {
     Failed(String),
 }
 
-/// A migration that [`TestDb::migrate`] applied (in a dry run: would apply).
+/// A migration that [`TestDb::migrate`] applied (in a dry run: would apply). Read the fields;
+/// build one to compare with [`AppliedMigration::new`] (the type is `#[non_exhaustive]`, so a
+/// field can be added later without breaking tests).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AppliedMigration {
     /// The app.
     pub app: String,
@@ -105,8 +108,22 @@ pub struct AppliedMigration {
     pub name: String,
 }
 
-/// What [`TestDb::migrate`] did.
+impl AppliedMigration {
+    /// A migration from its app, version and name, for comparing with what
+    /// [`TestDb::migrate`] returned.
+    pub fn new(app: &str, version: i32, name: &str) -> Self {
+        Self {
+            app: app.to_owned(),
+            version,
+            name: name.to_owned(),
+        }
+    }
+}
+
+/// What [`TestDb::migrate`] did. Only read it: the type is `#[non_exhaustive]`, so a field can
+/// be added later without breaking tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Migrated {
     /// The app migrations applied, in the order they ran; with a dry run, the pending ones.
     pub app_migrations: Vec<AppliedMigration>,
@@ -310,8 +327,10 @@ impl Drop for TestDb {
     }
 }
 
-/// What a request got back.
+/// What a request got back. Only read it: the type is `#[non_exhaustive]`, so a field can be
+/// added later without breaking tests.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Reply {
     /// The HTTP status code.
     pub status: u16,
@@ -478,6 +497,8 @@ impl HttpClient {
 /// }
 /// ```
 ///
+/// A leading `./` is ignored in `dir` and in the listed paths.
+///
 /// The same file rules as `--doctypes DIR` apply: `*.toml` files directly in the directory,
 /// hidden files and subdirectories ignored.
 ///
@@ -504,7 +525,12 @@ pub fn assert_doctypes_listed(app: &App, manifest_dir: &str, dir: &str) {
             }
         })
         .collect();
-    let listed: Vec<&str> = app.doctypes.iter().map(DocTypeFile::path).collect();
+    // `doctypes!["./doctypes/x.toml"]` is the same file as `doctypes!["doctypes/x.toml"]`.
+    let listed: Vec<&str> = app
+        .doctypes
+        .iter()
+        .map(|file| file.path().trim_start_matches("./"))
+        .collect();
     let not_listed: Vec<&String> = on_disk
         .iter()
         .filter(|n| !listed.contains(&n.as_str()))

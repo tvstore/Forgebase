@@ -23,6 +23,9 @@ pub enum CliError {
     /// The server could not listen or stopped with an I/O error.
     #[error("server error: {0}")]
     Serve(std::io::Error),
+    /// `new-app` cannot create the crate. The message says why.
+    #[error("{0}")]
+    NewApp(String),
     /// The apps or the DocType files are wrong; the message lists every problem.
     #[error("{0}")]
     Startup(#[from] StartupError),

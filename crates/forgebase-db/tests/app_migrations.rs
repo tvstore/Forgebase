@@ -60,9 +60,13 @@ async fn a_held_migration_lock_makes_migrate_time_out_and_nothing_is_left_behind
         dry_run: false,
         lock_timeout: Duration::from_millis(200),
     };
-    let error = migrate_apps(&db.pool, &registry, &[APP], &options)
-        .await
-        .expect_err("times out");
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        migrate_apps(&db.pool, &registry, &[APP], &options),
+    )
+    .await
+    .expect("migrate_apps did not give up waiting for the lock")
+    .expect_err("times out");
     assert!(matches!(error, DbError::LockTimeout), "{error:?}");
     assert_eq!(
         db.rows("SELECT coalesce(to_regclass('fb_migration')::text, 'none')")
@@ -159,9 +163,14 @@ async fn an_app_migration_gives_up_waiting_for_a_lock_after_the_lock_timeout() {
         lock_timeout: Duration::from_millis(300),
     };
     let started = std::time::Instant::now();
-    let error = migrate_apps(&db.pool, &Registry::new(), &[app], &options)
-        .await
-        .expect_err("times out");
+    // The timeout of the test itself: a regression (no lock timeout) fails fast instead of hanging.
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        migrate_apps(&db.pool, &Registry::new(), &[app], &options),
+    )
+    .await
+    .expect("migrate_apps did not give up waiting for the lock")
+    .expect_err("times out");
     assert!(
         matches!(&error, DbError::AppMigrationFailed { version: 1, message, .. }
             if message.contains("timed out waiting for a database lock")),
@@ -173,5 +182,50 @@ async fn an_app_migration_gives_up_waiting_for_a_lock_after_the_lock_timeout() {
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_app_migration").await,
         vec![vec!["0".to_owned()]]
+    );
+}
+
+#[tokio::test]
+async fn a_dry_run_with_pending_framework_migrations_lists_every_app_migration() {
+    // Only the migrations before 0004 are applied: the app tables do not exist, so no app
+    // migration can have been applied and all of them are pending; the sync plan is not known.
+    let db = TestDb::migrated().await;
+    db.exec("DROP TABLE fb_app, fb_app_migration; DELETE FROM fb_migration WHERE version = 4")
+        .await;
+    let client = db.pool.get().await.expect("connection");
+    assert!(
+        !forgebase_db::app_migration_tables_exist(&client)
+            .await
+            .expect("check")
+    );
+    drop(client);
+    let options = SyncOptions {
+        dry_run: true,
+        lock_timeout: Duration::from_secs(5),
+    };
+    let report = migrate_apps(&db.pool, &Registry::new(), &[APP], &options)
+        .await
+        .expect("dry run");
+    assert_eq!(report.migrations.len(), 1);
+    assert!(report.sync.is_none());
+    assert_eq!(report.app_migrations.len(), 1);
+    // A dry run keeps nothing.
+    assert_eq!(
+        db.rows("SELECT (to_regclass('fb_app_migration') IS NULL)::text")
+            .await,
+        vec![vec!["true".to_owned()]]
+    );
+}
+
+#[tokio::test]
+async fn the_app_migration_tables_are_found_once_they_exist() {
+    // The decision behind the dry run above: with the tables present (a later framework
+    // migration pending) the app migrations are verified, not blindly listed.
+    let db = TestDb::migrated().await;
+    let client = db.pool.get().await.expect("connection");
+    assert!(
+        forgebase_db::app_migration_tables_exist(&client)
+            .await
+            .expect("check")
     );
 }

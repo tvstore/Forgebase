@@ -62,6 +62,22 @@ export FORGEBASE_TEST_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432
 
 CI runs the same tests against a `postgres:16` service container.
 
+## The app template
+
+`forgebase new-app` writes the files of `crates/forgebase/templates/app/`. They are not compiled with the workspace, so only the CI job `app-template` (and your own run) proves that the generated crate builds, passes its tests and runs. Run what the job runs after changing the template or anything an app uses (needs the network for crates.io, a few minutes and the PostgreSQL of the section above):
+
+```sh
+export RUSTUP_TOOLCHAIN=$(rustup show active-toolchain | cut -d' ' -f1)   # in the checkout: the toolchain of rust-toolchain.toml
+cargo build -p forgebase
+target/debug/forgebase new-app demo --forgebase-path "$PWD" --dir /tmp/forgebase-app   # outside the checkout
+cd /tmp/forgebase-app/demo && cargo test
+# then: create a scratch database, export FORGEBASE_DATABASE_URL, cargo build, run target/debug/demo with
+# migrate, user create (password on stdin), serve; log in with curl and GET /api/v1/meta/demo_note.
+# These are the steps of the job `app-template` in .github/workflows/ci.yml.
+```
+
+The generated crate is outside the checkout, so `rust-toolchain.toml` does not apply to it; the job sets `RUSTUP_TOOLCHAIN` for that reason. `tests/new_app.rs` (no database needed) tests what the command writes and refuses.
+
 ## Dependencies
 
 Adding a dependency needs the justification described in [maintenance-policy](docs/blueprint/maintenance-policy.md#dependency-admission). It must pass cargo-deny. An npm dependency of the desk is pinned to an exact version, must pass `npm run licenses` (see [the frontend rules](docs/blueprint/maintenance-policy.md#frontend-npm-dependencies)) and, if it is a runtime dependency, needs an ADR.
