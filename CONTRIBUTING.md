@@ -7,6 +7,7 @@ Workflow, approval gates, git safety and review rules are defined only in [AGENT
 - [rustup](https://rustup.rs/). The toolchain (1.99.1, with rustfmt and clippy) is selected automatically from `rust-toolchain.toml`.
 - For the MSRV check: `rustup toolchain install 1.97 --profile minimal`.
 - For the dependency check: `cargo install --locked cargo-deny --version 0.20.2`.
+- For the desk (`desk/`): Node.js 20 or newer with npm.
 
 ## Local checks
 
@@ -19,6 +20,19 @@ cargo test --workspace --locked                        # needs FORGEBASE_TEST_DA
 cargo build --workspace --locked
 cargo +1.97 check --workspace --all-targets --locked   # MSRV
 cargo deny --locked check                              # needs network for advisories
+```
+
+The desk has its own checks (the `desk` job of CI). Run them in `desk/` when you change it:
+
+```sh
+cd desk
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run build       # writes desk/dist
+npm run licenses    # license allow-list over package-lock.json
+npm audit --audit-level=high
 ```
 
 ## PostgreSQL for tests
@@ -35,7 +49,7 @@ CI runs the same tests against a `postgres:16` service container.
 
 ## Dependencies
 
-Adding a dependency needs the justification described in [maintenance-policy](docs/blueprint/maintenance-policy.md#dependency-admission). It must pass cargo-deny.
+Adding a dependency needs the justification described in [maintenance-policy](docs/blueprint/maintenance-policy.md#dependency-admission). It must pass cargo-deny. An npm dependency of the desk is pinned to an exact version, must pass `npm run licenses` (see [the frontend rules](docs/blueprint/maintenance-policy.md#frontend-npm-dependencies)) and, if it is a runtime dependency, needs an ADR.
 
 ## Commits and PRs
 

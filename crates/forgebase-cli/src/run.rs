@@ -440,9 +440,11 @@ async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
              use this for local development over plain HTTP only"
         );
     }
+    let desk_dir = desk_dir()?;
     let config = AppConfig {
         allowed_hosts,
         secure_cookies: !insecure,
+        desk_dir: desk_dir.clone(),
         ..AppConfig::default()
     };
     let pool = forgebase_db::connect(url).await?;
@@ -452,6 +454,12 @@ async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
     let address = listener.local_addr().map_err(CliError::Serve)?;
     let signals = stop_signals().map_err(CliError::Serve)?;
     write_stdout(&format!("listening on http://{address}\n"))?;
+    if let Some(dir) = &desk_dir {
+        write_stdout(&format!(
+            "serving the desk from {} at /desk/\n",
+            dir.display()
+        ))?;
+    }
     let state = AppState::new(pool, Arc::new(registry), config);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = forgebase_http::serve(listener, state, async {
@@ -460,6 +468,23 @@ async fn serve(url: &str, doctypes: &DocTypesDir) -> Result<(), CliError> {
     run_until_stopped(server, stop, signals, SHUTDOWN_GRACE)
         .await
         .map_err(CliError::Serve)
+}
+
+/// The directory of the built desk from `FORGEBASE_DESK_DIR` (typically `desk/dist`), or `None`
+/// when it is unset or blank (no desk is served). It must be a directory that has an
+/// `index.html`, so a wrong path fails at startup instead of giving 404s later.
+fn desk_dir() -> Result<Option<std::path::PathBuf>, CliError> {
+    let Some(value) = std::env::var_os("FORGEBASE_DESK_DIR").filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let dir = std::path::PathBuf::from(value);
+    if !dir.join("index.html").is_file() {
+        return Err(CliError::Config(format!(
+            "FORGEBASE_DESK_DIR {} has no index.html (build the desk first: cd desk && npm ci && npm run build)",
+            dir.display()
+        )));
+    }
+    Ok(Some(dir))
 }
 
 /// The host names of `FORGEBASE_ALLOWED_HOSTS`: comma separated, trimmed, no empty entry. An

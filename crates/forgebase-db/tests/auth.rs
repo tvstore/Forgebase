@@ -5,8 +5,8 @@ mod common;
 use common::TestDb;
 use forgebase_db::auth::{
     ApiTokenSecret, AuthError, AuthUser, LoginSession, add_role, check_csrf, create_api_token,
-    create_user, login, logout, remove_role, revoke_api_token, set_enabled, set_password,
-    validate_api_token, validate_session,
+    create_user, login, logout, remove_role, revoke_api_token, rotate_csrf, set_enabled,
+    set_password, validate_api_token, validate_session,
 };
 
 const PASSWORD: &str = "correct horse battery";
@@ -597,6 +597,89 @@ async fn csrf_tokens_belong_to_their_session() {
         .await;
     assert!(
         !check_csrf(client, &first.token, &first.csrf_token)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn rotating_the_csrf_token_replaces_it_and_stores_only_a_digest() {
+    let db = setup().await;
+    let first = login_alice(&db).await;
+    let other = login_alice(&db).await;
+    let client = db.pool.get().await.unwrap();
+    let client = &**client;
+    let fresh = rotate_csrf(client, &first.token)
+        .await
+        .unwrap()
+        .expect("a valid session");
+    assert_eq!(fresh.len(), 64);
+    assert!(
+        fresh
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    );
+    assert_ne!(fresh, first.csrf_token);
+    // The new token works, the old one does not, another session is untouched.
+    assert!(check_csrf(client, &first.token, &fresh).await.unwrap());
+    assert!(
+        !check_csrf(client, &first.token, &first.csrf_token)
+            .await
+            .unwrap()
+    );
+    assert!(
+        check_csrf(client, &other.token, &other.csrf_token)
+            .await
+            .unwrap()
+    );
+    // Only a digest is stored.
+    let stored = scalar(
+        &db,
+        "SELECT string_agg(encode(csrf_hash, 'hex'), ',') FROM fb_session",
+    )
+    .await;
+    assert!(!stored.contains(&fresh), "{stored}");
+    // Rotating again replaces it again.
+    let again = rotate_csrf(client, &first.token).await.unwrap().unwrap();
+    assert_ne!(again, fresh);
+    assert!(!check_csrf(client, &first.token, &fresh).await.unwrap());
+    // Unknown and malformed session tokens get nothing.
+    assert!(rotate_csrf(client, "nope").await.unwrap().is_none());
+    assert!(
+        rotate_csrf(client, &"0".repeat(64))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        rotate_csrf(client, &first.csrf_token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_session_cannot_rotate_its_csrf_token() {
+    let db = setup().await;
+    let session = login_alice(&db).await;
+    let client = db.pool.get().await.unwrap();
+    let client = &**client;
+    db.exec("UPDATE fb_session SET last_seen_at = now() - interval '24 hours 1 second'")
+        .await;
+    assert!(rotate_csrf(client, &session.token).await.unwrap().is_none());
+    db.exec("UPDATE fb_session SET last_seen_at = now()").await;
+    db.exec("UPDATE fb_session SET expires_at = now() - interval '1 second'")
+        .await;
+    assert!(rotate_csrf(client, &session.token).await.unwrap().is_none());
+    db.exec("UPDATE fb_session SET expires_at = now() + interval '1 day'")
+        .await;
+    db.exec("UPDATE fb_user SET enabled = false").await;
+    assert!(rotate_csrf(client, &session.token).await.unwrap().is_none());
+    // Nothing changed: the original token still matches once the user is enabled again.
+    db.exec("UPDATE fb_user SET enabled = true").await;
+    assert!(
+        check_csrf(client, &session.token, &session.csrf_token)
             .await
             .unwrap()
     );

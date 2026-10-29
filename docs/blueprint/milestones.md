@@ -66,9 +66,10 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
 
 ## M4 Minimal Desk
 
-- **Scope:** login, list view and form view for any DocType, generated from metadata. Decides the UI component library (with a dependency evaluation) and frontend test tooling.
-- **Exit criteria:** a user can log in and list/create/edit a DocType document through the UI. (Detailed criteria to be set in the M4 plan.)
-- **Non-goals:** reports, workflow UI, realtime, custom pages, theming.
+- **Status:** In progress (the owner approved the M4 plan on 2026-10-29). Delivered as two PRs: **M4.1** the metadata API (`GET /api/v1/meta`, `/meta/{doctype}`), the CSRF-recovering `GET /api/v1/session`, static serving of the built desk (`FORGEBASE_DESK_DIR`, CSP), the `desk/` scaffold (Vite, TypeScript, Vitest, ESLint), the login page, the home page and the list view (paging, sorting, filters), the frontend CI job and license check; **M4.2** the form view (create, edit, delete, submit, cancel, amend) and one Playwright smoke test in CI.
+- **Scope:** login, list view and form view for any DocType, generated from metadata. The UI component library question is decided: none (owner decision 2026-10-29, [architecture, section 11](architecture.md#11-desk-reports-workflow)); frontend test tooling is Vitest.
+- **Exit criteria:** a user can log in and list/create/edit a DocType document through the UI; an action without permission is hidden in the UI **and** refused by the API (tests); no secrets in browser storage beyond the HttpOnly session cookie; accessibility basics (labels, keyboard use of native controls); docs updated.
+- **Non-goals:** reports, workflow UI, realtime, custom pages, theming, i18n, embedding the assets in the binary (M7), CORS.
 
 ## M5 App model and developer experience
 

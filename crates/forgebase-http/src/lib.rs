@@ -26,6 +26,9 @@
 //! |---|---|
 //! | `POST /login` | 200 `{"data": {"username", "roles", "csrf_token"}}` and `Set-Cookie` |
 //! | `POST /logout` (cookie session only) | 204, cookie cleared |
+//! | `GET /session` (cookie session only) | 200 `{"data": {"username", "roles", "csrf_token"}}`, a **new** CSRF token (the old one stops working) |
+//! | `GET /meta` | 200 `{"data": [{"name", "label", "submittable", "rights"}]}`: the DocTypes the caller can read |
+//! | `GET /meta/{doctype}` | 200 `{"data": {"name", "label", "naming", "submittable", "fields", "rights"}}` |
 //! | `GET /resource/{doctype}` (`filters`, `sort`, `limit`, `offset`) | 200 `{"data": [..]}` |
 //! | `POST /resource/{doctype}` | 201 `{"data": doc}` |
 //! | `GET /resource/{doctype}/{name}` | 200 `{"data": doc}` |
@@ -35,14 +38,23 @@
 //! | `POST /resource/{doctype}/{name}/amend` body `{"version"}` | 201 `{"data": new doc}` |
 //!
 //! Anything else is 404 (`/api/v1/method` is not implemented), a wrong method is 405.
+//!
+//! # The desk
+//!
+//! With [`AppConfig::desk_dir`] set, `GET /desk/`, `/desk/index.html` and `/desk/assets/{name}`
+//! serve the built desk from that directory (see the `desk` module for the allow-list and the
+//! headers). The Host check applies to them like to every route.
 
 mod auth;
+mod desk;
 mod error;
 pub mod json;
+mod meta;
 mod routes;
 
 use std::future::Future;
 use std::ops::DerefMut;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -73,6 +85,9 @@ pub struct AppConfig {
     /// limit is at most half of the pool's maximum size (at least 1), whatever is set here, so
     /// that with a pool of 2 or more connections logins can never hold all of them.
     pub max_concurrent_logins: usize,
+    /// The directory of the built desk (`desk/dist`) to serve under `/desk/`, or `None` (the
+    /// default) to serve no desk: `/desk/*` is then a 404. See the `desk` module.
+    pub desk_dir: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -82,6 +97,7 @@ impl Default for AppConfig {
             secure_cookies: true,
             body_limit_bytes: 1024 * 1024,
             max_concurrent_logins: 8,
+            desk_dir: None,
         }
     }
 }
@@ -160,9 +176,12 @@ fn login_permits(configured: usize, pool_max_size: usize) -> usize {
 /// Builds the router with every route and the Host check.
 pub fn router(state: AppState) -> Router {
     let limit = state.config().body_limit_bytes;
-    Router::new()
+    let mut router = Router::new()
         .route("/api/v1/login", post(routes::login))
         .route("/api/v1/logout", post(routes::logout))
+        .route("/api/v1/session", get(routes::session))
+        .route("/api/v1/meta", get(meta::list))
+        .route("/api/v1/meta/{doctype}", get(meta::read))
         .route(
             "/api/v1/resource/{doctype}",
             get(routes::list).post(routes::create),
@@ -184,7 +203,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/resource/{doctype}/{name}/amend",
             post(routes::amend),
-        )
+        );
+    // The desk routes exist only when a directory is configured.
+    if state.config().desk_dir.is_some() {
+        router = router
+            .route("/desk/", get(desk::index))
+            .route("/desk/index.html", get(desk::index))
+            .route("/desk/assets/{name}", get(desk::asset));
+    }
+    router
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .method_not_allowed_fallback(|| async {
             ApiError::new(
@@ -231,7 +258,10 @@ async fn check_host(State(state): State<AppState>, request: Request, next: Next)
         .into_response()
     };
     let headers = response.headers_mut();
-    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // `no-store` unless the handler chose a policy (only the hashed desk assets do).
+    if !headers.contains_key(CACHE_CONTROL) {
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     response
 }
