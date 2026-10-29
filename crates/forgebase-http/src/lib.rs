@@ -71,7 +71,7 @@ pub struct AppConfig {
     /// How many logins may hash a password at the same time; more are `503 too_many_logins`
     /// with `Retry-After`. Argon2 uses about 19 MiB each, so this bounds memory. The effective
     /// limit is at most half of the pool's maximum size (at least 1), whatever is set here, so
-    /// that logins can never hold every database connection.
+    /// that with a pool of 2 or more connections logins can never hold all of them.
     pub max_concurrent_logins: usize,
 }
 
@@ -151,7 +151,8 @@ impl AppState {
 }
 
 /// The number of concurrent logins: `configured`, but at most half of the pool's maximum size
-/// and at least 1, so that logins can never take all the connections other requests need.
+/// and at least 1, so that with a pool of 2 or more logins never take all the connections
+/// other requests need.
 fn login_permits(configured: usize, pool_max_size: usize) -> usize {
     configured.min((pool_max_size / 2).max(1)).max(1)
 }
