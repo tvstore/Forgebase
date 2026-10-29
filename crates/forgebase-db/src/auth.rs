@@ -2,7 +2,9 @@
 //!
 //! Everything here works on the framework tables of migration 0003 (`fb_user`, `fb_user_role`,
 //! `fb_session`, `fb_api_token`, `fb_login_failure`). There is no HTTP, cookie or permission
-//! handling yet (M3.2 and M3.3): this module only stores and checks credentials.
+//! handling yet (M3.3): this module only stores and checks credentials. The roles it stores are
+//! what the permission rules of M3.2 match against: [`AuthUser::caller`] turns an authenticated
+//! user into the [`Caller`] that the document functions take.
 //!
 //! **Secrets.** A password is stored as an Argon2id PHC string (m = 19456 KiB, t = 2, p = 1,
 //! random 16-byte salt). Verification uses the parameters inside the stored string, so the
@@ -39,6 +41,7 @@ use std::sync::OnceLock;
 
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
+use forgebase_core::permission::{self, Caller};
 use time::OffsetDateTime;
 use tokio_postgres::GenericClient;
 use tokio_postgres::error::SqlState;
@@ -49,8 +52,8 @@ use crate::error::DbError;
 /// The id of a user.
 pub type UserId = Uuid;
 
-/// Failed logins of one username, each within [`FAILURE_WINDOW_SECS`] of the previous one, before
-/// it is locked.
+/// Failed logins of one username, each at most [`FAILURE_WINDOW_SECS`] after the previous one,
+/// before it is locked.
 const MAX_FAILURES: i32 = 5;
 /// How long a locked username cannot log in, in seconds (15 minutes).
 const LOCK_SECS: f64 = 15.0 * 60.0;
@@ -63,7 +66,6 @@ const SESSION_ABSOLUTE_SECS: f64 = 7.0 * 24.0 * 3600.0;
 const SESSION_IDLE_SECS: f64 = 24.0 * 3600.0;
 
 const USERNAME_MAX: usize = 140;
-const ROLE_MAX: usize = 140;
 /// Password length bounds in bytes.
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 1024;
@@ -140,6 +142,15 @@ pub struct AuthUser {
     pub roles: Vec<String>,
 }
 
+impl AuthUser {
+    /// The [`Caller`] for the document operations of `forgebase-db`: the username and the roles.
+    /// Build it from the result of [`validate_session`] or [`validate_api_token`] (the roles are
+    /// read from the database then), not from request data.
+    pub fn caller(&self) -> Caller {
+        Caller::user(self.username.clone(), self.roles.clone())
+    }
+}
+
 /// The result of a successful [`login`]. The tokens are returned only here and cannot be read
 /// back later: the database holds their digests only. `Debug` redacts them.
 pub struct LoginSession {
@@ -200,19 +211,10 @@ fn check_username(username: &str) -> Result<(), AuthError> {
     }
 }
 
+/// The role rule is shared with the `[[permissions]]` rules of DocTypes (one definition in
+/// `forgebase-core`), so a rule can always name a role a user can have.
 fn check_role(role: &str) -> Result<(), AuthError> {
-    let length = role.chars().count();
-    if length == 0 || length > ROLE_MAX {
-        Err(AuthError::InvalidRole("must be 1 to 140 characters"))
-    } else if role.trim().is_empty() {
-        Err(AuthError::InvalidRole("must not be blank"))
-    } else if role.chars().any(char::is_control) {
-        Err(AuthError::InvalidRole(
-            "must not contain control characters",
-        ))
-    } else {
-        Ok(())
-    }
+    permission::check_role_name(role).map_err(AuthError::InvalidRole)
 }
 
 fn check_password(password: &str) -> Result<(), AuthError> {
@@ -481,9 +483,10 @@ async fn load_user(
 ///
 /// **Lockout.** Failed attempts are counted per submitted username in `fb_login_failure`, also
 /// for names that do not exist. A failure counts with the previous ones only if the previous
-/// failure (`last_failure_at`) was at most 15 minutes ago; otherwise the count restarts at 1. The
-/// fifth failure in such a chain locks the username for 15 minutes and resets the counter; while it is locked every attempt fails without checking the password (the
-/// correct password too) and does not extend the lock. A successful login deletes the counter.
+/// failure (`last_failure_at`) was at most 15 minutes ago (exactly 15 minutes still counts);
+/// otherwise the count restarts at 1. The fifth failure in such a chain locks the username for 15
+/// minutes and resets the counter; while it is locked every attempt fails without checking the
+/// password (the correct password too) and does not extend the lock. A successful login deletes the counter.
 /// The counting runs in a transaction of its own that holds the username's row lock until the
 /// outcome is known, so concurrent attempts for one username are serialized and cannot exceed
 /// the limit. The counting is committed even though the login fails. For that this function must
@@ -545,7 +548,7 @@ pub async fn login(
                  THEN now() + make_interval(secs => $3::float8) ELSE f.locked_until END, \
              last_failure_at = now() \
              FROM (SELECT username, \
-                 CASE WHEN last_failure_at > now() - make_interval(secs => $4::float8) \
+                 CASE WHEN last_failure_at >= now() - make_interval(secs => $4::float8) \
                       THEN failures ELSE 0 END + 1 AS n \
                  FROM fb_login_failure WHERE username = $1) c \
              WHERE f.username = c.username",
@@ -783,6 +786,19 @@ mod tests {
             assert!(check_role(bad).is_err(), "{bad:?}");
         }
         assert!(check_role(&"r".repeat(141)).is_err());
+    }
+
+    #[test]
+    fn an_auth_user_becomes_a_user_caller() {
+        let user = AuthUser {
+            id: Uuid::nil(),
+            username: "ann".to_owned(),
+            roles: vec!["Sales User".to_owned()],
+        };
+        assert_eq!(
+            user.caller(),
+            Caller::user("ann", vec!["Sales User".to_owned()])
+        );
     }
 
     #[test]

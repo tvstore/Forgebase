@@ -746,6 +746,26 @@ async fn failures_only_count_within_fifteen_minutes_of_each_other() {
     );
 }
 
+#[tokio::test]
+async fn a_failure_just_inside_the_window_continues_the_count() {
+    let db = setup().await;
+    for _ in 0..3 {
+        try_login(&db, "alice", "wrong password").await.unwrap_err();
+    }
+    // 14 minutes 59 seconds ago is inside the 15 minute window (the window is not shorter than
+    // 15 minutes): the chain continues with 4, it does not restart.
+    db.exec(
+        "UPDATE fb_login_failure SET last_failure_at = now() - interval '14 minutes 59 seconds'",
+    )
+    .await;
+    try_login(&db, "alice", "wrong password").await.unwrap_err();
+    assert_eq!(
+        db.rows("SELECT failures::text, (locked_until IS NULL)::text FROM fb_login_failure")
+            .await,
+        vec![vec!["4".to_owned(), "true".into()]]
+    );
+}
+
 /// Regression test for the login vs. password-change race.
 ///
 /// A `BEFORE INSERT` trigger on `fb_session` holds the login open (after it verified the old

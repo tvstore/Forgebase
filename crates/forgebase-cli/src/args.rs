@@ -28,7 +28,8 @@ pub enum Command {
         #[arg(long, value_name = "MS", default_value_t = 5000)]
         lock_timeout_ms: u64,
     },
-    /// Insert, read, update, delete, submit, cancel and amend single documents.
+    /// Insert, read, list, update, delete, submit, cancel and amend documents. These commands run
+    /// as the trusted system context: no permission rules apply (see --actor).
     #[command(subcommand)]
     Doc(DocCommand),
     /// Create and manage users and their roles. Passwords are read from standard input.
@@ -117,6 +118,33 @@ pub enum DocCommand {
         name: String,
         #[command(flatten)]
         doctypes: DocTypesDir,
+    },
+    /// Print a page of documents as a JSON array, filtered and sorted. Child table rows are not
+    /// listed. The default page is 20 documents, at most 500.
+    ///
+    /// --filter is a JSON array of conditions, combined with AND, each `{"field": F, "op": OP,
+    /// "value": V}`. OP is one of `=`, `!=`, `<`, `<=`, `>`, `>=`, `in` (V is an array), `like`
+    /// (text fields only; V is a pattern with % and _) or `is null` / `is not null` (no `value`).
+    /// V is written as in `--data`. Example:
+    /// --filter '[{"field":"status","op":"=","value":"open"},{"field":"total","op":">","value":"100.00"}]'
+    List {
+        /// DocType name.
+        doctype: String,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        /// A JSON array of filters, see above.
+        #[arg(long, value_name = "JSON")]
+        filter: Option<String>,
+        /// Sort key `FIELD` or `FIELD:desc` (also `FIELD:asc`); repeat for several. `name` is
+        /// always the last key.
+        #[arg(long, value_name = "FIELD[:desc]")]
+        sort: Vec<String>,
+        /// Page size, 1 to 500 (default 20).
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        /// Documents to skip (default 0).
+        #[arg(long, value_name = "N")]
+        offset: Option<u64>,
     },
     /// Change fields of a document and print it as stored. Fails if the document's version is
     /// not the one given with --version.
@@ -216,8 +244,9 @@ pub struct DataArg {
 
 #[derive(Debug, Args)]
 pub struct ActorArg {
-    /// Recorded as owner / modified_by on insert, update, submit, cancel and amend; given to
-    /// hooks (on delete it is only given to hooks, not stored). Not authenticated.
+    /// The name of the trusted system context these commands run as: recorded as owner /
+    /// modified_by on insert, update, submit, cancel and amend; given to hooks (on delete it is
+    /// only given to hooks, not stored). Not authenticated, and no permission rules apply to it.
     #[arg(long, value_name = "NAME", default_value = "cli")]
     pub actor: String,
 }

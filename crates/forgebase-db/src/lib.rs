@@ -2,7 +2,7 @@
 //!
 //! Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4 and M3.1):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1 and M3.2):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -25,15 +25,21 @@
 //!   [`DbError::Hook`] and rolls the call back. `update` works on the whole stored document with
 //!   the changes merged in. [`submit`], [`cancel`] and [`amend`] move a document of a `submittable`
 //!   DocType through draft, submitted and cancelled (M2.4), and a naming series takes its number
-//!   from `fb_series` inside the insert's transaction. No permissions and no renames yet.
+//!   from `fb_series` inside the insert's transaction. No renames yet. **Permissions (M3.2, ADR
+//!   0011):** every operation takes a [`Caller`] (a user with roles, or the trusted system
+//!   context) and enforces the DocType's `[[permissions]]` with the one evaluator in
+//!   `forgebase-core`; read access is applied in SQL, an unreadable document is "not found", and
+//!   [`list`] filters, sorts and pages with a typed [`ListQuery`]. See the `document` module
+//!   documentation of the functions for the exact rules.
 //! - [`auth`]: users, roles, Argon2id password hashing, server-side sessions with CSRF tokens, API
-//!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP,
-//!   cookies or permissions yet.
+//!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP or
+//!   cookies yet; [`auth::AuthUser::caller`] gives the [`Caller`] for the document functions.
 
 pub mod auth;
 mod document;
 mod error;
 mod ident;
+mod list;
 mod migrate;
 mod plan;
 mod sync;
@@ -42,7 +48,11 @@ mod value;
 pub use deadpool_postgres::Pool;
 pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
 pub use error::DbError;
+pub use forgebase_core::permission::Caller;
 pub use ident::quote_ident;
+pub use list::{
+    DEFAULT_LIMIT, Filter, FilterOp, ListQuery, MAX_IN_VALUES, MAX_LIMIT, Sort, column_type, list,
+};
 pub use migrate::{MIGRATIONS, Migration, migrate_framework};
 pub use plan::{Conflict, Step, Warning};
 pub use sync::{SyncOptions, SyncReport, sync};

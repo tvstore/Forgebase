@@ -8,6 +8,7 @@ use std::time::Duration;
 use common::{CUSTOMER, TestDb, registry};
 use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::permission::Caller;
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, delete, get, insert, update};
 
@@ -43,7 +44,7 @@ async fn update_with_a_stale_version_is_a_conflict_and_changes_nothing() {
         &reg,
         &customer_type.name,
         customer("a@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -54,7 +55,7 @@ async fn update_with_a_stale_version_is_a_conflict_and_changes_nothing() {
         &created.name,
         1,
         &points(1),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -68,7 +69,7 @@ async fn update_with_a_stale_version_is_a_conflict_and_changes_nothing() {
         &created.name,
         1,
         &points(2),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -100,7 +101,7 @@ async fn update_with_a_stale_version_is_a_conflict_and_changes_nothing() {
         &created.name,
         9,
         &points(2),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -115,10 +116,16 @@ async fn update_with_a_stale_version_is_a_conflict_and_changes_nothing() {
         ),
         "{error}"
     );
-    let unchanged = get(&mut **client, &reg, &customer_type.name, &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let unchanged = get(
+        &mut **client,
+        &reg,
+        &customer_type.name,
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(unchanged, v2);
 }
 
@@ -131,7 +138,7 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
         &reg,
         &customer_type.name,
         customer("d@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -142,7 +149,7 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
         &created.name,
         1,
         &points(1),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -152,7 +159,7 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
         &customer_type.name,
         &created.name,
         1,
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap_err();
@@ -168,10 +175,16 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
         "{error}"
     );
     assert!(
-        get(&mut **client, &reg, &customer_type.name, &created.name)
-            .await
-            .unwrap()
-            .is_some()
+        get(
+            &mut **client,
+            &reg,
+            &customer_type.name,
+            &created.name,
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .is_some()
     );
     delete(
         &mut **client,
@@ -179,7 +192,7 @@ async fn delete_with_a_stale_version_is_a_conflict_and_deletes_nothing() {
         &customer_type.name,
         &created.name,
         2,
-        "ann",
+        &Caller::system("ann"),
     )
     .await
     .unwrap();
@@ -196,14 +209,21 @@ async fn a_missing_document_is_not_found_not_a_conflict() {
         "nobody",
         1,
         &points(1),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
-    let error = delete(&mut **client, &reg, &customer_type.name, "nobody", 1, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        &customer_type.name,
+        "nobody",
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
 }
 
@@ -213,9 +233,15 @@ async fn a_conflict_inside_a_transaction_does_not_abort_it() {
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
     let mut tx = raw.transaction().await.unwrap();
-    let created = insert(&mut tx, &reg, &customer_type.name, customer("t@x.y"), "cli")
-        .await
-        .unwrap();
+    let created = insert(
+        &mut tx,
+        &reg,
+        &customer_type.name,
+        customer("t@x.y"),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     // The failed update is a plain no-row result, so the transaction stays usable.
     let error = update(
         &mut tx,
@@ -224,7 +250,7 @@ async fn a_conflict_inside_a_transaction_does_not_abort_it() {
         &created.name,
         5,
         &points(1),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -236,7 +262,7 @@ async fn a_conflict_inside_a_transaction_does_not_abort_it() {
         &created.name,
         1,
         &points(1),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -253,7 +279,7 @@ async fn a_second_writer_waits_then_gets_a_conflict() {
         &reg,
         &customer_type.name,
         customer("c@x.y"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -269,13 +295,14 @@ async fn a_second_writer_waits_then_gets_a_conflict() {
         &created.name,
         1,
         &points(1),
-        "one",
+        &Caller::system("one"),
     )
     .await
     .unwrap();
 
     // The second writer, holding the same version, blocks on the row lock ...
     let two = points(2);
+    let caller_two = Caller::system("two");
     let error = {
         let late = update(
             &mut **second,
@@ -284,7 +311,7 @@ async fn a_second_writer_waits_then_gets_a_conflict() {
             &created.name,
             1,
             &two,
-            "two",
+            &caller_two,
         );
         tokio::pin!(late);
         assert!(
@@ -308,10 +335,16 @@ async fn a_second_writer_waits_then_gets_a_conflict() {
         ),
         "{error}"
     );
-    let stored = get(&mut **second, &reg, &customer_type.name, &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = get(
+        &mut **second,
+        &reg,
+        &customer_type.name,
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(stored.version, 2);
     assert_eq!(stored.modified_by, "one");
     assert_eq!(stored.values["points"], Value::Int(1));
@@ -329,13 +362,14 @@ async fn racing_updates_with_the_same_version_succeed_exactly_once() {
                 &reg,
                 &customer_type.name,
                 customer(&email),
-                "cli",
+                &Caller::system("cli"),
             )
             .await
             .unwrap()
         };
         let (mut a, mut b) = (db.pool.get().await.unwrap(), db.pool.get().await.unwrap());
         let (one, two) = (points(1), points(2));
+        let (caller_a, caller_b) = (Caller::system("a"), Caller::system("b"));
         let (ra, rb) = tokio::join!(
             update(
                 &mut **a,
@@ -344,7 +378,7 @@ async fn racing_updates_with_the_same_version_succeed_exactly_once() {
                 &created.name,
                 1,
                 &one,
-                "a"
+                &caller_a
             ),
             update(
                 &mut **b,
@@ -353,7 +387,7 @@ async fn racing_updates_with_the_same_version_succeed_exactly_once() {
                 &created.name,
                 1,
                 &two,
-                "b"
+                &caller_b
             ),
         );
         let outcomes = [ra, rb];
@@ -363,10 +397,16 @@ async fn racing_updates_with_the_same_version_succeed_exactly_once() {
             .filter(|r| matches!(r, Err(DbError::Conflict { current: 2, .. })))
             .count();
         assert_eq!((ok, conflicts), (1, 1), "round {round}: {outcomes:?}");
-        let stored = get(&mut **a, &reg, &customer_type.name, &created.name)
-            .await
-            .unwrap()
-            .unwrap();
+        let stored = get(
+            &mut **a,
+            &reg,
+            &customer_type.name,
+            &created.name,
+            &Caller::system("cli"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(stored.version, 2, "round {round}");
     }
 }
@@ -381,13 +421,14 @@ async fn racing_delete_and_update_with_the_same_version_succeed_exactly_once() {
             &reg,
             &customer_type.name,
             customer("dr@x.y"),
-            "cli",
+            &Caller::system("cli"),
         )
         .await
         .unwrap()
     };
     let (mut a, mut b) = (db.pool.get().await.unwrap(), db.pool.get().await.unwrap());
     let one = points(1);
+    let (caller_a, caller_ann) = (Caller::system("a"), Caller::system("ann"));
     let (updated, deleted) = tokio::join!(
         update(
             &mut **a,
@@ -396,9 +437,16 @@ async fn racing_delete_and_update_with_the_same_version_succeed_exactly_once() {
             &created.name,
             1,
             &one,
-            "a"
+            &caller_a
         ),
-        delete(&mut **b, &reg, &customer_type.name, &created.name, 1, "ann"),
+        delete(
+            &mut **b,
+            &reg,
+            &customer_type.name,
+            &created.name,
+            1,
+            &caller_ann
+        ),
     );
     // Either the update won (the delete then sees version 2) or the delete won (the update then
     // finds nothing); never both.

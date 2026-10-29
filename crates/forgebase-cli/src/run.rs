@@ -5,16 +5,22 @@ use std::time::Duration;
 
 use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::permission::Caller;
 use forgebase_db::auth;
-use forgebase_db::{DbError, StoredDocument, SyncOptions};
+use forgebase_db::{DbError, ListQuery, StoredDocument, SyncOptions};
 
 use crate::args::{
     ActorArg, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
 };
 use crate::doctypes::load_dir;
 use crate::error::CliError;
-use crate::json::{Input, document_to_json, parse_input};
+use crate::json::{
+    Input, document_to_json, documents_to_json, parse_filters, parse_input, parse_sort,
+};
 use crate::report::migrate_report;
+
+/// The system actor of commands that have no `--actor` (`doc get`, `doc list`): they only read.
+const DEFAULT_ACTOR: &str = "cli";
 
 /// Environment variable with the PostgreSQL URL.
 const DATABASE_URL_VAR: &str = "FORGEBASE_DATABASE_URL";
@@ -56,6 +62,11 @@ enum Operation {
         registry: Registry,
         doctype: String,
         name: String,
+    },
+    List {
+        registry: Registry,
+        doctype: String,
+        query: ListQuery,
     },
     Update {
         registry: Registry,
@@ -117,6 +128,30 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
                 registry,
                 doctype: found.name,
                 name,
+            }
+        }
+        DocCommand::List {
+            doctype,
+            doctypes,
+            filter,
+            sort,
+            limit,
+            offset,
+        } => {
+            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let query = ListQuery {
+                filters: match filter {
+                    Some(text) => parse_filters(&found, &text)?,
+                    None => Vec::new(),
+                },
+                sort: parse_sort(&sort)?,
+                limit,
+                offset,
+            };
+            Operation::List {
+                registry,
+                doctype: found.name,
+                query,
             }
         }
         DocCommand::Update {
@@ -202,6 +237,19 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
     let mut client = pool.get().await.map_err(DbError::from)?;
     let client = &mut **client;
     let stored = match operation {
+        Operation::List {
+            registry,
+            doctype,
+            query,
+        } => {
+            let caller = Caller::system(DEFAULT_ACTOR);
+            let documents =
+                forgebase_db::list(&*client, &registry, &doctype, &caller, &query).await?;
+            let json = documents_to_json(&documents)?;
+            let text =
+                serde_json::to_string_pretty(&json).map_err(crate::json::JsonError::Serialize)?;
+            return write_stdout(&format!("{text}\n"));
+        }
         Operation::Insert {
             registry,
             doctype,
@@ -213,15 +261,28 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
                 values: input.values,
                 tables: input.tables,
             };
-            forgebase_db::insert(client, &registry, &doctype, document, &actor).await?
+            forgebase_db::insert(
+                client,
+                &registry,
+                &doctype,
+                document,
+                &Caller::system(actor),
+            )
+            .await?
         }
         Operation::Get {
             registry,
             doctype,
             name,
-        } => forgebase_db::get(client, &registry, &doctype, &name)
-            .await?
-            .ok_or(DbError::NotFound { doctype, name })?,
+        } => forgebase_db::get(
+            client,
+            &registry,
+            &doctype,
+            &name,
+            &Caller::system(DEFAULT_ACTOR),
+        )
+        .await?
+        .ok_or(DbError::NotFound { doctype, name })?,
         Operation::Update {
             registry,
             doctype,
@@ -241,7 +302,7 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
                 &name,
                 expected_version,
                 &changes,
-                &actor,
+                &Caller::system(actor),
             )
             .await?
         }
@@ -255,17 +316,32 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
         } => {
             let doctype = doctype.as_str();
             let name = name.as_str();
+            let caller = Caller::system(actor);
             match kind {
                 StatusKind::Submit => {
-                    forgebase_db::submit(client, &registry, doctype, name, expected_version, &actor)
-                        .await?
+                    forgebase_db::submit(
+                        client,
+                        &registry,
+                        doctype,
+                        name,
+                        expected_version,
+                        &caller,
+                    )
+                    .await?
                 }
                 StatusKind::Cancel => {
-                    forgebase_db::cancel(client, &registry, doctype, name, expected_version, &actor)
-                        .await?
+                    forgebase_db::cancel(
+                        client,
+                        &registry,
+                        doctype,
+                        name,
+                        expected_version,
+                        &caller,
+                    )
+                    .await?
                 }
                 StatusKind::Amend => {
-                    forgebase_db::amend(client, &registry, doctype, name, expected_version, &actor)
+                    forgebase_db::amend(client, &registry, doctype, name, expected_version, &caller)
                         .await?
                 }
             }
@@ -283,7 +359,7 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
                 &doctype,
                 &name,
                 expected_version,
-                &actor,
+                &Caller::system(actor),
             )
             .await?);
         }

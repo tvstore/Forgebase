@@ -9,6 +9,7 @@ use std::time::Duration;
 use common::{PERSON, TestDb, registry};
 use forgebase_core::document::{Changes, Document, Row, ValidationError};
 use forgebase_core::meta::Registry;
+use forgebase_core::permission::Caller;
 use forgebase_core::value::Value;
 use forgebase_db::{Conflict, DbError, Step, SyncOptions, delete, get, insert, sync, update};
 use rust_decimal::Decimal;
@@ -451,9 +452,15 @@ async fn dry_run_shows_the_sql_of_a_parent_and_its_child() {
 async fn insert_with_rows_and_get_return_the_rows_in_order() {
     let (db, reg) = setup().await;
     let mut client = db.pool.get().await.unwrap();
-    insert(&mut **client, &reg, "person", person("sam@x.y"), "cli")
-        .await
-        .unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        "person",
+        person("sam@x.y"),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let mut second = item(2, "second");
     second.insert(
         "rate".into(),
@@ -468,7 +475,7 @@ async fn insert_with_rows_and_get_return_the_rows_in_order() {
         &reg,
         "invoice",
         invoice("INV-1", rows),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -487,10 +494,16 @@ async fn insert_with_rows_and_get_return_the_rows_in_order() {
     assert_eq!(items[2]["qty"], Value::Int(3));
     assert!(items.iter().all(|r| r.len() == 4));
 
-    let fetched = get(&mut **client, &reg, "invoice", &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        "invoice",
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, created);
 
     // Stored as: row ids (UUID v7, all different), the parent's id, idx 1, 2, 3.
@@ -521,20 +534,32 @@ async fn a_document_without_rows_has_an_empty_list() {
     let mut client = db.pool.get().await.unwrap();
     let mut doc = invoice("empty", vec![]);
     doc.tables.clear();
-    let created = insert(&mut **client, &reg, "invoice", doc, "cli")
+    let created = insert(&mut **client, &reg, "invoice", doc, &Caller::system("cli"))
         .await
         .unwrap();
     assert_eq!(created.tables["items"], Vec::<Row>::new());
-    let fetched = get(&mut **client, &reg, "invoice", &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        "invoice",
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched.tables["items"], Vec::<Row>::new());
     assert!(
-        get(&mut **client, &reg, "invoice", "nothing")
-            .await
-            .unwrap()
-            .is_none()
+        get(
+            &mut **client,
+            &reg,
+            "invoice",
+            "nothing",
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -542,9 +567,15 @@ async fn a_document_without_rows_has_an_empty_list() {
 async fn row_validation_errors_carry_positions_and_write_nothing() {
     let (db, reg) = setup().await;
     let mut client = db.pool.get().await.unwrap();
-    insert(&mut **client, &reg, "person", person("sam@x.y"), "cli")
-        .await
-        .unwrap();
+    insert(
+        &mut **client,
+        &reg,
+        "person",
+        person("sam@x.y"),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let mut linked = item(2, "b");
     linked.insert("supplier".into(), text("nobody@x.y"));
     let mut bad_value = item(3, "c");
@@ -555,9 +586,15 @@ async fn row_validation_errors_carry_positions_and_write_nothing() {
         bad_value,
         BTreeMap::from([("description".to_owned(), text("no qty"))]),
     ];
-    let error = insert(&mut **client, &reg, "invoice", invoice("X", rows), "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        invoice("X", rows),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     let DbError::Validation(errors) = &error else {
         panic!("{error}");
     };
@@ -610,7 +647,7 @@ async fn a_required_table_needs_rows() {
         d.tables.clear();
         d
     }] {
-        let error = insert(&mut **client, &reg, "invoice", doc, "cli")
+        let error = insert(&mut **client, &reg, "invoice", doc, &Caller::system("cli"))
             .await
             .unwrap_err();
         assert!(
@@ -624,7 +661,7 @@ async fn a_required_table_needs_rows() {
         &reg,
         "invoice",
         invoice("ok", vec![item(1, "a")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -636,7 +673,7 @@ async fn a_required_table_needs_rows() {
         &created.name,
         1,
         &rows_change(vec![]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -652,7 +689,7 @@ async fn unknown_table_and_misused_table_values_are_validation_errors() {
     doc.tables.insert("ghosts".into(), vec![]);
     doc.values.insert("items".into(), Value::Int(1));
     doc.tables.insert("title".into(), vec![item(1, "a")]);
-    let error = insert(&mut **client, &reg, "invoice", doc, "cli")
+    let error = insert(&mut **client, &reg, "invoice", doc, &Caller::system("cli"))
         .await
         .unwrap_err();
     let DbError::Validation(errors) = &error else {
@@ -679,7 +716,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
         &reg,
         "invoice",
         invoice("INV", vec![item(1, "a"), item(2, "b"), item(3, "c")]),
-        "alice",
+        &Caller::system("alice"),
     )
     .await
     .unwrap();
@@ -695,7 +732,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
         &created.name,
         1,
         &rows_change(vec![item(9, "z"), item(8, "y")]),
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -727,7 +764,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
         &created.name,
         2,
         &changes,
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -752,7 +789,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
         &created.name,
         3,
         &both,
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -767,7 +804,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
         &created.name,
         4,
         &rows_change(vec![]),
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -783,7 +820,7 @@ async fn update_replaces_rows_and_keeps_them_when_not_mentioned() {
         &created.name,
         5,
         &Changes::default(),
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap_err();
@@ -799,7 +836,7 @@ async fn update_with_a_stale_version_or_bad_rows_leaves_the_rows_alone() {
         &reg,
         "invoice",
         invoice("INV", vec![item(1, "keep")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -810,7 +847,7 @@ async fn update_with_a_stale_version_or_bad_rows_leaves_the_rows_alone() {
         &created.name,
         7,
         &rows_change(vec![item(2, "lost")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -832,7 +869,7 @@ async fn update_with_a_stale_version_or_bad_rows_leaves_the_rows_alone() {
         &created.name,
         1,
         &rows_change(vec![item(2, "ok"), BTreeMap::new()]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -844,15 +881,21 @@ async fn update_with_a_stale_version_or_bad_rows_leaves_the_rows_alone() {
         "nothing",
         1,
         &rows_change(vec![item(2, "ok")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
-    let fetched = get(&mut **client, &reg, "invoice", &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        "invoice",
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, created);
 }
 
@@ -865,7 +908,7 @@ async fn delete_removes_the_rows_with_the_document() {
         &reg,
         "invoice",
         invoice("A", vec![item(1, "a1"), item(2, "a2")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -874,21 +917,35 @@ async fn delete_removes_the_rows_with_the_document() {
         &reg,
         "invoice",
         invoice("B", vec![item(1, "b1")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
     assert_eq!(count(&db, "doc_invoice_item").await, 3);
     // A stale delete removes nothing.
     assert!(
-        delete(&mut **client, &reg, "invoice", &a.name, 9, "ann")
-            .await
-            .is_err()
+        delete(
+            &mut **client,
+            &reg,
+            "invoice",
+            &a.name,
+            9,
+            &Caller::system("ann")
+        )
+        .await
+        .is_err()
     );
     assert_eq!(count(&db, "doc_invoice_item").await, 3);
-    delete(&mut **client, &reg, "invoice", &a.name, 1, "ann")
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        &a.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&db, "doc_invoice").await, 1);
     assert_eq!(
         db.rows("SELECT description::text FROM doc_invoice_item")
@@ -901,9 +958,15 @@ async fn delete_removes_the_rows_with_the_document() {
 async fn a_person_linked_from_a_row_cannot_be_deleted_and_the_error_names_the_owner() {
     let (db, reg) = setup().await;
     let mut client = db.pool.get().await.unwrap();
-    let sam = insert(&mut **client, &reg, "person", person("sam@x.y"), "cli")
-        .await
-        .unwrap();
+    let sam = insert(
+        &mut **client,
+        &reg,
+        "person",
+        person("sam@x.y"),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     let mut row = item(1, "a");
     row.insert("supplier".into(), text("sam@x.y"));
     let created = insert(
@@ -911,24 +974,45 @@ async fn a_person_linked_from_a_row_cannot_be_deleted_and_the_error_names_the_ow
         &reg,
         "invoice",
         invoice("INV", vec![row]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
-    let error = delete(&mut **client, &reg, "person", &sam.name, 1, "ann")
-        .await
-        .unwrap_err();
+    let error = delete(
+        &mut **client,
+        &reg,
+        "person",
+        &sam.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(&error, DbError::LinkedDocumentExists { referenced_by: Some(by), .. } if by == "invoice"),
         "{error}"
     );
     // Once the invoice (and so its rows) is gone, the person can be deleted.
-    delete(&mut **client, &reg, "invoice", &created.name, 1, "ann")
-        .await
-        .unwrap();
-    delete(&mut **client, &reg, "person", &sam.name, 1, "ann")
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        "invoice",
+        &created.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        "person",
+        &sam.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -942,28 +1026,57 @@ async fn child_doctypes_have_no_crud_of_their_own() {
         values: BTreeMap::from([("qty".to_owned(), Value::Int(1))]),
         tables: BTreeMap::new(),
     };
-    let error = insert(&mut **client, &reg, "invoice_item", doc, "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        "invoice_item",
+        doc,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(is_child(&error), "{error}");
     assert!(error.to_string().contains("child DocType"), "{error}");
-    let error = get(&mut **client, &reg, "invoice_item", "x")
-        .await
-        .unwrap_err();
+    let error = get(
+        &mut **client,
+        &reg,
+        "invoice_item",
+        "x",
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(is_child(&error), "{error}");
     let changes = Changes {
         values: BTreeMap::from([("qty".to_owned(), Value::Int(1))]),
         tables: BTreeMap::new(),
     };
-    let error = update(&mut **client, &reg, "invoice_item", "x", 1, &changes, "cli")
+    let error = update(
+        &mut **client,
+        &reg,
+        "invoice_item",
+        "x",
+        1,
+        &changes,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
+    assert!(is_child(&error), "{error}");
+    let error = delete(
+        &mut **client,
+        &reg,
+        "invoice_item",
+        "x",
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
+    assert!(is_child(&error), "{error}");
+    let error = get(&mut **client, &reg, "nope", "x", &Caller::system("cli"))
         .await
         .unwrap_err();
-    assert!(is_child(&error), "{error}");
-    let error = delete(&mut **client, &reg, "invoice_item", "x", 1, "ann")
-        .await
-        .unwrap_err();
-    assert!(is_child(&error), "{error}");
-    let error = get(&mut **client, &reg, "nope", "x").await.unwrap_err();
     assert!(
         matches!(&error, DbError::UnknownDocType { name } if name == "nope"),
         "{error}"
@@ -988,7 +1101,7 @@ async fn a_failing_row_write_leaves_no_parent_on_a_pooled_client() {
         &reg,
         "invoice",
         invoice("INV", vec![item(1, "fine"), item(13, "unlucky")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -1005,7 +1118,7 @@ async fn a_failing_row_write_leaves_no_parent_on_a_pooled_client() {
         &reg,
         "invoice",
         invoice("INV", vec![item(1, "old")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -1020,14 +1133,20 @@ async fn a_failing_row_write_leaves_no_parent_on_a_pooled_client() {
         &created.name,
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
-    let fetched = get(&mut **client, &reg, "invoice", &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        "invoice",
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, created);
 }
 
@@ -1045,7 +1164,7 @@ async fn operations_in_a_caller_transaction_roll_back_with_it_and_a_failure_does
         &reg,
         "invoice",
         invoice("kept", vec![item(1, "a")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -1055,7 +1174,7 @@ async fn operations_in_a_caller_transaction_roll_back_with_it_and_a_failure_does
         &reg,
         "invoice",
         invoice("lost", vec![item(13, "b")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -1075,7 +1194,7 @@ async fn operations_in_a_caller_transaction_roll_back_with_it_and_a_failure_does
         &reg,
         "invoice",
         invoice("rolled back", vec![item(2, "c")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -1099,7 +1218,7 @@ async fn a_unique_violation_in_the_parent_writes_no_rows() {
         &reg,
         "invoice",
         invoice("same", vec![item(1, "a")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -1108,7 +1227,7 @@ async fn a_unique_violation_in_the_parent_writes_no_rows() {
         &reg,
         "invoice",
         invoice("same", vec![item(2, "b")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -1130,7 +1249,7 @@ async fn a_read_never_mixes_a_document_with_the_rows_of_another_version() {
         &reg,
         "invoice",
         invoice("INV", vec![item(1, "v1")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -1147,7 +1266,7 @@ async fn a_read_never_mixes_a_document_with_the_rows_of_another_version() {
                 &name,
                 version,
                 &rows_change(vec![item(1, &format!("v{}", version + 1))]),
-                "cli",
+                &Caller::system("cli"),
             )
             .await
             .unwrap();
@@ -1157,7 +1276,15 @@ async fn a_read_never_mixes_a_document_with_the_rows_of_another_version() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let mut seen = 0;
         while seen < 40 && tokio::time::Instant::now() < deadline {
-            match get(&mut **reader, &reg, "invoice", &name).await {
+            match get(
+                &mut **reader,
+                &reg,
+                "invoice",
+                &name,
+                &Caller::system("cli"),
+            )
+            .await
+            {
                 Ok(Some(doc)) => {
                     let rows = &doc.tables["items"];
                     assert_eq!(rows.len(), 1);
@@ -1188,7 +1315,7 @@ async fn concurrent_row_replacements_with_one_version_have_one_winner() {
         &reg,
         "invoice",
         invoice("INV", vec![item(1, "start")]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -1196,9 +1323,10 @@ async fn concurrent_row_replacements_with_one_version_have_one_winner() {
         rows_change(vec![item(1, "one-a"), item(2, "one-b")]),
         rows_change(vec![item(3, "two-a")]),
     );
+    let (caller_a, caller_b) = (Caller::system("a"), Caller::system("b"));
     let (ra, rb) = tokio::join!(
-        update(&mut **a, &reg, "invoice", &created.name, 1, &one, "a"),
-        update(&mut **b, &reg, "invoice", &created.name, 1, &two, "b"),
+        update(&mut **a, &reg, "invoice", &created.name, 1, &one, &caller_a),
+        update(&mut **b, &reg, "invoice", &created.name, 1, &two, &caller_b),
     );
     let (winner, loser) = match (ra, rb) {
         (Ok(w), Err(l)) | (Err(l), Ok(w)) => (w, l),
@@ -1215,10 +1343,16 @@ async fn concurrent_row_replacements_with_one_version_have_one_winner() {
         ),
         "{loser}"
     );
-    let fetched = get(&mut **a, &reg, "invoice", &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **a,
+        &reg,
+        "invoice",
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, winner);
     assert_eq!(
         fetched.tables["items"].len(),

@@ -10,6 +10,7 @@ use common::{TestDb, registry};
 use forgebase_core::document::{Document, ValidationError};
 use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError};
 use forgebase_core::meta::Registry;
+use forgebase_core::permission::Caller;
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, amend, cancel, delete, insert, submit};
 
@@ -92,13 +93,21 @@ async fn names_come_from_the_series_with_the_utc_date_of_the_transaction() {
     let mut client = db.pool.get().await.unwrap();
     let c = &mut **client;
     for n in 1..=3 {
-        let stored = insert(c, &reg, "invoice", doc(None), "ann").await.unwrap();
+        let stored = insert(c, &reg, "invoice", doc(None), &Caller::system("ann"))
+            .await
+            .unwrap();
         assert_eq!(stored.name, format!("INV-{yyyy}-{n:05}"));
         assert_eq!(stored.version, 1);
     }
-    let ticket = insert(c, &reg, "ticket", Document::default(), "ann")
-        .await
-        .unwrap();
+    let ticket = insert(
+        c,
+        &reg,
+        "ticket",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(ticket.name, format!("T-{yy}{mm}{dd}-001"));
     // One counter row per prefix, holding the last number.
     assert_eq!(
@@ -122,9 +131,15 @@ async fn the_date_is_the_utc_date_whatever_the_session_time_zone() {
         .await
         .unwrap();
     let mut client = client;
-    let stored = insert(&mut **client, &reg, "ticket", Document::default(), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "ticket",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(stored.name, format!("T-{yy}{mm}{dd}-001"));
 }
 
@@ -134,11 +149,15 @@ async fn patterns_with_the_same_prefix_share_one_counter() {
     let [yyyy, _, mm, _] = utc(&db).await;
     let mut client = db.pool.get().await.unwrap();
     let c = &mut **client;
-    let a = insert(c, &reg, "invoice", doc(None), "ann").await.unwrap();
-    let b = insert(c, &reg, "bill", Document::default(), "ann")
+    let a = insert(c, &reg, "invoice", doc(None), &Caller::system("ann"))
         .await
         .unwrap();
-    let a2 = insert(c, &reg, "invoice", doc(None), "ann").await.unwrap();
+    let b = insert(c, &reg, "bill", Document::default(), &Caller::system("ann"))
+        .await
+        .unwrap();
+    let a2 = insert(c, &reg, "invoice", doc(None), &Caller::system("ann"))
+        .await
+        .unwrap();
     assert_eq!(a.name, format!("INV-{yyyy}-00001"));
     // The other width and the date part after the number; the number goes on counting.
     assert_eq!(b.name, format!("INV-{yyyy}-0000002-{mm}"));
@@ -155,9 +174,15 @@ async fn a_number_wider_than_the_hashes_is_printed_in_full() {
     db.exec("INSERT INTO fb_series (prefix, current) VALUES ('SO-', 9999)")
         .await;
     let mut client = db.pool.get().await.unwrap();
-    let stored = insert(&mut **client, &reg, "order", Document::default(), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "order",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(stored.name, "SO-10000");
 }
 
@@ -167,9 +192,15 @@ async fn a_name_cannot_be_given_with_a_series() {
     let mut client = db.pool.get().await.unwrap();
     let mut given = doc(None);
     given.name = Some("INV-1".to_owned());
-    let error = insert(&mut **client, &reg, "invoice", given, "ann")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        given,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(&error, DbError::Naming(m) if m.contains("naming series")),
         "{error}"
@@ -183,13 +214,13 @@ async fn a_failed_insert_gives_its_number_back() {
     let [yyyy, ..] = utc(&db).await;
     let mut client = db.pool.get().await.unwrap();
     let c = &mut **client;
-    let first = insert(c, &reg, "invoice", doc(Some("dup")), "ann")
+    let first = insert(c, &reg, "invoice", doc(Some("dup")), &Caller::system("ann"))
         .await
         .unwrap();
     assert_eq!(first.name, format!("INV-{yyyy}-00001"));
 
     // The unique violation happens after the number was taken, in the same transaction.
-    let error = insert(c, &reg, "invoice", doc(Some("dup")), "ann")
+    let error = insert(c, &reg, "invoice", doc(Some("dup")), &Caller::system("ann"))
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::UniqueViolation { .. }), "{error}");
@@ -198,9 +229,15 @@ async fn a_failed_insert_gives_its_number_back() {
         [(format!("INV-{yyyy}-"), "1".to_owned())]
     );
 
-    let next = insert(c, &reg, "invoice", doc(Some("other")), "ann")
-        .await
-        .unwrap();
+    let next = insert(
+        c,
+        &reg,
+        "invoice",
+        doc(Some("other")),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         next.name,
         format!("INV-{yyyy}-00002"),
@@ -226,12 +263,12 @@ async fn documents_refused_before_naming_take_no_number() {
     let c = &mut **client;
     // A hook error, and a validation error (a value for an unknown field).
     assert!(matches!(
-        insert(c, &hooked, "invoice", doc(None), "ann").await,
+        insert(c, &hooked, "invoice", doc(None), &Caller::system("ann")).await,
         Err(DbError::Hook { .. })
     ));
     let mut invalid = doc(None);
     invalid.values.insert("nope".to_owned(), Value::Int(1));
-    let error = insert(c, &plain, "invoice", invalid, "ann")
+    let error = insert(c, &plain, "invoice", invalid, &Caller::system("ann"))
         .await
         .unwrap_err();
     assert!(
@@ -239,7 +276,7 @@ async fn documents_refused_before_naming_take_no_number() {
         "{error}"
     );
     assert!(counters(&db).await.is_empty());
-    let first = insert(c, &plain, "invoice", doc(None), "ann")
+    let first = insert(c, &plain, "invoice", doc(None), &Caller::system("ann"))
         .await
         .unwrap();
     assert!(first.name.ends_with("-00001"), "{}", first.name);
@@ -251,22 +288,26 @@ async fn the_counter_moves_with_a_callers_transaction() {
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
     let mut tx = raw.transaction().await.unwrap();
-    let a = insert(&mut tx, &reg, "invoice", doc(None), "ann")
+    let a = insert(&mut tx, &reg, "invoice", doc(None), &Caller::system("ann"))
         .await
         .unwrap();
     assert!(a.name.ends_with("-00001"));
     // A failed call inside the transaction (a savepoint) gives only its own number back.
     let mut bad = doc(None);
     bad.name = Some("x".to_owned());
-    assert!(insert(&mut tx, &reg, "invoice", bad, "ann").await.is_err());
-    let b = insert(&mut tx, &reg, "invoice", doc(None), "ann")
+    assert!(
+        insert(&mut tx, &reg, "invoice", bad, &Caller::system("ann"))
+            .await
+            .is_err()
+    );
+    let b = insert(&mut tx, &reg, "invoice", doc(None), &Caller::system("ann"))
         .await
         .unwrap();
     assert!(b.name.ends_with("-00002"), "{}", b.name);
     tx.rollback().await.unwrap();
     // Everything of the transaction is gone, the counter row too.
     assert!(counters(&db).await.is_empty());
-    let c = insert(raw, &reg, "invoice", doc(None), "ann")
+    let c = insert(raw, &reg, "invoice", doc(None), &Caller::system("ann"))
         .await
         .unwrap();
     assert!(c.name.ends_with("-00001"), "{}", c.name);
@@ -286,7 +327,7 @@ async fn twenty_parallel_inserts_get_the_numbers_one_to_twenty() {
                 &reg,
                 "invoice",
                 doc(Some(&format!("r{i}"))),
-                "ann",
+                &Caller::system("ann"),
             )
             .await
             .unwrap()
@@ -315,9 +356,15 @@ async fn parallel_inserts_with_failures_leave_no_gap() {
         let (pool, reg) = (db.pool.clone(), reg.clone());
         tasks.push(tokio::spawn(async move {
             let mut client = pool.get().await.unwrap();
-            insert(&mut **client, &reg, "invoice", doc(Some("same")), "ann")
-                .await
-                .map(|d| (i, d.name))
+            insert(
+                &mut **client,
+                &reg,
+                "invoice",
+                doc(Some("same")),
+                &Caller::system("ann"),
+            )
+            .await
+            .map(|d| (i, d.name))
         }));
     }
     let mut winners = 0;
@@ -333,9 +380,15 @@ async fn parallel_inserts_with_failures_leave_no_gap() {
     }
     assert_eq!(winners, 1);
     let mut client = db.pool.get().await.unwrap();
-    let next = insert(&mut **client, &reg, "invoice", doc(Some("next")), "ann")
-        .await
-        .unwrap();
+    let next = insert(
+        &mut **client,
+        &reg,
+        "invoice",
+        doc(Some("next")),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert!(next.name.ends_with("-00002"), "{}", next.name);
 }
 
@@ -344,27 +397,53 @@ async fn a_submittable_series_doctype_amends_by_its_own_rule_and_takes_no_number
     let (db, reg) = setup(&[ORDER]).await;
     let mut client = db.pool.get().await.unwrap();
     let c = &mut **client;
-    let one = insert(c, &reg, "order", Document::default(), "ann")
+    let one = insert(
+        c,
+        &reg,
+        "order",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(one.name, "SO-0001");
+    let one = submit(c, &reg, "order", &one.name, 1, &Caller::system("ann"))
         .await
         .unwrap();
-    assert_eq!(one.name, "SO-0001");
-    let one = submit(c, &reg, "order", &one.name, 1, "ann").await.unwrap();
-    let one = cancel(c, &reg, "order", &one.name, 2, "ann").await.unwrap();
-    let amended = amend(c, &reg, "order", &one.name, 3, "ann").await.unwrap();
+    let one = cancel(c, &reg, "order", &one.name, 2, &Caller::system("ann"))
+        .await
+        .unwrap();
+    let amended = amend(c, &reg, "order", &one.name, 3, &Caller::system("ann"))
+        .await
+        .unwrap();
     assert_eq!(amended.name, "SO-0001-1");
     assert_eq!(amended.amended_from.as_deref(), Some("SO-0001"));
     assert_eq!(counters(&db).await, [("SO-".to_owned(), "1".to_owned())]);
     // The next new order is numbered 2, and its amendments follow the same rule.
-    let two = insert(c, &reg, "order", Document::default(), "ann")
-        .await
-        .unwrap();
+    let two = insert(
+        c,
+        &reg,
+        "order",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(two.name, "SO-0002");
     let _ = amended;
     // Deleting a document does not give its number back (only a rollback does).
-    delete(c, &reg, "order", &two.name, 1, "ann").await.unwrap();
-    let three = insert(c, &reg, "order", Document::default(), "ann")
+    delete(c, &reg, "order", &two.name, 1, &Caller::system("ann"))
         .await
         .unwrap();
+    let three = insert(
+        c,
+        &reg,
+        "order",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(three.name, "SO-0003");
 }
 
@@ -378,9 +457,15 @@ naming = { series = "x'');DROP TABLE fb_series;--.#" }
 "#;
     let (db, reg) = setup(&[evil]).await;
     let mut client = db.pool.get().await.unwrap();
-    let stored = insert(&mut **client, &reg, "evil", Document::default(), "ann")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        "evil",
+        Document::default(),
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert_eq!(stored.name, "x'');DROP TABLE fb_series;--1");
     assert_eq!(
         counters(&db).await,

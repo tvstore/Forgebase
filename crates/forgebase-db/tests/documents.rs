@@ -8,6 +8,7 @@ use std::time::Duration;
 use common::{CUSTOMER, TestDb, registry};
 use forgebase_core::document::{Changes, Document, ValidationError};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::permission::Caller;
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, delete, get, insert, update};
 use macros_free::{date, datetime};
@@ -110,7 +111,7 @@ async fn round_trips_every_field_type() {
         &reg,
         &customer.name,
         full_customer("a@example.com"),
-        "alice",
+        &Caller::system("alice"),
     )
     .await
     .unwrap();
@@ -127,10 +128,16 @@ async fn round_trips_every_field_type() {
     assert_eq!(stored.version, 1);
     assert_eq!(stored.created_at, stored.modified_at);
 
-    let fetched = get(&mut **client, &reg, &customer.name, &stored.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &stored.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, stored);
 }
 
@@ -143,7 +150,7 @@ async fn absent_and_null_values_are_null() {
         &reg,
         &types[0].name,
         doc(&[("email", text("n@example.com")), ("points", Value::Null)]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -178,7 +185,7 @@ async fn boundary_values_round_trip() {
             &reg,
             &customer.name,
             doc(&[("email", text(email)), ("credit_limit", dec(decimal))]),
-            "cli",
+            &Caller::system("cli"),
         )
         .await
         .unwrap();
@@ -195,7 +202,7 @@ async fn boundary_values_round_trip() {
                 ("email", text(&format!("int{n}"))),
                 ("points", Value::Int(n)),
             ]),
-            "cli",
+            &Caller::system("cli"),
         )
         .await
         .unwrap();
@@ -208,7 +215,7 @@ async fn boundary_values_round_trip() {
         &reg,
         &customer.name,
         doc(&[("email", text("tz")), ("last_seen", Value::Datetime(local))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -228,15 +235,21 @@ async fn random_naming_uses_the_id() {
         &reg,
         &types[0].name,
         full_customer("r@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
     assert_eq!(stored.name, stored.id.hyphenated().to_string());
     assert_eq!(stored.id.get_version_num(), 7);
-    let again = get(&mut **client, &reg, &types[0].name, &stored.name)
-        .await
-        .unwrap();
+    let again = get(
+        &mut **client,
+        &reg,
+        &types[0].name,
+        &stored.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap();
     assert_eq!(again.unwrap().id, stored.id);
 }
 
@@ -246,9 +259,15 @@ async fn explicit_name_is_rejected_for_random_naming() {
     let mut client = db.pool.get().await.unwrap();
     let mut document = full_customer("x@example.com");
     document.name = Some("my-name".to_owned());
-    let error = insert(&mut **client, &reg, &types[0].name, document, "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &types[0].name,
+        document,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Naming(_)), "{error}");
     assert_eq!(count(&db, "doc_customer").await, 0);
 }
@@ -264,7 +283,7 @@ async fn field_naming_uses_the_field_value() {
         &reg,
         &account.name,
         doc(&[("email", text("a@b.c"))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -274,23 +293,41 @@ async fn field_naming_uses_the_field_value() {
     let mut same = doc(&[("email", text("same"))]);
     same.name = Some("same".to_owned());
     assert_eq!(
-        insert(&mut **client, &reg, &account.name, same, "cli")
-            .await
-            .unwrap()
-            .name,
+        insert(
+            &mut **client,
+            &reg,
+            &account.name,
+            same,
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .name,
         "same"
     );
     let mut different = doc(&[("email", text("other"))]);
     different.name = Some("nope".to_owned());
-    let error = insert(&mut **client, &reg, &account.name, different, "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &account.name,
+        different,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Naming(_)), "{error}");
     assert!(
-        get(&mut **client, &reg, &account.name, "other")
-            .await
-            .unwrap()
-            .is_none()
+        get(
+            &mut **client,
+            &reg,
+            &account.name,
+            "other",
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -308,7 +345,7 @@ async fn validation_errors_are_collected_and_nothing_is_written() {
             ("tier", text("platinum")),
             ("points", text("many")),
         ]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -330,9 +367,15 @@ async fn validation_errors_are_collected_and_nothing_is_written() {
     assert_eq!(count(&db, "doc_customer").await, 0);
 
     // A required field that is missing entirely.
-    let error = insert(&mut **client, &reg, &types[0].name, doc(&[]), "cli")
-        .await
-        .unwrap_err();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &types[0].name,
+        doc(&[]),
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(error, DbError::Validation(ref e) if e.len() == 1),
         "{error}"
@@ -349,15 +392,23 @@ async fn invalid_actor_is_rejected() {
             &reg,
             &types[0].name,
             full_customer("a@x.y"),
-            actor,
+            &Caller::system(actor),
         )
         .await
         .unwrap_err();
         assert!(matches!(error, DbError::InvalidActor), "{error}");
         let changes = values_of([("points".to_owned(), Value::Int(1))]);
-        let error = update(&mut **client, &reg, &types[0].name, "n", 1, &changes, actor)
-            .await
-            .unwrap_err();
+        let error = update(
+            &mut **client,
+            &reg,
+            &types[0].name,
+            "n",
+            1,
+            &changes,
+            &Caller::system(actor),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, DbError::InvalidActor), "{error}");
     }
     assert_eq!(count(&db, "doc_customer").await, 0);
@@ -368,10 +419,16 @@ async fn get_missing_is_none() {
     let (db, reg, types) = setup(&[CUSTOMER]).await;
     let mut client = db.pool.get().await.unwrap();
     assert!(
-        get(&mut **client, &reg, &types[0].name, "nothing")
-            .await
-            .unwrap()
-            .is_none()
+        get(
+            &mut **client,
+            &reg,
+            &types[0].name,
+            "nothing",
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -385,7 +442,7 @@ async fn update_changes_values_and_bumps_version() {
         &reg,
         &customer.name,
         full_customer("u@example.com"),
-        "alice",
+        &Caller::system("alice"),
     )
     .await
     .unwrap();
@@ -403,7 +460,7 @@ async fn update_changes_values_and_bumps_version() {
         &created.name,
         1,
         &changes,
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -420,10 +477,16 @@ async fn update_changes_values_and_bumps_version() {
     assert_eq!(updated.values["tier"], text("gold"));
     assert_eq!(updated.values["email"], created.values["email"]);
 
-    let fetched = get(&mut **client, &reg, &customer.name, &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = get(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(fetched, updated);
     let third = update(
         &mut **client,
@@ -432,7 +495,7 @@ async fn update_changes_values_and_bumps_version() {
         &created.name,
         2,
         &changes,
-        "bob",
+        &Caller::system("bob"),
     )
     .await
     .unwrap();
@@ -450,7 +513,7 @@ async fn update_rejects_bad_changes() {
         &reg,
         &customer.name,
         full_customer("v@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -463,7 +526,7 @@ async fn update_rejects_bad_changes() {
         &created.name,
         1,
         &Changes::default(),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -480,7 +543,7 @@ async fn update_rejects_bad_changes() {
         &created.name,
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -495,7 +558,7 @@ async fn update_rejects_bad_changes() {
         &reg,
         &account.name,
         doc(&[("email", text("old"))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -508,17 +571,23 @@ async fn update_rejects_bad_changes() {
             "old",
             1,
             &changes,
-            "cli",
+            &Caller::system("cli"),
         )
         .await
         .unwrap_err();
         assert!(matches!(error, DbError::Naming(_)), "{error}");
     }
     assert_eq!(
-        get(&mut **client, &reg, &account.name, "old")
-            .await
-            .unwrap()
-            .unwrap(),
+        get(
+            &mut **client,
+            &reg,
+            &account.name,
+            "old",
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .unwrap(),
         named
     );
 
@@ -531,7 +600,7 @@ async fn update_rejects_bad_changes() {
         "missing",
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -540,10 +609,16 @@ async fn update_rejects_bad_changes() {
         "{error}"
     );
     // Nothing changed.
-    let unchanged = get(&mut **client, &reg, &customer.name, &created.name)
-        .await
-        .unwrap()
-        .unwrap();
+    let unchanged = get(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &created.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(unchanged, created);
 }
 
@@ -557,22 +632,42 @@ async fn delete_removes_the_document() {
         &reg,
         &customer.name,
         full_customer("d@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
-    delete(&mut **client, &reg, &customer.name, &stored.name, 1, "ann")
-        .await
-        .unwrap();
+    delete(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &stored.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap();
     assert!(
-        get(&mut **client, &reg, &customer.name, &stored.name)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let error = delete(&mut **client, &reg, &customer.name, &stored.name, 1, "ann")
+        get(
+            &mut **client,
+            &reg,
+            &customer.name,
+            &stored.name,
+            &Caller::system("cli")
+        )
         .await
-        .unwrap_err();
+        .unwrap()
+        .is_none()
+    );
+    let error = delete(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &stored.name,
+        1,
+        &Caller::system("ann"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
 }
 
@@ -587,7 +682,7 @@ async fn duplicate_unique_values_are_unique_violations() {
         &reg,
         &customer.name,
         full_customer("dup@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -596,7 +691,7 @@ async fn duplicate_unique_values_are_unique_violations() {
         &reg,
         &customer.name,
         full_customer("dup@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -615,7 +710,7 @@ async fn duplicate_unique_values_are_unique_violations() {
         &reg,
         &customer.name,
         full_customer("other@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -627,7 +722,7 @@ async fn duplicate_unique_values_are_unique_violations() {
         &other.name,
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -639,7 +734,7 @@ async fn duplicate_unique_values_are_unique_violations() {
         &reg,
         &account.name,
         doc(&[("email", text("n"))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -648,7 +743,7 @@ async fn duplicate_unique_values_are_unique_violations() {
         &reg,
         &account.name,
         doc(&[("email", text("n"))]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -671,7 +766,7 @@ async fn injection_like_strings_are_stored_literally() {
             &reg,
             &customer.name,
             doc(&[("email", text(&format!("{i}@x.y"))), ("notes", text(value))]),
-            value,
+            &Caller::system(*value),
         )
         .await
         .unwrap();
@@ -685,20 +780,34 @@ async fn injection_like_strings_are_stored_literally() {
             &stored.name,
             1,
             &changes,
-            value,
+            &Caller::system(*value),
         )
         .await
         .unwrap();
         assert_eq!(updated.modified_by, *value);
         // Looking up by a hostile name finds nothing and breaks nothing.
         assert!(
-            get(&mut **client, &reg, &customer.name, value)
-                .await
-                .unwrap()
-                .is_none()
+            get(
+                &mut **client,
+                &reg,
+                &customer.name,
+                value,
+                &Caller::system("cli")
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
         assert!(matches!(
-            delete(&mut **client, &reg, &customer.name, value, 1, "ann").await,
+            delete(
+                &mut **client,
+                &reg,
+                &customer.name,
+                value,
+                1,
+                &Caller::system("ann")
+            )
+            .await,
             Err(DbError::NotFound { .. })
         ));
     }
@@ -718,7 +827,7 @@ async fn operations_in_a_rolled_back_transaction_leave_nothing() {
         &reg,
         &customer.name,
         full_customer("t@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -730,16 +839,22 @@ async fn operations_in_a_rolled_back_transaction_leave_nothing() {
         &stored.name,
         1,
         &changes,
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
     // Visible inside the transaction.
     assert!(
-        get(&mut tx, &reg, &customer.name, &stored.name)
-            .await
-            .unwrap()
-            .is_some()
+        get(
+            &mut tx,
+            &reg,
+            &customer.name,
+            &stored.name,
+            &Caller::system("cli")
+        )
+        .await
+        .unwrap()
+        .is_some()
     );
     tx.rollback().await.unwrap();
     assert_eq!(count(&db, "doc_customer").await, 0);
@@ -751,7 +866,7 @@ async fn operations_in_a_rolled_back_transaction_leave_nothing() {
         &reg,
         &customer.name,
         full_customer("t@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
@@ -803,7 +918,7 @@ async fn datetime_out_of_range_in_utc_is_an_error_not_a_panic() {
             ("email", text("e@x.y")),
             ("last_seen", Value::Datetime(edge)),
         ]),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap_err();
@@ -820,16 +935,22 @@ async fn unreadable_stored_values_give_an_error_naming_the_field() {
         &reg,
         &types[0].name,
         full_customer("raw@example.com"),
-        "cli",
+        &Caller::system("cli"),
     )
     .await
     .unwrap();
     // Another writer stores a date the `time` crate cannot represent.
     db.exec("UPDATE doc_customer SET joined_on = date '5874897-12-31'")
         .await;
-    let error = get(&mut **client, &reg, &types[0].name, &stored.name)
-        .await
-        .unwrap_err();
+    let error = get(
+        &mut **client,
+        &reg,
+        &types[0].name,
+        &stored.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::Decode { .. }), "{error:?}");
     let message = error.to_string();
     assert!(message.contains("`joined_on`"), "{message}");
@@ -838,9 +959,15 @@ async fn unreadable_stored_values_give_an_error_naming_the_field() {
     // Same for timestamptz infinity.
     db.exec("UPDATE doc_customer SET joined_on = NULL, last_seen = 'infinity'")
         .await;
-    let message = get(&mut **client, &reg, &types[0].name, &stored.name)
-        .await
-        .unwrap_err()
-        .to_string();
+    let message = get(
+        &mut **client,
+        &reg,
+        &types[0].name,
+        &stored.name,
+        &Caller::system("cli"),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(message.contains("`last_seen`"), "{message}");
 }

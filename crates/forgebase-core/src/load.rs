@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::meta::{
     DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming,
 };
+use crate::permission::PermissionRule;
 use crate::series::SeriesPattern;
 
 #[derive(Deserialize)]
@@ -20,6 +21,47 @@ struct RawDocType {
     submittable: bool,
     #[serde(default)]
     fields: Vec<RawField>,
+    #[serde(default)]
+    permissions: Vec<RawPermission>,
+}
+
+/// A `[[permissions]]` entry; every right defaults to false.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPermission {
+    role: String,
+    #[serde(default)]
+    read: bool,
+    #[serde(default)]
+    write: bool,
+    #[serde(default)]
+    create: bool,
+    #[serde(default)]
+    delete: bool,
+    #[serde(default)]
+    submit: bool,
+    #[serde(default)]
+    cancel: bool,
+    #[serde(default)]
+    amend: bool,
+    #[serde(default)]
+    if_owner: bool,
+}
+
+impl From<RawPermission> for PermissionRule {
+    fn from(raw: RawPermission) -> Self {
+        PermissionRule {
+            role: raw.role,
+            read: raw.read,
+            write: raw.write,
+            create: raw.create,
+            delete: raw.delete,
+            submit: raw.submit,
+            cancel: raw.cancel,
+            amend: raw.amend,
+            if_owner: raw.if_owner,
+        }
+    }
 }
 
 fn convert_naming(value: Option<toml::Value>, errors: &mut Vec<DefinitionError>) -> Naming {
@@ -114,6 +156,7 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         fields,
         is_child: raw.is_child,
         submittable: raw.submittable,
+        permissions: raw.permissions.into_iter().map(Into::into).collect(),
     };
     errors.extend(doctype.check(&failed));
     if errors.is_empty() {
@@ -790,5 +833,149 @@ type = "date"
                 "{errors:?}"
             );
         }
+    }
+
+    const PLAIN: &str = "name = \"t\"\nlabel = \"T\"\n";
+    const SUBMITTABLE: &str = "name = \"t\"\nlabel = \"T\"\nsubmittable = true\n";
+
+    fn rule(body: &str) -> String {
+        format!("[[permissions]]\n{body}\n")
+    }
+
+    #[test]
+    fn parses_permission_rules_with_false_defaults() {
+        let text = format!(
+            "{SUBMITTABLE}{}{}",
+            rule("role = \"Sales User\"\nread = true\nwrite = true\ncreate = true\nsubmit = true"),
+            rule("role = \"Auditor\"\nread = true\nif_owner = true")
+        );
+        let d = from_toml_str(&text).unwrap();
+        assert_eq!(
+            d.permissions,
+            vec![
+                PermissionRule {
+                    read: true,
+                    write: true,
+                    create: true,
+                    submit: true,
+                    ..PermissionRule::new("Sales User")
+                },
+                PermissionRule {
+                    read: true,
+                    if_owner: true,
+                    ..PermissionRule::new("Auditor")
+                },
+            ]
+        );
+        // No rules at all is valid: deny by default.
+        assert!(from_toml_str(PLAIN).unwrap().permissions.is_empty());
+    }
+
+    #[test]
+    fn permission_rules_reject_unknown_keys_and_missing_roles() {
+        for body in [
+            "role = \"A\"\nread = true\nexecute = true",
+            "read = true",
+            "role = \"A\"\nread = \"yes\"",
+        ] {
+            let result = from_toml_str(&format!("{PLAIN}{}", rule(body)));
+            assert!(
+                matches!(result, Err(MetaError::Parse(_))),
+                "{body}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_rule_definition_errors() {
+        // Blank role, a rule that grants nothing.
+        let errors = invalid(&format!("{PLAIN}{}", rule("role = \"  \"")));
+        assert_eq!(
+            errors,
+            vec![
+                DefinitionError::InvalidPermissionRole {
+                    role: "  ".into(),
+                    reason: "must not be blank"
+                },
+                DefinitionError::EmptyPermissionRule { role: "  ".into() },
+            ]
+        );
+        let errors = invalid(&format!("{PLAIN}{}", rule("role = \"a\\tb\"\nread = true")));
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [DefinitionError::InvalidPermissionRole { .. }]
+            ),
+            "{errors:?}"
+        );
+        assert_eq!(
+            invalid(&format!("{PLAIN}{}", rule("role = \"A\""))),
+            vec![DefinitionError::EmptyPermissionRule { role: "A".into() }]
+        );
+        // submit, cancel and amend need a submittable DocType.
+        assert_eq!(
+            invalid(&format!(
+                "{PLAIN}{}",
+                rule("role = \"A\"\nsubmit = true\ncancel = true\namend = true")
+            )),
+            vec![
+                DefinitionError::PermissionNeedsSubmittable {
+                    role: "A".into(),
+                    right: crate::permission::Right::Submit
+                },
+                DefinitionError::PermissionNeedsSubmittable {
+                    role: "A".into(),
+                    right: crate::permission::Right::Cancel
+                },
+                DefinitionError::PermissionNeedsSubmittable {
+                    role: "A".into(),
+                    right: crate::permission::Right::Amend
+                },
+            ]
+        );
+        assert!(
+            from_toml_str(&format!(
+                "{SUBMITTABLE}{}",
+                rule("role = \"A\"\nsubmit = true\ncancel = true\namend = true")
+            ))
+            .is_ok()
+        );
+        // Same role and if_owner twice; a different if_owner is fine.
+        let twice = format!(
+            "{PLAIN}{}{}",
+            rule("role = \"A\"\nread = true"),
+            rule("role = \"A\"\nwrite = true")
+        );
+        assert_eq!(
+            invalid(&twice),
+            vec![DefinitionError::DuplicatePermissionRule {
+                role: "A".into(),
+                if_owner: false
+            }]
+        );
+        let both = format!(
+            "{PLAIN}{}{}",
+            rule("role = \"A\"\nread = true"),
+            rule("role = \"A\"\nwrite = true\nif_owner = true")
+        );
+        assert!(from_toml_str(&both).is_ok());
+        // The Administrator role is allowed (pointless, but not wrong).
+        assert!(
+            from_toml_str(&format!(
+                "{PLAIN}{}",
+                rule("role = \"Administrator\"\nread = true")
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_child_doctype_cannot_have_permission_rules() {
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\n";
+        assert_eq!(
+            invalid(&format!("{child}{}", rule("role = \"A\"\nread = true"))),
+            vec![DefinitionError::ChildWithPermissions]
+        );
+        assert!(from_toml_str(child).is_ok());
     }
 }

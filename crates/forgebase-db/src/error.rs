@@ -8,6 +8,7 @@ use tokio_postgres::error::SqlState;
 use forgebase_core::document::{DocStatus, ValidationError};
 use forgebase_core::ident::TABLE_PREFIX;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType};
+use forgebase_core::permission::Right;
 
 use crate::plan::Conflict;
 
@@ -70,7 +71,7 @@ pub enum DbError {
         /// The name that was asked for.
         name: String,
     },
-    /// Insert, get, update or delete was called with a child DocType: its rows are read and
+    /// An operation was called with a child DocType: its rows are read and
     /// written through the Table field of its parent's documents only.
     #[error(
         "DocType `{doctype}` is a child DocType: its rows belong to a parent document and are read and written through the parent"
@@ -122,9 +123,27 @@ pub enum DbError {
         doctype: String,
         /// Its name.
         name: String,
-        /// DocType of the linking documents, when it can be derived from the error.
+        /// DocType of the linking documents. `None` when it cannot be derived from the error, and
+        /// also when the caller has no read access to that DocType: it is not named then, so the
+        /// error does not tell the caller about documents they cannot see (ADR 0011).
         referenced_by: Option<String>,
     },
+    /// The caller lacks a right. For a DocType the caller has no such right on at all, or, for
+    /// an `if_owner` right, on a document of somebody else that the caller can read. It never
+    /// names a document and is never returned for a document the caller cannot read (that is
+    /// [`DbError::NotFound`], so a hidden document is not told from a missing one).
+    #[error("permission denied: no `{right}` right on DocType `{doctype}`")]
+    PermissionDenied {
+        /// DocType name.
+        doctype: String,
+        /// The right that was needed.
+        right: Right,
+    },
+    /// A list query is not valid: an unknown or unsuitable field, an operator that does not fit
+    /// the field, a value of the wrong kind, or a limit or offset out of range. The message names
+    /// the problem; nothing from the query was sent to the database.
+    #[error("invalid list query: {0}")]
+    InvalidQuery(String),
     /// A unique constraint (a `unique` field or the document name) was violated (SQLSTATE 23505).
     /// The message is the server's, including the constraint name and the conflicting key.
     #[error("{message}")]

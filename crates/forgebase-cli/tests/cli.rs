@@ -1135,6 +1135,143 @@ fn submit_cancel_and_amend_end_to_end() {
     assert_eq!(counter.as_deref(), Some("1"));
 }
 
+#[test]
+fn list_filters_sorts_and_pages_as_json() {
+    let db = migrated_db();
+    for (email, points, tier) in [
+        ("a@x.y", 30, "gold"),
+        ("b@x.y", 10, "silver"),
+        ("c@x.y", 20, "gold"),
+    ] {
+        let data = format!(
+            r#"{{"email":"{email}","full_name":"N","loyalty_points":{points},"tier":"{tier}"}}"#
+        );
+        let out = db.forgebase(&[
+            "doc",
+            "insert",
+            "customer",
+            "--doctypes",
+            DOCTYPES,
+            "--data",
+            &data,
+        ]);
+        assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    }
+    let list = |extra: &[&str]| {
+        let mut args = vec!["doc", "list", "customer", "--doctypes", DOCTYPES];
+        args.extend_from_slice(extra);
+        db.forgebase(&args)
+    };
+    let names = |output: &Output| -> Vec<String> {
+        assert_eq!(code(output), Some(0), "{}", stderr(output));
+        json(output)
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|d| d["name"].as_str().expect("name").to_owned())
+            .collect()
+    };
+    // Default: everything (three is below the page size), ordered by name.
+    assert_eq!(names(&list(&[])), ["a@x.y", "b@x.y", "c@x.y"]);
+    // A document in the list has the same shape as `doc get` (standard columns and values).
+    let first = json(&list(&["--limit", "1"]));
+    assert_eq!(first[0]["owner"], "cli");
+    assert_eq!(first[0]["loyalty_points"], 30);
+    assert_eq!(first[0]["version"], 1);
+    // Sorting, `:desc`, several keys.
+    assert_eq!(
+        names(&list(&["--sort", "loyalty_points:desc"])),
+        ["a@x.y", "c@x.y", "b@x.y"]
+    );
+    assert_eq!(
+        names(&list(&["--sort", "tier:desc", "--sort", "loyalty_points"])),
+        ["b@x.y", "c@x.y", "a@x.y"]
+    );
+    // Filters, all operators.
+    let filter = |text: &str| names(&list(&["--filter", text]));
+    assert_eq!(
+        filter(
+            r#"[{"field":"tier","op":"=","value":"gold"},{"field":"loyalty_points","op":">","value":20}]"#
+        ),
+        ["a@x.y"]
+    );
+    assert_eq!(
+        filter(r#"[{"field":"tier","op":"!=","value":"gold"}]"#),
+        ["b@x.y"]
+    );
+    assert_eq!(
+        filter(r#"[{"field":"loyalty_points","op":"in","value":[10,30]}]"#),
+        ["a@x.y", "b@x.y"]
+    );
+    assert_eq!(
+        filter(r#"[{"field":"loyalty_points","op":"<=","value":10}]"#),
+        ["b@x.y"]
+    );
+    assert_eq!(
+        filter(r#"[{"field":"name","op":"like","value":"%@x.y"}]"#).len(),
+        3
+    );
+    assert_eq!(filter(r#"[{"field":"notes","op":"is null"}]"#).len(), 3);
+    assert!(filter(r#"[{"field":"notes","op":"is not null"}]"#).is_empty());
+    assert!(filter(r#"[{"field":"customer_group","op":"=","value":"nope"}]"#).is_empty());
+    assert_eq!(filter("[]").len(), 3);
+    // Paging.
+    assert_eq!(names(&list(&["--limit", "2"])), ["a@x.y", "b@x.y"]);
+    assert_eq!(names(&list(&["--limit", "2", "--offset", "2"])), ["c@x.y"]);
+    assert!(names(&list(&["--offset", "3"])).is_empty());
+    // Every kind of mistake is an exit-1 error that names the problem.
+    for (args, needle) in [
+        (&["--limit", "501"][..], "maximum"),
+        (&["--limit", "0"], "at least 1"),
+        (&["--sort", "nope"], "unknown field"),
+        (&["--sort", "name:sideways"], "FIELD:desc"),
+        (&["--filter", "not json"], "invalid JSON"),
+        (&["--filter", "{}"], "JSON array"),
+        (
+            &["--filter", r#"[{"field":"nope","op":"=","value":1}]"#],
+            "unknown field",
+        ),
+        (
+            &["--filter", r#"[{"field":"tier","op":"~","value":1}]"#],
+            "unknown operator",
+        ),
+        (
+            &["--filter", r#"[{"field":"tier","op":"=","value":1}]"#],
+            "tier",
+        ),
+        (
+            &["--filter", r#"[{"field":"tier","op":"="}]"#],
+            "needs a `value`",
+        ),
+        (
+            &["--filter", r#"[{"field":"tier","op":"is null","value":1}]"#],
+            "takes no `value`",
+        ),
+        (
+            &[
+                "--filter",
+                r#"[{"field":"loyalty_points","op":"like","value":"1%"}]"#,
+            ],
+            "text fields only",
+        ),
+        (
+            &[
+                "--filter",
+                r#"[{"field":"tier","op":"=","value":"gold","extra":1}]"#,
+            ],
+            "unknown key",
+        ),
+    ] {
+        let out = list(args);
+        assert_eq!(code(&out), Some(1), "{args:?}: {}", stdout(&out));
+        assert!(stderr(&out).contains(needle), "{args:?}: {}", stderr(&out));
+    }
+    // An unknown DocType is reported before the database is touched.
+    let out = db.forgebase(&["doc", "list", "nope", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("unknown DocType"), "{}", stderr(&out));
+}
+
 const SECRET_PASSWORD: &str = "s3cret pass phrase";
 
 fn migrated_db() -> TestDb {

@@ -463,6 +463,7 @@ mod tests {
             naming: Naming::Random,
             is_child: false,
             submittable: false,
+            permissions: vec![],
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, true),
                 f("notes", FieldType::Text, false),
@@ -845,6 +846,7 @@ mod tests {
             naming: Naming::Random,
             is_child: false,
             submittable: false,
+            permissions: vec![],
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, false),
                 f(
@@ -862,6 +864,7 @@ mod tests {
             naming: Naming::Random,
             is_child: true,
             submittable: false,
+            permissions: vec![],
             fields: vec![
                 f("qty", FieldType::Int, true),
                 f("note", FieldType::Data { max_length: 3 }, false),

@@ -20,6 +20,27 @@
 //!
 //! DocTypes with `submittable = true` also have [`submit`], [`cancel`] and [`amend`], and their
 //! documents carry a [`DocStatus`]: see those functions for the rules.
+//!
+//! # Permissions (M3.2, ADR 0011)
+//!
+//! Every operation takes the [`Caller`] and enforces the DocType's `[[permissions]]` with the one
+//! evaluator, [`forgebase_core::permission::evaluate`]; this module never compares roles itself.
+//! The [`Access`] it returns is applied as follows:
+//!
+//! - **Read access is applied in SQL**, never by fetching and filtering: for
+//!   [`Access::OwnerOnly`] every statement that finds a document has `AND "owner" = $n` (bound).
+//!   A document the caller cannot read is therefore *not found*: [`get`] returns `None`, and
+//!   every other operation fails with [`DbError::NotFound`], **before** the version is compared
+//!   (a stale version on an unreadable document is `NotFound`, never `Conflict`).
+//! - A right the caller does not have on the DocType at all ([`Access::Denied`], which does not
+//!   depend on any document) is [`DbError::PermissionDenied`], before anything is looked up. So is
+//!   a right limited to own documents (`if_owner`) on a readable document of somebody else. Both
+//!   say nothing about the data.
+//! - A Link name is resolved with the caller's *read* access on the **target** DocType: a target
+//!   the caller cannot read is reported exactly like a missing one.
+//! - Child rows follow the parent document; they are never addressed alone.
+//!
+//! The [`Caller::System`] context and the `Administrator` role bypass the rules.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +48,7 @@ use forgebase_core::document::{Changes, DocStatus, Document, Row, ValidationErro
 use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError, Operation};
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
+use forgebase_core::permission::{Access, Caller, Right, evaluate};
 use forgebase_core::series::SeriesPattern;
 use forgebase_core::value::Value;
 use time::{Date, OffsetDateTime};
@@ -40,7 +62,7 @@ use crate::ident::quote_ident;
 use crate::value::{SqlParam, SqlValue, cast_type, decode};
 
 /// The standard columns, in the order they are selected (see `plan.rs`: the DDL has the same).
-const STANDARD_COLUMNS: [&str; 7] = [
+pub(crate) const STANDARD_COLUMNS: [&str; 7] = [
     "id",
     "name",
     "owner",
@@ -60,13 +82,13 @@ pub struct StoredDocument {
     pub id: Uuid,
     /// The human-facing unique name.
     pub name: String,
-    /// The actor that created the document.
+    /// The caller that created the document: the username, or the system actor.
     pub owner: String,
     /// Creation time (database `now()`, that is the transaction start time).
     pub created_at: OffsetDateTime,
     /// Time of the last change (database `now()`).
     pub modified_at: OffsetDateTime,
-    /// The actor that made the last change.
+    /// The caller that made the last change: the username, or the system actor.
     pub modified_by: String,
     /// Starts at 1 and is incremented by every update, submit and cancel.
     pub version: i64,
@@ -95,9 +117,11 @@ pub struct StoredDocument {
 /// The name follows the DocType's naming rule: with [`Naming::Random`] it is the new UUID v7 and
 /// `doc.name` must be `None`; with [`Naming::Field`] it is the value of that field and
 /// `doc.name` must be `None` or equal to it ([`DbError::Naming`]); with [`Naming::Series`] it is
-/// the next name of the series and `doc.name` must be `None`. `actor` (a non-empty string
-/// without NUL, [`DbError::InvalidActor`]) is recorded as `owner` and `modified_by`; it is not
-/// authenticated here. `created_at` and `modified_at` come from the database's `now()`, and
+/// the next name of the series and `doc.name` must be `None`. The caller's name
+/// ([`Caller::name`]: a non-empty string without NUL, [`DbError::InvalidActor`]) is recorded as
+/// `owner` and `modified_by`; the caller is not authenticated here. The caller needs the
+/// **create** right ([`DbError::PermissionDenied`], checked first; `if_owner` does not restrict
+/// it, the creator is the owner). `created_at` and `modified_at` come from the database's `now()`, and
 /// `version` is 1. A duplicate value in a `unique` field or a duplicate name is
 /// [`DbError::UniqueViolation`].
 ///
@@ -114,9 +138,12 @@ pub struct StoredDocument {
 /// **Links.** A non-null Link value, in the document or in a row, is the `name` of a document of
 /// the target DocType. Each one is looked up with `SELECT "id" ... FOR KEY SHARE` on the same
 /// transaction, which locks the target against a concurrent delete until the transaction ends
-/// (so the lock covers the write). A name that does not exist is a
+/// (so the lock covers the write). A target the caller cannot read (no read access to the target
+/// DocType, or an `if_owner` read on a document of somebody else) is treated exactly like a name
+/// that does not exist: a
 /// [`ValidationError::LinkNotFound`] in [`DbError::Validation`] (wrapped in
-/// [`ValidationError::InRow`] for a row), together with the other problems.
+/// [`ValidationError::InRow`] for a row), together with the other problems, so the error does not
+/// tell a hidden document from a missing one.
 ///
 /// **Table rows.** `doc.tables` holds the rows of each Table field. They are inserted after the
 /// document, one `INSERT` per row, with new UUID v7 ids, the document's id as `parent_id` and
@@ -151,11 +178,13 @@ pub async fn insert(
     registry: &Registry,
     doctype: &str,
     doc: Document,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    check_actor(caller.name())?;
+    access_to(doctype, caller, Right::Create)?;
     let tx = client.transaction().await?;
-    let stored = insert_in(&tx, registry, doctype, doc, actor, None).await?;
+    let stored = insert_in(&tx, registry, doctype, doc, caller, None).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -171,10 +200,10 @@ async fn insert_in(
     registry: &Registry,
     doctype: &DocType,
     mut doc: Document,
-    actor: &str,
+    caller: &Caller,
     amend: Option<&AmendOf>,
 ) -> Result<StoredDocument, DbError> {
-    check_actor(actor)?;
+    let actor = caller.name();
     let ctx = HookContext {
         doctype: &doctype.name,
         actor,
@@ -194,9 +223,9 @@ async fn insert_in(
     let (links, writes) = resolve(
         client,
         registry,
+        caller,
         doctype,
-        &doc.values,
-        &doc.tables,
+        (&doc.values, &doc.tables),
         &mut errors,
     )
     .await?;
@@ -240,6 +269,10 @@ async fn insert_in(
 /// Returns the document with this name, or `None`. Link values are the target documents' names;
 /// `tables` holds the rows of every Table field in order.
 ///
+/// The caller needs the **read** right ([`DbError::PermissionDenied`] when the DocType gives it
+/// none at all). With an `if_owner` read the statement has `AND "owner" = $n`, so a document of
+/// somebody else is `None`, the same as a missing one.
+///
 /// A document with Table fields is read with several statements. If an update commits in
 /// between, the read starts over (a document and its rows are never mixed from two versions,
 /// also at READ COMMITTED); after a few unlucky attempts it fails with
@@ -249,14 +282,16 @@ pub async fn get(
     registry: &Registry,
     doctype: &str,
     name: &str,
+    caller: &Caller,
 ) -> Result<Option<StoredDocument>, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    let owner = owner_scope(access_to(doctype, caller, Right::Read)?, caller);
     // Without Table fields the read is one statement, already consistent: no transaction needed.
     if doctype.table_fields().next().is_none() {
-        return get_in(&*client, registry, doctype, name).await;
+        return get_in(&*client, registry, doctype, name, owner).await;
     }
     let tx = client.transaction().await?;
-    let stored = get_in(&tx, registry, doctype, name).await?;
+    let stored = get_in(&tx, registry, doctype, name, owner).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -266,9 +301,17 @@ async fn get_in(
     registry: &Registry,
     doctype: &DocType,
     name: &str,
+    owner: Option<&str>,
 ) -> Result<Option<StoredDocument>, DbError> {
     for _ in 0..READ_ATTEMPTS {
-        let Some(row) = client.query_opt(&get_sql(doctype), &[&name]).await? else {
+        let params: Vec<&(dyn ToSql + Sync)> = match &owner {
+            Some(owner) => vec![&name, owner],
+            None => vec![&name],
+        };
+        let Some(row) = client
+            .query_opt(&get_sql(doctype, owner.is_some()), &params)
+            .await?
+        else {
             return Ok(None);
         };
         let mut stored = decode_row(doctype, &row)?;
@@ -305,15 +348,23 @@ async fn get_in(
 /// mentioned keeps its rows. Changing the naming field is rejected
 /// ([`DbError::Naming`]): renames are not supported yet. Empty `changes` are
 /// [`DbError::NoChanges`]; changes to tables only are fine. `modified_at` is set to the
-/// database's `now()`, `modified_by` to `actor`, and `version` is incremented; `created_at` and
-/// `owner` stay.
+/// database's `now()`, `modified_by` to the caller's name, and `version` is incremented;
+/// `created_at` and `owner` stay.
+///
+/// **Permissions.** The caller needs the **write** right on the DocType and must be able to read
+/// the document (see the module documentation): no write or read right at all is
+/// [`DbError::PermissionDenied`] before anything is looked up; a document the caller cannot read
+/// is [`DbError::NotFound`]; a readable document of somebody else under an `if_owner` write right
+/// is [`DbError::PermissionDenied`]. All of these come before the version is compared and before
+/// any hook runs.
 ///
 /// **Pipeline.** The hooks and the validation see the **whole** document, not only the changes.
 /// In this order:
 ///
 /// 1. the stored document and its rows are read with a row lock (`FOR NO KEY UPDATE`): an
-///    unknown name is [`DbError::NotFound`] and a `version` other than `expected_version` is
-///    [`DbError::Conflict`], both before any hook runs;
+///    unknown or unreadable name is [`DbError::NotFound`], a document the caller may not write
+///    is [`DbError::PermissionDenied`] and a `version` other than `expected_version` is
+///    [`DbError::Conflict`], in this order and all before any hook runs;
 /// 2. the changes are merged into it: the stored values overlaid with `changes.values`, and the
 ///    rows of a Table field from `changes.tables` when given, else the stored rows;
 /// 3. a change to the naming field is rejected;
@@ -357,7 +408,7 @@ pub async fn update(
     name: &str,
     expected_version: i64,
     changes: &Changes,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
@@ -368,7 +419,7 @@ pub async fn update(
         name,
         expected_version,
         changes,
-        actor,
+        caller,
     )
     .await?;
     tx.commit().await?;
@@ -382,9 +433,9 @@ async fn update_in(
     name: &str,
     expected_version: i64,
     changes: &Changes,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
-    check_actor(actor)?;
+    let grant = grant(doctype, caller, Right::Write)?;
     if changes.is_empty() {
         return Err(DbError::NoChanges);
     }
@@ -398,6 +449,7 @@ async fn update_in(
         name,
         expected_version,
         "FOR NO KEY UPDATE",
+        &grant,
     )
     .await?;
     let submitted = match current.docstatus {
@@ -422,7 +474,7 @@ async fn update_in(
     }
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor,
+        actor: caller.name(),
         operation: Operation::Update,
     };
     run_hooks(registry, doctype, "validate", |hooks| {
@@ -447,20 +499,26 @@ async fn update_in(
     let (links, writes) = resolve(
         client,
         registry,
+        caller,
         doctype,
-        &columns,
-        &changed_tables,
+        (&columns, &changed_tables),
         &mut errors,
     )
     .await?;
     if !errors.is_empty() {
         return Err(DbError::Validation(errors));
     }
+    let target = Target {
+        name,
+        expected_version,
+        caller,
+        read_owner: grant.read_owner,
+    };
     write_update(
         client,
         registry,
         doctype,
-        (name, expected_version, actor),
+        &target,
         (&columns, &links, &writes),
         None,
     )
@@ -528,13 +586,12 @@ fn check_not_locked(
 
 /// Writes the update of one document: the `columns`, the new rows of the tables in `writes`
 /// (replacing the stored ones) and, with `status`, the new docstatus; `version` is incremented
-/// and `modified_at` and `modified_by` are set in the same statement, which comes first. `who` is
-/// the document name, the expected version and the actor.
+/// and `modified_at` and `modified_by` are set in the same statement, which comes first.
 async fn write_update(
     client: &impl GenericClient,
     registry: &Registry,
     doctype: &DocType,
-    who: (&str, i64, &str),
+    target: &Target<'_>,
     (columns, links, writes): (
         &BTreeMap<String, Value>,
         &BTreeMap<String, Uuid>,
@@ -542,7 +599,8 @@ async fn write_update(
     ),
     status: Option<DocStatus>,
 ) -> Result<StoredDocument, DbError> {
-    let (name, expected_version, actor) = who;
+    let (name, expected_version, actor) =
+        (target.name, target.expected_version, target.caller.name());
     let sql = update_sql(doctype, columns, status);
     let bound: Vec<SqlParam<'_>> = columns
         .iter()
@@ -566,7 +624,7 @@ async fn write_update(
         .map_err(|e| DbError::from_write(e, doctype))?;
     // The row is locked and its version was checked, so it matches; this is only a safeguard.
     let Some(row) = row else {
-        return Err(stale_or_missing(client, doctype, name, expected_version).await?);
+        return Err(stale_or_missing(client, doctype, target).await?);
     };
     let mut stored = decode_row(doctype, &row)?;
     for write in writes {
@@ -626,8 +684,9 @@ fn require_status(
 /// is locked (see [`update`]). Returns the document as stored.
 ///
 /// `doctype` must have `submittable = true` ([`DbError::NotSubmittable`]) and the document must be
-/// a draft ([`DbError::InvalidDocStatus`]). `expected_version` and `actor` work as for
-/// [`update`]; `version` is incremented, `modified_at` and `modified_by` are set.
+/// a draft ([`DbError::InvalidDocStatus`]). The caller needs the **submit** right and must be able
+/// to read the document; `expected_version` and the permission checks work as for [`update`];
+/// `version` is incremented, `modified_at` and `modified_by` are set.
 ///
 /// **Pipeline.** In this order: the stored document and its rows are read with a row lock
 /// (`FOR NO KEY UPDATE`, the lock an update takes, which leaves Link lookups of other documents
@@ -644,11 +703,11 @@ pub async fn submit(
     doctype: &str,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = submit_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    let stored = submit_in(&tx, registry, doctype, name, expected_version, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -659,10 +718,11 @@ async fn submit_in(
     doctype: &DocType,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
-    check_actor(actor)?;
+    check_actor(caller.name())?;
     require_submittable(doctype, "submit")?;
+    let grant = grant(doctype, caller, Right::Submit)?;
     let current = lock_current(
         client,
         registry,
@@ -670,13 +730,14 @@ async fn submit_in(
         name,
         expected_version,
         "FOR NO KEY UPDATE",
+        &grant,
     )
     .await?;
     require_status(doctype, &current, DocStatus::Draft, "submit")?;
     let mut doc = as_document(&current);
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor,
+        actor: caller.name(),
         operation: Operation::Submit,
     };
     run_hooks(registry, doctype, "validate", |hooks| {
@@ -691,20 +752,26 @@ async fn submit_in(
     let (links, writes) = resolve(
         client,
         registry,
+        caller,
         doctype,
-        &columns,
-        &changed_tables,
+        (&columns, &changed_tables),
         &mut errors,
     )
     .await?;
     if !errors.is_empty() {
         return Err(DbError::Validation(errors));
     }
+    let target = Target {
+        name,
+        expected_version,
+        caller,
+        read_owner: grant.read_owner,
+    };
     write_update(
         client,
         registry,
         doctype,
-        (name, expected_version, actor),
+        &target,
         (&columns, &links, &writes),
         Some(DocStatus::Submitted),
     )
@@ -716,7 +783,8 @@ async fn submit_in(
 ///
 /// Documents that link to this one are not touched (no automatic cancellation of linked
 /// documents). `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document
-/// submitted ([`DbError::InvalidDocStatus`]). `expected_version` and `actor` work as for
+/// submitted ([`DbError::InvalidDocStatus`]). The caller needs the **cancel** right and must be
+/// able to read the document; `expected_version` and the permission checks work as for
 /// [`update`]; `version` is incremented, `modified_at` and `modified_by` are set.
 ///
 /// **Pipeline.** In this order: the stored document and its rows are read with a row lock
@@ -730,11 +798,11 @@ pub async fn cancel(
     doctype: &str,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = cancel_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    let stored = cancel_in(&tx, registry, doctype, name, expected_version, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -745,10 +813,11 @@ async fn cancel_in(
     doctype: &DocType,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
-    check_actor(actor)?;
+    check_actor(caller.name())?;
     require_submittable(doctype, "cancel")?;
+    let grant = grant(doctype, caller, Right::Cancel)?;
     let current = lock_current(
         client,
         registry,
@@ -756,23 +825,30 @@ async fn cancel_in(
         name,
         expected_version,
         "FOR NO KEY UPDATE",
+        &grant,
     )
     .await?;
     require_status(doctype, &current, DocStatus::Submitted, "cancel")?;
     let doc = as_document(&current);
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor,
+        actor: caller.name(),
         operation: Operation::Cancel,
     };
     run_hooks(registry, doctype, "before_cancel", |hooks| {
         hooks.before_cancel(&ctx, &doc)
     })?;
+    let target = Target {
+        name,
+        expected_version,
+        caller,
+        read_owner: grant.read_owner,
+    };
     write_update(
         client,
         registry,
         doctype,
-        (name, expected_version, actor),
+        &target,
         (&BTreeMap::new(), &BTreeMap::new(), &[]),
         Some(DocStatus::Cancelled),
     )
@@ -784,8 +860,10 @@ async fn cancel_in(
 ///
 /// `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document cancelled
 /// ([`DbError::InvalidDocStatus`]). `expected_version` is the cancelled document's version, as
-/// for [`delete`] (it keeps a stale caller from amending a document it has not read); `actor`
-/// becomes the `owner` and `modified_by` of the new draft.
+/// for [`delete`] (it keeps a stale caller from amending a document it has not read); the caller
+/// becomes the `owner` and `modified_by` of the new draft. The caller needs the **amend** right
+/// and must be able to read the cancelled document (an unreadable one is
+/// [`DbError::NotFound`]); it does not need the create right.
 ///
 /// **Name.** The new document is named `<root>-<n>`, not by the naming rule of the DocType (no
 /// series number is taken). If the cancelled document is itself an amendment (it has
@@ -823,11 +901,11 @@ pub async fn amend(
     doctype: &str,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = amend_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    let stored = amend_in(&tx, registry, doctype, name, expected_version, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -838,10 +916,11 @@ async fn amend_in(
     doctype: &DocType,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
-    check_actor(actor)?;
+    check_actor(caller.name())?;
     require_submittable(doctype, "amend")?;
+    let grant = grant(doctype, caller, Right::Amend)?;
     let current = lock_current(
         client,
         registry,
@@ -849,6 +928,7 @@ async fn amend_in(
         name,
         expected_version,
         "FOR NO KEY UPDATE",
+        &grant,
     )
     .await?;
     require_status(doctype, &current, DocStatus::Cancelled, "amend")?;
@@ -874,7 +954,7 @@ async fn amend_in(
         from: current.name,
         name: new_name,
     };
-    insert_in(client, registry, doctype, doc, actor, Some(&amend)).await
+    insert_in(client, registry, doctype, doc, caller, Some(&amend)).await
 }
 
 /// The name of the amendment of a cancelled document, see [`amend`].
@@ -892,16 +972,20 @@ fn amended_name(name: &str, amended_from: Option<&str>) -> String {
 }
 
 /// Deletes the document with this name, and its table rows, if its current `version` equals
-/// `expected_version`. The `actor` is passed to the hooks (not stored, as there is no audit yet,
-/// and not authenticated); an empty
-/// one is [`DbError::InvalidActor`], as for [`insert`] and [`update`].
+/// `expected_version`. The caller's name is passed to the hooks (not stored, as there is no audit
+/// yet, and not authenticated); an empty one is [`DbError::InvalidActor`], as for [`insert`] and
+/// [`update`]. The caller needs the **delete** right and must be able to read the document, with
+/// the permission checks of [`update`] (unreadable is [`DbError::NotFound`], a readable document
+/// of somebody else under an `if_owner` delete right is [`DbError::PermissionDenied`]).
 ///
 /// A different version is [`DbError::Conflict`] (nothing is deleted; under REPEATABLE READ or
 /// SERIALIZABLE a stale writer gets SQLSTATE 40001 as [`DbError::Postgres`] instead, see
 /// [`update`]); an unknown name is [`DbError::NotFound`]. The rows go with the document (the
 /// `parent_id` foreign key is `ON DELETE CASCADE`). A document that other documents still link
 /// to cannot be deleted: [`DbError::LinkedDocumentExists`] names the linking DocType (the
-/// links are `ON DELETE RESTRICT`; for a link in a table row, the DocType that owns the row). A
+/// links are `ON DELETE RESTRICT`; for a link in a table row, the DocType that owns the row)
+/// **only if the caller has read access to that DocType**; otherwise `referenced_by` is `None`
+/// and the error says only that the document is still linked (ADR 0011). A
 /// failed delete leaves a caller-owned transaction usable (the call ran in a savepoint).
 ///
 /// **Pipeline.** In this order: the stored document and its rows are read with a row lock
@@ -918,11 +1002,11 @@ pub async fn delete(
     doctype: &str,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<(), DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    delete_in(&tx, registry, doctype, name, expected_version, actor).await?;
+    delete_in(&tx, registry, doctype, name, expected_version, caller).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -933,9 +1017,9 @@ async fn delete_in(
     doctype: &DocType,
     name: &str,
     expected_version: i64,
-    actor: &str,
+    caller: &Caller,
 ) -> Result<(), DbError> {
-    check_actor(actor)?;
+    let grant = grant(doctype, caller, Right::Delete)?;
     // `FOR UPDATE` makes concurrent linkers (`FOR KEY SHARE`) wait, so `before_delete` hooks do
     // not run for a delete that a new link would then refuse.
     let current = lock_current(
@@ -945,6 +1029,7 @@ async fn delete_in(
         name,
         expected_version,
         "FOR UPDATE",
+        &grant,
     )
     .await?;
     if current.docstatus == Some(DocStatus::Submitted) {
@@ -953,7 +1038,7 @@ async fn delete_in(
     let doc = as_document(&current);
     let ctx = HookContext {
         doctype: &doctype.name,
-        actor,
+        actor: caller.name(),
         operation: Operation::Delete,
     };
     run_hooks(registry, doctype, "before_delete", |hooks| {
@@ -974,12 +1059,20 @@ async fn delete_in(
             } => DbError::LinkedDocumentExists {
                 doctype,
                 name,
-                referenced_by: Some(owning_doctype(registry, by)),
+                // Decision 9: name the referencing DocType only to a caller who may read it.
+                referenced_by: Some(owning_doctype(registry, by))
+                    .filter(|by| can_read_doctype(registry, by, caller)),
             },
             other => other,
         })?;
     if deleted == 0 {
-        return Err(stale_or_missing(client, doctype, name, expected_version).await?);
+        let target = Target {
+            name,
+            expected_version,
+            caller,
+            read_owner: grant.read_owner,
+        };
+        return Err(stale_or_missing(client, doctype, &target).await?);
     }
     Ok(())
 }
@@ -1011,11 +1104,78 @@ fn as_document(stored: &StoredDocument) -> Document {
     }
 }
 
+/// What a caller may do with one existing document for an operation, decided by the evaluator.
+struct Grant<'a> {
+    right: Right,
+    /// With an `if_owner` *read*: the owner of the only documents the caller can see. `None`:
+    /// every document. Applied in the SQL that finds the document.
+    read_owner: Option<&'a str>,
+    /// With an `if_owner` right: the owner of the only documents the right applies to.
+    right_owner: Option<&'a str>,
+}
+
+/// The document an operation works on, for the errors of a write that matched no row.
+struct Target<'a> {
+    name: &'a str,
+    expected_version: i64,
+    caller: &'a Caller,
+    read_owner: Option<&'a str>,
+}
+
+fn permission_denied(doctype: &DocType, right: Right) -> DbError {
+    DbError::PermissionDenied {
+        doctype: doctype.name.clone(),
+        right,
+    }
+}
+
+/// The caller's access for `right` on the DocType, or [`DbError::PermissionDenied`] when there
+/// is none. The single call to the evaluator for everything but links.
+pub(crate) fn access_to(
+    doctype: &DocType,
+    caller: &Caller,
+    right: Right,
+) -> Result<Access, DbError> {
+    match evaluate(doctype, caller, right) {
+        Access::Denied => Err(permission_denied(doctype, right)),
+        access => Ok(access),
+    }
+}
+
+/// The owner a statement must be limited to (`AND "owner" = $n`) for this access.
+fn owner_scope(access: Access, caller: &Caller) -> Option<&str> {
+    (access == Access::OwnerOnly).then(|| caller.name())
+}
+
+/// Checks the caller's name and its right to work on existing documents (`right` and read),
+/// before any document is looked up. Fails with [`DbError::PermissionDenied`] when either is
+/// denied at the DocType level, which says nothing about any document.
+fn grant<'a>(doctype: &DocType, caller: &'a Caller, right: Right) -> Result<Grant<'a>, DbError> {
+    check_actor(caller.name())?;
+    let read =
+        access_to(doctype, caller, Right::Read).map_err(|_| permission_denied(doctype, right))?;
+    let needed = access_to(doctype, caller, right)?;
+    Ok(Grant {
+        right,
+        read_owner: owner_scope(read, caller),
+        right_owner: owner_scope(needed, caller),
+    })
+}
+
+/// Whether the caller has any read access to the DocType (used to decide what an error may say).
+fn can_read_doctype(registry: &Registry, doctype: &str, caller: &Caller) -> bool {
+    registry
+        .get(doctype)
+        .is_some_and(|d| evaluate(d, caller, Right::Read) != Access::Denied)
+}
+
 /// Reads the document with this name and its rows, locking the document row with `lock` (a
-/// fixed `FOR ...` clause) until the transaction ends. An unknown name is
-/// [`DbError::NotFound`], a version other than `expected_version` is [`DbError::Conflict`];
-/// nothing else has been done at that point. Writers of the rows take this lock first, so the
-/// rows read here cannot change under the caller.
+/// fixed `FOR ...` clause) until the transaction ends. In this order: a name that does not exist
+/// **or that the caller cannot read** is [`DbError::NotFound`] (the read scope is part of the
+/// SQL, so an unreadable row is not even locked); a document the caller may not use `grant.right`
+/// on is [`DbError::PermissionDenied`]; a version other than `expected_version` is
+/// [`DbError::Conflict`]. Nothing else has been done at that point. Writers of the rows take this
+/// lock first, so the rows read here cannot change under the caller.
 async fn lock_current(
     client: &impl GenericClient,
     registry: &Registry,
@@ -1023,15 +1183,25 @@ async fn lock_current(
     name: &str,
     expected_version: i64,
     lock: &'static str,
+    grant: &Grant<'_>,
 ) -> Result<StoredDocument, DbError> {
-    let sql = format!("{} {lock}", get_sql(doctype));
-    let Some(row) = client.query_opt(&sql, &[&name]).await? else {
+    let sql = format!("{} {lock}", get_sql(doctype, grant.read_owner.is_some()));
+    let params: Vec<&(dyn ToSql + Sync)> = match &grant.read_owner {
+        Some(owner) => vec![&name, owner],
+        None => vec![&name],
+    };
+    let Some(row) = client.query_opt(&sql, &params).await? else {
         return Err(DbError::NotFound {
             doctype: doctype.name.clone(),
             name: name.to_owned(),
         });
     };
     let mut stored = decode_row(doctype, &row)?;
+    if let Some(owner) = grant.right_owner
+        && stored.owner != owner
+    {
+        return Err(permission_denied(doctype, grant.right));
+    }
     if stored.version != expected_version {
         return Err(DbError::Conflict {
             doctype: doctype.name.clone(),
@@ -1054,7 +1224,10 @@ fn owning_doctype(registry: &Registry, referencing: String) -> String {
 }
 
 /// The DocType that documents of `name` belong to: it must be in the registry and not a child.
-fn document_doctype<'a>(registry: &'a Registry, name: &str) -> Result<&'a DocType, DbError> {
+pub(crate) fn document_doctype<'a>(
+    registry: &'a Registry,
+    name: &str,
+) -> Result<&'a DocType, DbError> {
     match registry.get(name) {
         None => Err(DbError::UnknownDocType {
             name: name.to_owned(),
@@ -1066,26 +1239,35 @@ fn document_doctype<'a>(registry: &'a Registry, name: &str) -> Result<&'a DocTyp
     }
 }
 
-/// The child DocType of a Table field. A registry that passed `check_references` has it.
-fn child_doctype<'a>(registry: &'a Registry, target: &str) -> Result<&'a DocType, DbError> {
+/// The DocType a Link or Table field points at. A registry that passed `check_references` has it.
+fn lookup_doctype<'a>(registry: &'a Registry, target: &str) -> Result<&'a DocType, DbError> {
     registry.get(target).ok_or_else(|| DbError::UnknownDocType {
         name: target.to_owned(),
     })
 }
 
 /// Why a write that matched no row (`name` and `version`) did nothing: the document does not
-/// exist ([`DbError::NotFound`]) or has another version ([`DbError::Conflict`]).
+/// exist or is not readable by the caller ([`DbError::NotFound`]) or has another version
+/// ([`DbError::Conflict`]). The row was locked and checked before, so this is only a safeguard;
+/// it applies the read scope too, so even it cannot tell a hidden document from a missing one.
 async fn stale_or_missing(
     client: &impl GenericClient,
     doctype: &DocType,
-    name: &str,
-    expected_version: i64,
+    target: &Target<'_>,
 ) -> Result<DbError, DbError> {
-    let sql = format!(
+    let (name, expected_version) = (target.name, target.expected_version);
+    let mut sql = format!(
         "SELECT \"version\" FROM {} WHERE \"name\" = $1::text",
         quote_ident(&table_name(&doctype.name))
     );
-    Ok(match client.query_opt(&sql, &[&name]).await? {
+    let params: Vec<&(dyn ToSql + Sync)> = match &target.read_owner {
+        Some(owner) => {
+            sql.push_str(" AND \"owner\" = $2::text");
+            vec![&name, owner]
+        }
+        None => vec![&name],
+    };
+    Ok(match client.query_opt(&sql, &params).await? {
         None => DbError::NotFound {
             doctype: doctype.name.clone(),
             name: name.to_owned(),
@@ -1107,12 +1289,13 @@ struct TableWrite<'a> {
 
 /// Resolves the Links of the document's values and of every row. Returns the ids of the
 /// document's Links and the rows to write; a Link name that does not exist is added to `errors`.
+/// A target the caller cannot read counts as missing (decision 9, see [`resolve_links`]).
 async fn resolve<'a>(
     client: &impl GenericClient,
     registry: &'a Registry,
+    caller: &Caller,
     doctype: &DocType,
-    values: &BTreeMap<String, Value>,
-    tables: &'a BTreeMap<String, Vec<Row>>,
+    (values, tables): (&BTreeMap<String, Value>, &'a BTreeMap<String, Vec<Row>>),
     errors: &mut Vec<ValidationError>,
 ) -> Result<(BTreeMap<String, Uuid>, Vec<TableWrite<'a>>), DbError> {
     // Fields that already have a problem are not looked up (their value may not even be
@@ -1122,7 +1305,7 @@ async fn resolve<'a>(
         .filter(|e| !matches!(e, ValidationError::InRow { .. }))
         .map(|e| e.field().to_owned())
         .collect();
-    let (links, found) = resolve_links(client, doctype, values, &skip).await?;
+    let (links, found) = resolve_links(client, registry, caller, doctype, values, &skip).await?;
     errors.extend(found);
 
     let mut writes = Vec::new();
@@ -1130,7 +1313,7 @@ async fn resolve<'a>(
         let Some(FieldType::Table { target }) = doctype.field(name).map(|f| &f.field_type) else {
             continue; // reported by validation
         };
-        let child = child_doctype(registry, target)?;
+        let child = lookup_doctype(registry, target)?;
         let mut resolved = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let position = i + 1;
@@ -1145,7 +1328,7 @@ async fn resolve<'a>(
                     _ => None,
                 })
                 .collect();
-            let (ids, found) = resolve_links(client, child, row, &skip).await?;
+            let (ids, found) = resolve_links(client, registry, caller, child, row, &skip).await?;
             errors.extend(found.into_iter().map(|error| ValidationError::InRow {
                 field: name.clone(),
                 row: position,
@@ -1164,8 +1347,15 @@ async fn resolve<'a>(
 /// Resolves the Link values in `values` (name -> target `id`), locking each target row against
 /// deletion. A name that does not exist is returned as [`ValidationError::LinkNotFound`].
 /// Fields in `skip` are not looked up.
+///
+/// **Decision 9.** The lookup uses the caller's *read* access on the **target** DocType, so a
+/// target the caller cannot read gives exactly the error of a missing one: with no read access to
+/// the target DocType nothing is looked up at all; with an `if_owner` read the query has
+/// `AND "owner" = $2` (bound, in SQL). The error is built in one place for both cases.
 async fn resolve_links(
     client: &impl GenericClient,
+    registry: &Registry,
+    caller: &Caller,
     doctype: &DocType,
     values: &BTreeMap<String, Value>,
     skip: &BTreeSet<String>,
@@ -1181,11 +1371,25 @@ async fn resolve_links(
         if skip.contains(field) {
             continue;
         }
-        let sql = format!(
-            "SELECT \"id\" FROM {} WHERE \"name\" = $1::text FOR KEY SHARE",
+        let target_type = lookup_doctype(registry, target)?;
+        let mut sql = format!(
+            "SELECT \"id\" FROM {} WHERE \"name\" = $1::text",
             quote_ident(&table_name(target))
         );
-        match client.query_opt(&sql, &[target_name]).await? {
+        let found = match evaluate(target_type, caller, Right::Read) {
+            Access::Denied => None,
+            Access::All => {
+                sql.push_str(" FOR KEY SHARE");
+                client.query_opt(&sql, &[target_name]).await?
+            }
+            Access::OwnerOnly => {
+                sql.push_str(" AND \"owner\" = $2::text FOR KEY SHARE");
+                client
+                    .query_opt(&sql, &[target_name, &caller.name()])
+                    .await?
+            }
+        };
+        match found {
             Some(row) => {
                 ids.insert(field.clone(), row.try_get::<_, Uuid>(0)?);
             }
@@ -1239,7 +1443,7 @@ async fn load_tables(
 ) -> Result<BTreeMap<String, Vec<Row>>, DbError> {
     let mut tables = BTreeMap::new();
     for (field, target) in doctype.table_fields() {
-        let child = child_doctype(registry, target)?;
+        let child = lookup_doctype(registry, target)?;
         let rows = client
             .query(&child_select_sql(child), &[&parent_id])
             .await?
@@ -1382,7 +1586,7 @@ fn field_items(doctype: &DocType) -> Vec<String> {
 }
 
 /// The columns after the standard ones that only a submittable DocType's table has.
-fn status_columns(doctype: &DocType) -> &'static [&'static str] {
+pub(crate) fn status_columns(doctype: &DocType) -> &'static [&'static str] {
     if doctype.submittable {
         &["docstatus", "amended_from"]
     } else {
@@ -1392,7 +1596,7 @@ fn status_columns(doctype: &DocType) -> &'static [&'static str] {
 
 /// What every statement on a document table returns, in decode order: the standard columns, the
 /// [`status_columns`], then [`field_items`].
-fn select_list(doctype: &DocType) -> String {
+pub(crate) fn select_list(doctype: &DocType) -> String {
     let mut items: Vec<String> = STANDARD_COLUMNS
         .iter()
         .chain(status_columns(doctype))
@@ -1403,11 +1607,18 @@ fn select_list(doctype: &DocType) -> String {
     items.join(", ")
 }
 
-fn get_sql(doctype: &DocType) -> String {
+/// The statement for one document by name (`$1`); with `owner_only` it is limited to the
+/// caller's own documents (`$2`), which is how an `if_owner` read is applied.
+fn get_sql(doctype: &DocType, owner_only: bool) -> String {
     format!(
-        "SELECT {} FROM {} WHERE \"name\" = $1::text",
+        "SELECT {} FROM {} WHERE \"name\" = $1::text{}",
         select_list(doctype),
-        quote_ident(&table_name(&doctype.name))
+        quote_ident(&table_name(&doctype.name)),
+        if owner_only {
+            " AND \"owner\" = $2::text"
+        } else {
+            ""
+        }
     )
 }
 
@@ -1527,7 +1738,7 @@ fn decode_fields(
 }
 
 /// Decodes a row of [`select_list`]. `tables` is left empty for the caller to fill.
-fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocument, DbError> {
+pub(crate) fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocument, DbError> {
     let (docstatus, amended_from) = if doctype.submittable {
         let raw: i16 = row.try_get(STANDARD_COLUMNS.len())?;
         let status = DocStatus::from_i16(raw).ok_or_else(|| DbError::Decode {
@@ -1624,7 +1835,7 @@ mod tests {
             ),
             "{sql}"
         );
-        assert!(get_sql(&order()).contains("AS \"customer\""));
+        assert!(get_sql(&order(), false).contains("AS \"customer\""));
     }
 
     fn line() -> DocType {
@@ -1659,7 +1870,7 @@ mod tests {
             "{insert}"
         );
         assert!(!insert.contains("lines"), "{insert}");
-        assert!(!get_sql(&doctype).contains("lines"));
+        assert!(!get_sql(&doctype, false).contains("lines"));
         assert!(!column_list(&doctype).contains("lines"));
         assert!(!select_list(&doctype).contains("lines"));
         assert!(!field_items(&doctype).concat().contains("lines"));
@@ -1686,6 +1897,21 @@ mod tests {
             child_select_sql(&line()),
             "SELECT \"qty\", (SELECT t.\"name\" FROM \"doc_customer\" t WHERE t.\"id\" = \"doc_line\".\"customer\") AS \"customer\" \
              FROM \"doc_line\" WHERE \"parent_id\" = $1::uuid ORDER BY \"idx\""
+        );
+    }
+
+    #[test]
+    fn an_owner_scope_is_a_bound_condition_in_the_statement() {
+        let doctype = customer();
+        let plain = get_sql(&doctype, false);
+        assert!(
+            plain.ends_with("FROM \"doc_customer\" WHERE \"name\" = $1::text"),
+            "{plain}"
+        );
+        let scoped = get_sql(&doctype, true);
+        assert!(
+            scoped.ends_with("WHERE \"name\" = $1::text AND \"owner\" = $2::text"),
+            "{scoped}"
         );
     }
 

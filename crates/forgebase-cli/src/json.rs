@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use forgebase_core::document::Row;
 use forgebase_core::meta::{DocType, FieldType, Registry};
 use forgebase_core::value::Value;
-use forgebase_db::StoredDocument;
+use forgebase_db::{Filter, FilterOp, Sort, StoredDocument};
 use rust_decimal::Decimal;
 use serde_json::{Map, Number, Value as Json};
 use time::format_description::well_known::Rfc3339;
@@ -50,6 +50,9 @@ pub enum JsonError {
         /// What is wrong.
         problem: String,
     },
+    /// A `--filter` or `--sort` value cannot be used.
+    #[error("{0}")]
+    Query(String),
     /// The output document could not be serialized to JSON text (not expected to happen).
     #[error("cannot serialize the document as JSON: {0}")]
     Serialize(serde_json::Error),
@@ -320,6 +323,108 @@ pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
         object.insert(name.clone(), Json::Array(items));
     }
     Ok(Json::Object(object))
+}
+
+/// Parses the `--filter` JSON of `doc list`: an array of `{"field", "op", "value"}` objects.
+/// `value` is mapped by the field's type like in `--data` (a Link field takes the target's name;
+/// `docstatus` and `version` are integers, `created_at` and `modified_at` RFC 3339 strings);
+/// `in` takes an array of them, `like` a string, `is null` and `is not null` no value. Whether the
+/// field exists and the operator fits it is checked by `forgebase-db` before anything is run.
+pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonError> {
+    let query = |problem: String| JsonError::Query(format!("invalid --filter: {problem}"));
+    let Json::Array(items) = serde_json::from_str::<Json>(text)? else {
+        return Err(query("expected a JSON array of filters".to_owned()));
+    };
+    let mut filters = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let place = |problem: String| query(format!("filter {}: {problem}", i + 1));
+        let Json::Object(object) = item else {
+            return Err(place(format!("expected an object, found {}", kind(item))));
+        };
+        if let Some(key) = object
+            .keys()
+            .find(|k| !matches!(k.as_str(), "field" | "op" | "value"))
+        {
+            return Err(place(format!("unknown key `{key}` (use field, op, value)")));
+        }
+        let field = object
+            .get("field")
+            .and_then(Json::as_str)
+            .ok_or_else(|| place("`field` must be a string".to_owned()))?;
+        let op = object
+            .get("op")
+            .and_then(Json::as_str)
+            .ok_or_else(|| place("`op` must be a string".to_owned()))?;
+        let value = object.get("value");
+        let field_type = forgebase_db::column_type(doctype, field).ok_or_else(|| {
+            place(format!(
+                "unknown field {field:?} (table fields cannot be filtered)"
+            ))
+        })?;
+        let one = || -> Result<Value, JsonError> {
+            let json = value.ok_or_else(|| place(format!("operator `{op}` needs a `value`")))?;
+            to_value(field, &field_type, json)
+        };
+        let op = match op {
+            "=" => FilterOp::Eq(one()?),
+            "!=" => FilterOp::Ne(one()?),
+            "<" => FilterOp::Lt(one()?),
+            "<=" => FilterOp::Le(one()?),
+            ">" => FilterOp::Gt(one()?),
+            ">=" => FilterOp::Ge(one()?),
+            "in" => {
+                let Some(Json::Array(values)) = value else {
+                    return Err(place("operator `in` needs a `value` array".to_owned()));
+                };
+                FilterOp::In(
+                    values
+                        .iter()
+                        .map(|json| to_value(field, &field_type, json))
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            "like" => match value {
+                Some(Json::String(pattern)) => FilterOp::Like(pattern.clone()),
+                _ => return Err(place("operator `like` needs a string `value`".to_owned())),
+            },
+            "is null" | "is not null" => {
+                if value.is_some() {
+                    return Err(place(format!("operator `{op}` takes no `value`")));
+                }
+                FilterOp::IsNull(op == "is null")
+            }
+            other => {
+                return Err(place(format!(
+                    "unknown operator `{other}` (use =, !=, <, <=, >, >=, in, like, is null, is not null)"
+                )));
+            }
+        };
+        filters.push(Filter::new(field, op));
+    }
+    Ok(filters)
+}
+
+/// Parses the `--sort` values of `doc list`: `FIELD`, `FIELD:asc` or `FIELD:desc`.
+pub fn parse_sort(specs: &[String]) -> Result<Vec<Sort>, JsonError> {
+    specs
+        .iter()
+        .map(|spec| match spec.split_once(':') {
+            None => Ok(Sort::asc(spec.as_str())),
+            Some((field, "asc")) => Ok(Sort::asc(field)),
+            Some((field, "desc")) => Ok(Sort::desc(field)),
+            Some(_) => Err(JsonError::Query(format!(
+                "invalid --sort {spec:?}: use FIELD, FIELD:asc or FIELD:desc"
+            ))),
+        })
+        .collect()
+}
+
+/// A list of stored documents as a JSON array of [`document_to_json`] objects.
+pub fn documents_to_json(docs: &[StoredDocument]) -> Result<Json, JsonError> {
+    docs.iter()
+        .map(document_to_json)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Json::Array)
 }
 
 #[cfg(test)]
