@@ -94,6 +94,11 @@ impl TestDb {
         }
     }
 
+    /// The URL of this database, for a test that needs a pool of its own.
+    pub fn url(&self) -> String {
+        with_database(&self.admin_url, &self.name)
+    }
+
     /// A fresh database with the framework migrations applied.
     pub async fn migrated() -> Self {
         let db = Self::new().await;

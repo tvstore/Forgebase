@@ -19,6 +19,7 @@ use crate::args::{
 };
 use crate::compose::{Composed, compose};
 use crate::error::CliError;
+use crate::new_app::new_app;
 use crate::report::migrate_report;
 use forgebase_http::json::{
     Input, document_to_json, documents_to_json, parse_filters, parse_input, parse_sort,
@@ -34,6 +35,16 @@ const DATABASE_URL_VAR: &str = "FORGEBASE_DATABASE_URL";
 /// the apps (and the `--doctypes` directory) fit together; a startup error ends it with exit
 /// code 1.
 pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
+    // The one command that needs neither the apps nor a database.
+    if let Command::NewApp {
+        name,
+        forgebase_path,
+        dir,
+    } = &command
+    {
+        let created = new_app(name, forgebase_path, dir)?;
+        return write_stdout(&crate::new_app::report(&created));
+    }
     let url = database_url()?;
     match command {
         Command::Migrate {
@@ -60,6 +71,7 @@ pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
             token(&url, command).await
         }
         Command::Serve { doctypes } => serve(&url, &doctypes, apps).await,
+        Command::NewApp { .. } => unreachable!("handled above"),
     }
 }
 

@@ -32,11 +32,7 @@ fn rows(list: &[&[&str]]) -> Vec<Vec<String>> {
 
 fn applied(list: &[(&str, i32, &str)]) -> Vec<AppliedMigration> {
     list.iter()
-        .map(|(app, version, name)| AppliedMigration {
-            app: (*app).to_owned(),
-            version: *version,
-            name: (*name).to_owned(),
-        })
+        .map(|(app, version, name)| AppliedMigration::new(app, *version, name))
         .collect()
 }
 
@@ -125,6 +121,20 @@ const FIXTURE_DOCTYPES: &str = "tests/fixtures/doctypes";
 #[test]
 fn the_guard_passes_when_the_list_and_the_directory_agree() {
     assert_doctypes_listed(&fixture_app(), env!("CARGO_MANIFEST_DIR"), FIXTURE_DOCTYPES);
+}
+
+#[test]
+fn the_guard_ignores_a_leading_dot_slash_in_the_listed_paths_and_in_the_directory() {
+    let app = App::new("fixture").doctypes(forgebase::doctypes![
+        "./tests/fixtures/doctypes/widget.toml",
+        "tests/fixtures/doctypes/gizmo.toml",
+    ]);
+    assert_doctypes_listed(&app, env!("CARGO_MANIFEST_DIR"), FIXTURE_DOCTYPES);
+    assert_doctypes_listed(
+        &app,
+        env!("CARGO_MANIFEST_DIR"),
+        "./tests/fixtures/doctypes/",
+    );
 }
 
 #[test]

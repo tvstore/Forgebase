@@ -48,7 +48,9 @@ mod plan;
 mod sync;
 mod value;
 
-pub use app_migrations::{AppMigration, AppSpec, AppliedAppMigration};
+pub use app_migrations::{
+    AppMigration, AppSpec, AppliedAppMigration, tables_exist as app_migration_tables_exist,
+};
 pub use deadpool_postgres::Pool;
 pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
 pub use error::DbError;
@@ -122,9 +124,9 @@ pub async fn migrate(
 /// in `apps` are left as they are).
 ///
 /// With `dry_run` nothing is kept: the report lists the pending framework and app migrations
-/// and the sync plan. While framework migrations are pending the sync plan is `None` and every
-/// declared app migration is listed as pending (no app migration can have been applied before
-/// migration 0004 exists).
+/// and the sync plan. While framework migrations are pending the sync plan is `None`. The app
+/// migrations are still verified and listed when `fb_app_migration` exists; before migration 0004
+/// creates it, every declared app migration is listed as pending (none can have been applied).
 pub async fn migrate_apps(
     pool: &Pool,
     registry: &Registry,
@@ -181,10 +183,20 @@ async fn migrate_locked(
         name: m.name.to_owned(),
     };
     if options.dry_run && !migrations.is_empty() {
-        let app_migrations = apps
-            .iter()
-            .flat_map(|a| a.migrations.iter().map(|m| applied(a.name, m)))
-            .collect();
+        // Framework migrations are pending, so the sync plan cannot be computed. The app
+        // migrations are still verified when their tables already exist (a later framework
+        // migration is pending); when they do not, no app migration can have been applied.
+        let app_migrations = if app_migration_tables_exist(client).await? {
+            app_migrations::pending(client, apps)
+                .await?
+                .iter()
+                .map(|(app, m)| applied(app, m))
+                .collect()
+        } else {
+            apps.iter()
+                .flat_map(|a| a.migrations.iter().map(|m| applied(a.name, m)))
+                .collect()
+        };
         return Ok(MigrateReport {
             migrations,
             sync: None,

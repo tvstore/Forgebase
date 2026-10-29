@@ -89,6 +89,7 @@ Keep Plan, Doing and Review separate. Do not rely on the implementing agent to d
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, run local checks and contribute |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes, Keep a Changelog format |
 | [docs/blueprint/](docs/blueprint/) | `vision`, `feature-matrix`, `architecture`, `dependency-evaluation`, `security-model`, `milestones`, `maintenance-policy` |
+| [docs/guide/](docs/guide/first-app.md) | Guides for people who build on Forgebase (first app) |
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records |
 
 Do not duplicate content across documents; link instead.

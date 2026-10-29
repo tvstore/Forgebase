@@ -6,16 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Changed (breaking, 0.x)
-
-- **M5.1: the crate `forgebase-cli` is renamed `forgebase`** ([ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md); directory `crates/forgebase`). It is now a library and the `forgebase` binary (the binary name is unchanged, the stock binary is `Forgebase::new().run()`). Use `-p forgebase` instead of `-p forgebase-cli`. The workspace still has four crates. `forgebase` is the only public API; `forgebase-core`, `forgebase-db` and `forgebase-http` are internal, with no compatibility promise.
-- `--doctypes DIR` is optional in a binary that has apps (it becomes one more app, `local`, that depends on all the others); the stock binary still requires it.
-- `forgebase_db::MigrateReport` has the new field `app_migrations`; `forgebase_db::migrate` holds the migration advisory lock for the whole call (a session-level lock on a connection that is taken out of the pool and closed at the end, so it cannot leak into the pool).
-- `forgebase_core::hooks::HookContext` and `forgebase_core::value::Value` are `#[non_exhaustive]` (build a context with `HookContext::new`; match `Value` with a wildcard arm in other crates). `App::hooks` takes `impl DocTypeHooks + 'static` instead of an `Arc`.
-- `GET /api/v1/meta` and `GET /api/v1/meta/{doctype}` return `"app"`, the owning app (`null` when the registry records none; a field addition).
-
 ### Added
 
+- **M5.2: `forgebase new-app <name> --forgebase-path <checkout> [--dir <parent>]`** ([ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md)): writes an app crate (library and binary, sample DocType and hook, tests, `README.md`, `AGENTS.md`, a copy of the checkout's `Cargo.lock`) that builds and passes its own tests as created. The name must be an app name and a possible crate name: Rust keywords are refused. Templates are embedded from `crates/forgebase/templates/app/`; no new dependency; no database needed. CI job `app-template` generates an app, runs its tests, migrates, serves, logs in and reads the metadata. Guide: [docs/guide/first-app.md](docs/guide/first-app.md).
+- `forgebase::testing::AppliedMigration::new(app, version, name)`.
 - **M5.1 app model** (ADR 0012). `forgebase::App` (`new`, `version`, `depends_on`, `doctypes`, `hooks`, `migrations`), `forgebase::Forgebase` (`new`, `app`, `check`, `run`, `run_from`), `StartupError`, `DocTypeFile` and `MigrationFile` (private fields, getters, `new`; `#[non_exhaustive]`), the macros `forgebase::doctypes!` and `forgebase::migrations!` (files embedded with paths relative to the calling crate), and the hook API re-exported (`DocTypeHooks`, `HookContext`, `HookError`, `Operation`, `Document`, `Row`, `Value`, `Decimal`, `Date`, `OffsetDateTime`). Apps are registered in an explicit order and `depends_on` is checked; an app may link to and hook the DocTypes of its (transitive) dependencies only; a DocType belongs to one app; hooks run in app order, then registration order; all startup problems are reported together (exit code 1).
 - **Migration 0004** (`forgebase-db`): `fb_app` and `fb_app_migration`, and the **app data migrations**: versioned SQL per app, applied by `forgebase migrate` after the schema sync, in app order, each in its own transaction with checksum verification (a changed or removed applied migration, or a new one with a version below an applied one, is refused before anything else is applied; each runs with the `--lock-timeout-ms` lock timeout), skipped once applied; `migrate --dry-run` lists the pending ones. `forgebase_db::migrate_apps`, `AppSpec`, `AppMigration`, `AppliedAppMigration`; new `DbError` variants `AppChecksumMismatch`, `UnknownAppMigration`, `OutOfOrderAppMigration`, `AppMigrationFailed`.
 - `forgebase_core::meta::Registry::add_owned` and `owner` (an owner tag per DocType).
@@ -56,6 +50,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - M3.2 follow-ups, tests: the kept rule is scoped per Link field and per child table, and a `before_submit` hook cannot link to a document the caller cannot read (`forgebase-db/tests/permissions.rs`).
 - Docs: [ADR 0011](docs/adr/0011-permission-model-phase-1.md) (permission model, phase 1); security model (authorization and query enforcement implemented; the Link resolution and read-only role questions answered), architecture, feature matrix, milestones, `[[permissions]]` in the example DocTypes and a README section.
 
+### Changed (breaking, 0.x)
+
+- **M5.1: the crate `forgebase-cli` is renamed `forgebase`** ([ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md); directory `crates/forgebase`). It is now a library and the `forgebase` binary (the binary name is unchanged, the stock binary is `Forgebase::new().run()`). Use `-p forgebase` instead of `-p forgebase-cli`. The workspace still has four crates. `forgebase` is the only public API; `forgebase-core`, `forgebase-db` and `forgebase-http` are internal, with no compatibility promise.
+- `--doctypes DIR` is optional in a binary that has apps (it becomes one more app, `local`, that depends on all the others); the stock binary still requires it.
+- `forgebase_db::MigrateReport` has the new field `app_migrations`; `forgebase_db::migrate` holds the migration advisory lock for the whole call (a session-level lock on a connection that is taken out of the pool and closed at the end, so it cannot leak into the pool).
+- `forgebase_core::hooks::HookContext` and `forgebase_core::value::Value` are `#[non_exhaustive]` (build a context with `HookContext::new`; match `Value` with a wildcard arm in other crates). `App::hooks` takes `impl DocTypeHooks + 'static` instead of an `Arc`.
+- `GET /api/v1/meta` and `GET /api/v1/meta/{doctype}` return `"app"`, the owning app (`null` when the registry records none; a field addition).
+- `forgebase::testing::AppliedMigration`, `Migrated` and `Reply` are `#[non_exhaustive]` (read their public fields; build an `AppliedMigration` with `AppliedMigration::new`).
+
 ### Changed
 
 - **Breaking (0.x):** `forgebase_db::insert`, `get`, `update` and `delete` take `&mut impl GenericClient` (was `&impl GenericClient`) and the `&Registry` plus the DocType **name** (`&str`) instead of `&DocType`; `update` takes `&Changes` instead of a map of values. Each call runs in `client.transaction()` (a transaction on a pooled client, a savepoint inside a caller's transaction), so a document and its rows are written atomically on a pooled client too, the Link `FOR KEY SHARE` lock now lasts until the write is done, and a failed call no longer aborts a caller-owned transaction.
@@ -89,3 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - M4.2, tests and CI: one Playwright smoke test (`desk/e2e/smoke.spec.ts`, Chromium only, `desk/playwright.config.ts`, seed script `desk/e2e/seed.sh`) for login, list, create, edit and submit of a sales order and a user without the submit right, and a CI job `e2e` that runs it against a real `forgebase serve`. New dev dependency of `desk/`: `@playwright/test` 1.64.1 (Apache-2.0; with `playwright` and `playwright-core`), see [dependency evaluation](docs/blueprint/dependency-evaluation.md#admission-note-for-m42-2026-10-29-playwright).
 - M4.2, M4.1 follow-ups: the list view's Previous and Next do nothing (and are `aria-disabled`) while a request is loading, so Next cannot overshoot the last page; a failed request clears the rows instead of keeping the previous ones next to the new filters and sort; `forgebase-http` refuses a repeated `X-Forgebase-CSRF` header (on changing requests and on `GET /api/v1/session`) like a missing one, with tests.
 - Docs: architecture section 11 (form view design, field widgets, conflict handling, the `.` and `..` limit, the smoke test), security model (the desk hides and the API enforces), dependency evaluation (Playwright), README, CONTRIBUTING, feature matrix, and M4 marked Done with its exit-criteria evidence in [milestones](docs/blueprint/milestones.md#m4-minimal-desk).
+
+### Fixed
+
+- `forgebase_db::migrate_apps`, dry run with framework migrations pending: the app migrations are verified and listed when `fb_app_migration` exists (it listed every declared app migration as pending, hiding a changed or out-of-order one). Nothing changes for a database without those tables.
+- `forgebase::testing::assert_doctypes_listed` ignores a leading `./` on the listed paths as well as on the directory.

@@ -46,8 +46,9 @@
 //! migrations), `doc` (`insert`, `get`, `list`, `update`, `delete`, `submit`, `cancel` and
 //! `amend` of documents; `update`, `delete`, `submit`, `cancel` and `amend` need `--version`),
 //! `user` (`create`, `set-password`, `add-role`, `remove-role`, `disable`, `enable`; passwords
-//! come from standard input), `token` (`create`, `revoke`) and `serve` (the HTTP API; no
-//! migrations). Configuration comes from `FORGEBASE_DATABASE_URL`, and for `serve` from
+//! come from standard input), `token` (`create`, `revoke`), `serve` (the HTTP API; no
+//! migrations) and `new-app` (writes a new app crate that builds and passes its tests; needs no
+//! database, see `docs/guide/first-app.md`). Configuration comes from `FORGEBASE_DATABASE_URL`, and for `serve` from
 //! `FORGEBASE_LISTEN`, `FORGEBASE_ALLOWED_HOSTS`, `FORGEBASE_DEV_INSECURE_COOKIES` and
 //! `FORGEBASE_DESK_DIR`.
 //!
@@ -72,6 +73,7 @@ mod builder;
 mod compose;
 mod doctypes;
 mod error;
+mod new_app;
 mod report;
 mod run;
 

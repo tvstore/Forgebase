@@ -198,20 +198,28 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
     })
 }
 
+/// What is wrong with an app name: the rules of a DocType name, and `local` is reserved. Also
+/// used by `forgebase new-app`, so the generated app is accepted at startup.
+pub(crate) fn app_name_problems(name: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    if let Err(reason) = validate_doctype_name(name) {
+        problems.push(format!("app name {name:?} {reason}"));
+    }
+    if name == LOCAL_APP {
+        problems.push(format!(
+            "app name `{LOCAL_APP}` is reserved for the DocTypes of the --doctypes directory"
+        ));
+    }
+    problems
+}
+
 /// Checks names, dependencies, order and migration versions. Returns, per app name, the names
 /// of the apps it may use: its dependencies and theirs.
 fn check_apps(apps: &[App], errors: &mut StartupError) -> BTreeMap<String, BTreeSet<String>> {
     let mut reach: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for app in apps {
         let name = app.name.as_str();
-        if let Err(reason) = validate_doctype_name(name) {
-            errors.apps.push(format!("app name {name:?} {reason}"));
-        }
-        if name == LOCAL_APP {
-            errors.apps.push(format!(
-                "app name `{LOCAL_APP}` is reserved for the DocTypes of the --doctypes directory"
-            ));
-        }
+        errors.apps.extend(app_name_problems(name));
         if reach.contains_key(name) {
             errors
                 .apps

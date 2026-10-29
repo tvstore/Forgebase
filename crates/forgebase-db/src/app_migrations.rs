@@ -47,6 +47,17 @@ pub struct AppliedAppMigration {
     pub name: String,
 }
 
+/// Whether the app migration tables exist (framework migration 0004 has been applied). `migrate_apps`
+/// asks this in a dry run while framework migrations are pending; public (internal crate) so
+/// that a test can check the decision, because no later framework migration exists yet to make
+/// the case happen for real.
+pub async fn tables_exist(client: &Client) -> Result<bool, DbError> {
+    let row = client
+        .query_one("SELECT to_regclass('fb_app_migration') IS NOT NULL", &[])
+        .await?;
+    Ok(row.try_get(0)?)
+}
+
 /// The migrations of `apps` that are not applied yet, in app order and then version order.
 /// Every applied migration of these apps is checked first: it must still be declared
 /// ([`DbError::UnknownAppMigration`]) and its checksum must match
