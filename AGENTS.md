@@ -228,12 +228,12 @@ See also [ADR 0008](docs/adr/0008-model-selection-policy.md) (records the adopti
 
 ## 10. Operating model
 
-Owner decision of 2026-10-28, confirmed by the owner on 2026-10-29. It changes who carries out the workflow, not the workflow itself: sections 3 to 9 still apply.
+Owner decision of 2026-10-28, confirmed by the owner on 2026-10-29. It changes who carries out the workflow, not the workflow itself: sections 3 to 9 still apply. The standing merge authorization in section 10.3 is the prior approval that section 3 (Stage 4), section 5 and section 9.6 require, for merges that meet its conditions and for nothing else.
 
 ### 10.1 Sessions
 
 - **Information session.** The original planning session holds approved plans and confirmed results. New plans, requirement changes and owner decisions are made there.
-- **Working session.** A separate session executes approved plans: implementation, review, pull requests, CI fixes and merging, with automatic permissions. After each merge, each deviation from the plan and each blocker it sends the information session a short report: what was done, the evidence (tests, CI, review status, PR link) and any deviation with its reason.
+- **Working session.** A separate session executes approved plans: implementation, review, pull requests, CI fixes and merging within the authorization in section 10.3. After each merge, each deviation from the plan and each blocker it sends the information session a short report: what was done, the evidence (tests, CI, review status, PR link) and any deviation with its reason.
 
 ### 10.2 Roles in the working session
 
@@ -247,10 +247,10 @@ The working session may merge a pull request into `main` without asking again, u
 
 1. the work is part of a plan the owner approved;
 2. CI is green on the pull request head;
-3. an independent review (section 10.2) reports PASS.
+3. an independent review (section 10.2) reports PASS on the diff being merged. A code change pushed after that PASS (a CI fix included) needs a new review round; only a disclosed documentation-only fix (section 10.2) is exempt.
 
 Red or unreviewed work is never merged. Force pushes to `main` are never allowed. Publishing a release still needs explicit approval.
 
 ### 10.4 Deviations (PDCA)
 
-When execution deviates from the approved plan, the working session applies Plan → Do → Check → Act and reports the deviation. It does not take decisions that belong to the owner: new requirements, architecture changes beyond the plan, significant new dependencies, changes to Accepted ADRs, and starting a milestone that is not in an approved plan. It reports such an item and pauses it.
+When execution deviates from the approved plan, the working session applies Plan → Do → Check → Act and reports the deviation. It does not take decisions that belong to the owner: new requirements, architecture changes beyond the plan, significant new dependencies, changes to Accepted ADRs, and starting a milestone that is not in an approved plan. It reports such an item to the information session and pauses that work until the owner decides.
