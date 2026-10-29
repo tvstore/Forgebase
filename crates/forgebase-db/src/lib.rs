@@ -2,19 +2,23 @@
 //!
 //! Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3 and M2.1):
+//! Implemented so far (milestones M1.2, M1.3, M2.1 and M2.2):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
 //! - [`migrate_framework`]: Forgebase's own tables (`fb_migration`, `fb_doctype`).
 //! - [`sync`]: additive DocType schema sync with dry-run, conflict refusal and `lock_timeout`;
-//!   Link fields become `uuid` columns with a foreign key (`ON DELETE RESTRICT`) and an index.
+//!   Link fields become `uuid` columns with a foreign key (`ON DELETE RESTRICT`) and an index; a
+//!   child DocType's table has `id`, `parent_id` (foreign key `ON DELETE CASCADE`, indexed) and
+//!   `idx`.
 //! - [`migrate`]: both of the above in order.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
-//! - [`insert`], [`get`], [`update`], [`delete`]: one document at a time, on a pooled client or a
-//!   caller-owned [`Transaction`]. Link values are target names, resolved to ids internally;
-//!   `update` and `delete` need the `expected_version` (optimistic concurrency). No permissions
-//!   and no renames yet.
+//! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
+//!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own
+//!   transaction (a savepoint inside a caller's). They take the [`Registry`] and the DocType
+//!   name. Link values are target names, resolved to ids internally; `update` and `delete` need
+//!   the `expected_version` (optimistic concurrency); an update replaces the rows of the Table
+//!   fields it names. No permissions and no renames yet.
 
 mod document;
 mod error;

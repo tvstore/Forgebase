@@ -1,18 +1,16 @@
 //! Executes the commands.
 
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use forgebase_core::document::Document;
+use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::{DocType, Registry};
-use forgebase_core::value::Value;
 use forgebase_db::{DbError, StoredDocument, SyncOptions};
 
 use crate::args::{Command, DocCommand, DocTypesDir};
 use crate::doctypes::load_dir;
 use crate::error::CliError;
-use crate::json::{document_to_json, parse_values};
+use crate::json::{Input, document_to_json, parse_input};
 use crate::report::migrate_report;
 
 /// Environment variable with the PostgreSQL URL.
@@ -44,23 +42,27 @@ pub async fn run(command: Command) -> Result<(), CliError> {
 /// database when the DocType, the JSON or standard input is wrong.
 enum Operation {
     Insert {
-        doctype: DocType,
-        values: BTreeMap<String, Value>,
+        registry: Registry,
+        doctype: String,
+        input: Input,
         actor: String,
     },
     Get {
-        doctype: DocType,
+        registry: Registry,
+        doctype: String,
         name: String,
     },
     Update {
-        doctype: DocType,
+        registry: Registry,
+        doctype: String,
         name: String,
         expected_version: i64,
-        changes: BTreeMap<String, Value>,
+        input: Input,
         actor: String,
     },
     Delete {
-        doctype: DocType,
+        registry: Registry,
+        doctype: String,
         name: String,
         expected_version: i64,
     },
@@ -74,11 +76,12 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             data,
             actor,
         } => {
-            let doctype = find_doctype(&doctypes, &doctype)?;
-            let values = parse_values(&doctype, &read_data(&data.data)?)?;
+            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let input = parse_input(&registry, &found, &read_data(&data.data)?)?;
             Operation::Insert {
-                doctype,
-                values,
+                registry,
+                doctype: found.name,
+                input,
                 actor: actor.actor,
             }
         }
@@ -86,10 +89,14 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             doctype,
             name,
             doctypes,
-        } => Operation::Get {
-            doctype: find_doctype(&doctypes, &doctype)?,
-            name,
-        },
+        } => {
+            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            Operation::Get {
+                registry,
+                doctype: found.name,
+                name,
+            }
+        }
         DocCommand::Update {
             doctype,
             name,
@@ -98,13 +105,14 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             data,
             actor,
         } => {
-            let doctype = find_doctype(&doctypes, &doctype)?;
-            let changes = parse_values(&doctype, &read_data(&data.data)?)?;
+            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            let input = parse_input(&registry, &found, &read_data(&data.data)?)?;
             Operation::Update {
-                doctype,
+                registry,
+                doctype: found.name,
                 name,
                 expected_version: version.expected_version,
-                changes,
+                input,
                 actor: actor.actor,
             }
         }
@@ -113,49 +121,75 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
             name,
             version,
             doctypes,
-        } => Operation::Delete {
-            doctype: find_doctype(&doctypes, &doctype)?,
-            name,
-            expected_version: version.expected_version,
-        },
+        } => {
+            let (registry, found) = find_doctype(&doctypes, &doctype)?;
+            Operation::Delete {
+                registry,
+                doctype: found.name,
+                name,
+                expected_version: version.expected_version,
+            }
+        }
     })
 }
 
 async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
     let pool = forgebase_db::connect(url).await?;
-    let client = pool.get().await.map_err(DbError::from)?;
-    let client = &**client;
+    let mut client = pool.get().await.map_err(DbError::from)?;
+    let client = &mut **client;
     let stored = match operation {
         Operation::Insert {
+            registry,
             doctype,
-            values,
+            input,
             actor,
         } => {
-            let document = Document { name: None, values };
-            forgebase_db::insert(client, &doctype, document, &actor).await?
+            let document = Document {
+                name: None,
+                values: input.values,
+                tables: input.tables,
+            };
+            forgebase_db::insert(client, &registry, &doctype, document, &actor).await?
         }
-        Operation::Get { doctype, name } => forgebase_db::get(client, &doctype, &name)
+        Operation::Get {
+            registry,
+            doctype,
+            name,
+        } => forgebase_db::get(client, &registry, &doctype, &name)
             .await?
-            .ok_or(DbError::NotFound {
-                doctype: doctype.name.clone(),
-                name,
-            })?,
+            .ok_or(DbError::NotFound { doctype, name })?,
         Operation::Update {
+            registry,
             doctype,
             name,
             expected_version,
-            changes,
+            input,
             actor,
         } => {
-            forgebase_db::update(client, &doctype, &name, expected_version, &changes, &actor)
-                .await?
+            let changes = Changes {
+                values: input.values,
+                tables: input.tables,
+            };
+            forgebase_db::update(
+                client,
+                &registry,
+                &doctype,
+                &name,
+                expected_version,
+                &changes,
+                &actor,
+            )
+            .await?
         }
         Operation::Delete {
+            registry,
             doctype,
             name,
             expected_version,
         } => {
-            return Ok(forgebase_db::delete(client, &doctype, &name, expected_version).await?);
+            return Ok(
+                forgebase_db::delete(client, &registry, &doctype, &name, expected_version).await?,
+            );
         }
     };
     print_document(&stored)
@@ -172,10 +206,14 @@ fn registry(dir: &DocTypesDir) -> Result<Registry, CliError> {
     load_dir(&dir.doctypes).map_err(CliError::DocTypes)
 }
 
-fn find_doctype(dir: &DocTypesDir, name: &str) -> Result<DocType, CliError> {
+/// The registry of the directory and the DocType called `name` in it.
+fn find_doctype(dir: &DocTypesDir, name: &str) -> Result<(Registry, DocType), CliError> {
     let registry = registry(dir)?;
     match registry.get(name) {
-        Some(doctype) => Ok(doctype.clone()),
+        Some(doctype) => {
+            let doctype = doctype.clone();
+            Ok((registry, doctype))
+        }
         None => Err(CliError::UnknownDocType {
             name: name.to_owned(),
             known: if registry.is_empty() {

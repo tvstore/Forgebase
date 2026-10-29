@@ -4,6 +4,7 @@
 //! |---|---|
 //! | Data, Text, Select | string |
 //! | Link | string: the `name` of the target document (the database stores its id) |
+//! | Table | array of row objects in order, each mapped like a document (no nested Table); `null` means no rows; in an update the array replaces all rows |
 //! | Int | integer (a float, or an integer outside the `i64` range, is rejected) |
 //! | Decimal | **string**, for example `"1234.50"` (a JSON number is rejected so no precision is lost to floats); every form `rust_decimal` parses is accepted with its exact value, for example `"1e3"`, `"+12.5"`, `".5"` |
 //! | Check | `true` / `false` |
@@ -11,16 +12,19 @@
 //! | Datetime | RFC 3339 string; output is always UTC with `Z`. Microsecond precision (PostgreSQL `timestamptz`): finer digits are truncated, not rounded or rejected |
 //! | any | `null` for no value |
 //!
-//! The input must be a JSON object. A duplicate key is accepted and the last one wins (serde_json
-//! behavior). Output keys are sorted alphabetically. Values stored by other tools outside the
-//! supported ranges (years beyond ±9999, `infinity`, `NaN`) cannot be read; see
-//! [`forgebase_db::DbError::Decode`]. Keys that are not fields of the DocType are passed on (with
-//! a null value) so that core validation reports them together with the other problems.
+//! The input must be a JSON object. Output of a Table field is an array of row objects in order
+//! (a row has one key per field of the child DocType, `null` when empty); row ids are not output.
+//! A duplicate key is accepted and the last one wins (serde_json behavior). Output keys are
+//! sorted alphabetically. Values stored by other tools outside the supported ranges (years beyond
+//! ±9999, `infinity`, `NaN`) cannot be read; see [`forgebase_db::DbError::Decode`]. Keys that are
+//! not fields of the DocType are passed on (with a null value) so that core validation reports
+//! them together with the other problems.
 //! This lives in the CLI for now and moves to a shared place when the HTTP API arrives (M3).
 
 use std::collections::BTreeMap;
 
-use forgebase_core::meta::{DocType, FieldType};
+use forgebase_core::document::Row;
+use forgebase_core::meta::{DocType, FieldType, Registry};
 use forgebase_core::value::Value;
 use forgebase_db::StoredDocument;
 use rust_decimal::Decimal;
@@ -71,21 +75,83 @@ fn date_format() -> Result<Vec<BorrowedFormatItem<'static>>, time::error::Invali
     format_description::parse_borrowed::<2>("[year]-[month]-[day]")
 }
 
-/// Parses JSON text into field values for `doctype`.
-pub fn parse_values(doctype: &DocType, text: &str) -> Result<BTreeMap<String, Value>, JsonError> {
+/// The values and table rows of a JSON object.
+#[derive(Debug, Default)]
+pub struct Input {
+    /// Field values (every field except Table fields).
+    pub values: BTreeMap<String, Value>,
+    /// The rows of each Table field that the input mentions.
+    pub tables: BTreeMap<String, Vec<Row>>,
+}
+
+/// Parses JSON text into field values and table rows for `doctype`. `registry` provides the
+/// child DocTypes of its Table fields.
+pub fn parse_input(registry: &Registry, doctype: &DocType, text: &str) -> Result<Input, JsonError> {
     let Json::Object(object) = serde_json::from_str::<Json>(text)? else {
         return Err(JsonError::NotAnObject);
     };
-    let mut values = BTreeMap::new();
+    let mut input = Input::default();
     for (name, json) in &object {
-        let value = match doctype.field(name) {
-            Some(field) => to_value(name, &field.field_type, json)?,
+        match doctype.field(name).map(|f| &f.field_type) {
+            Some(FieldType::Table { target }) => {
+                input
+                    .tables
+                    .insert(name.clone(), to_rows(registry, name, target, json)?);
+            }
+            Some(field_type) => {
+                input
+                    .values
+                    .insert(name.clone(), to_value(name, field_type, json)?);
+            }
             // Reported by validation as an unknown field.
-            None => Value::Null,
-        };
-        values.insert(name.clone(), value);
+            None => {
+                input.values.insert(name.clone(), Value::Null);
+            }
+        }
     }
-    Ok(values)
+    Ok(input)
+}
+
+/// The rows of a Table field: an array of objects (`null` is no rows).
+fn to_rows(
+    registry: &Registry,
+    name: &str,
+    target: &str,
+    json: &Json,
+) -> Result<Vec<Row>, JsonError> {
+    let items = match json {
+        Json::Null => return Ok(Vec::new()),
+        Json::Array(items) => items,
+        other => {
+            return Err(bad(
+                name,
+                format!("expected an array of rows, found {}", kind(other)),
+            ));
+        }
+    };
+    let child = registry
+        .get(target)
+        .ok_or_else(|| bad(name, format!("unknown child doctype `{target}`")))?;
+    let mut rows = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let in_row = |problem: String| bad(name, format!("row {}: {problem}", i + 1));
+        let Json::Object(object) = item else {
+            return Err(in_row(format!("expected an object, found {}", kind(item))));
+        };
+        let mut row = Row::new();
+        for (field, json) in object {
+            let value = match child.field(field) {
+                Some(f) => {
+                    to_value(field, &f.field_type, json).map_err(|e| in_row(e.to_string()))?
+                }
+                // Reported by validation as an unknown field of the row.
+                None => Value::Null,
+            };
+            row.insert(field.clone(), value);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
 fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, JsonError> {
@@ -132,6 +198,10 @@ fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, Js
                 .map(Value::Date)
                 .map_err(|_| bad(name, format!("`{s}` is not a date in the form YYYY-MM-DD")))
         }
+        FieldType::Table { .. } => Err(bad(
+            name,
+            "a table field takes a list of rows, not a single value",
+        )),
         FieldType::Datetime => {
             let s = json
                 .as_str()
@@ -188,7 +258,8 @@ fn from_value(name: &str, value: &Value) -> Result<Json, JsonError> {
     })
 }
 
-/// A stored document as a JSON object: the standard columns plus the field values.
+/// A stored document as a JSON object: the standard columns, the field values and, for each
+/// Table field, the array of its rows.
 pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
     let rfc3339 = |field: &str, t: &OffsetDateTime| {
         utc_rfc3339(t)
@@ -223,6 +294,18 @@ pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
     );
     for (name, value) in &doc.values {
         object.insert(name.clone(), from_value(name, value)?);
+    }
+    for (name, rows) in &doc.tables {
+        let mut items = Vec::with_capacity(rows.len());
+        for (i, row) in rows.iter().enumerate() {
+            let mut item = Map::new();
+            for (field, value) in row {
+                let place = format!("{name} row {}: {field}", i + 1);
+                item.insert(field.clone(), from_value(&place, value)?);
+            }
+            items.push(Json::Object(item));
+        }
+        object.insert(name.clone(), Json::Array(items));
     }
     Ok(Json::Object(object))
 }
@@ -273,7 +356,7 @@ target = "other"
     }
 
     fn one(text: &str) -> Result<BTreeMap<String, Value>, JsonError> {
-        parse_values(&doctype(), text)
+        parse_input(&Registry::new(), &doctype(), text).map(|input| input.values)
     }
 
     fn message(text: &str) -> String {
@@ -318,6 +401,7 @@ target = "other"
             modified_by: "m".into(),
             version: 1,
             values: BTreeMap::from([("l".to_owned(), Value::Text("ann@example.com".into()))]),
+            tables: BTreeMap::new(),
         };
         assert_eq!(document_to_json(&doc).unwrap()["l"], "ann@example.com");
     }
@@ -435,6 +519,7 @@ target = "other"
                 ("c".to_owned(), Value::Bool(false)),
                 ("d".to_owned(), Value::Null),
             ]),
+            tables: BTreeMap::new(),
         };
         let json = document_to_json(&doc).unwrap();
         assert_eq!(json["id"], "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b");
@@ -447,13 +532,117 @@ target = "other"
         assert_eq!(json["c"], false);
         assert!(json["d"].is_null());
         // Output parses back to the same values.
-        let round = parse_values(&doctype(), &json.to_string());
+        let round = parse_input(&Registry::new(), &doctype(), &json.to_string()).map(|i| i.values);
         // Standard columns are not fields, so they come back as unknown (null) keys only.
         let round = round.unwrap();
         assert_eq!(round["at"], Value::Datetime(at));
         assert_eq!(round["on"], Value::Date(date));
         assert_eq!(round["m"], Value::Decimal("12.50".parse().unwrap()));
         assert_eq!(round["i"], Value::Int(i64::MIN));
+    }
+
+    fn order_registry() -> (Registry, DocType) {
+        let mut registry = Registry::new();
+        for text in [
+            "name = \"line\"\nlabel = \"L\"\nis_child = true\n[[fields]]\nname = \"qty\"\ntype = \"int\"\n\
+             [[fields]]\nname = \"price\"\ntype = \"decimal\"\nprecision = 10\nscale = 2\n",
+            "name = \"ord\"\nlabel = \"O\"\n[[fields]]\nname = \"title\"\ntype = \"data\"\n\
+             [[fields]]\nname = \"lines\"\ntype = \"table\"\ntarget = \"line\"\n",
+        ] {
+            registry.add(DocType::from_toml_str(text).unwrap()).unwrap();
+        }
+        let ord = registry.get("ord").unwrap().clone();
+        (registry, ord)
+    }
+
+    #[test]
+    fn table_fields_are_arrays_of_row_objects() {
+        let (registry, ord) = order_registry();
+        let input = parse_input(
+            &registry,
+            &ord,
+            r#"{"title":"T","lines":[{"qty":1,"price":"2.50"},{"qty":2},{}]}"#,
+        )
+        .unwrap();
+        assert_eq!(input.values.len(), 1);
+        let rows = &input.tables["lines"];
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["qty"], Value::Int(1));
+        assert_eq!(rows[0]["price"], Value::Decimal("2.50".parse().unwrap()));
+        assert!(rows[2].is_empty());
+        // null and [] are both "no rows"; unknown row keys are passed on for validation.
+        for text in [r#"{"lines":null}"#, r#"{"lines":[]}"#] {
+            let input = parse_input(&registry, &ord, text).unwrap();
+            assert_eq!(input.tables["lines"].len(), 0, "{text}");
+        }
+        let input = parse_input(&registry, &ord, r#"{"lines":[{"nope":1}]}"#).unwrap();
+        assert_eq!(input.tables["lines"][0]["nope"], Value::Null);
+    }
+
+    #[test]
+    fn table_input_errors_name_the_field_and_the_row() {
+        let (registry, ord) = order_registry();
+        let message = |text: &str| parse_input(&registry, &ord, text).unwrap_err().to_string();
+        assert_eq!(
+            message(r#"{"lines":"x"}"#),
+            "field `lines`: expected an array of rows, found a string"
+        );
+        assert_eq!(
+            message(r#"{"lines":{"qty":1}}"#),
+            "field `lines`: expected an array of rows, found an object"
+        );
+        assert_eq!(
+            message(r#"{"lines":[{"qty":1},5]}"#),
+            "field `lines`: row 2: expected an object, found a number"
+        );
+        assert_eq!(
+            message(r#"{"lines":[{"qty":1},{"qty":"two"}]}"#),
+            "field `lines`: row 2: field `qty`: expected an integer, found a string"
+        );
+        assert!(message(r#"{"lines":[{"price":1.5}]}"#).contains("row 1: field `price`"));
+    }
+
+    #[test]
+    fn a_child_table_in_the_registry_is_needed_for_rows() {
+        let (_, ord) = order_registry();
+        let error = parse_input(&Registry::new(), &ord, r#"{"lines":[{}]}"#).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown child doctype `line`"),
+            "{error}"
+        );
+        // But without rows nothing is looked up.
+        assert!(parse_input(&Registry::new(), &ord, r#"{"lines":null}"#).is_ok());
+    }
+
+    #[test]
+    fn table_output_is_an_array_of_row_objects_in_order() {
+        let rows = vec![
+            BTreeMap::from([
+                ("qty".to_owned(), Value::Int(1)),
+                ("price".to_owned(), Value::Decimal("2.50".parse().unwrap())),
+            ]),
+            BTreeMap::from([
+                ("qty".to_owned(), Value::Null),
+                ("price".to_owned(), Value::Null),
+            ]),
+        ];
+        let doc = StoredDocument {
+            id: "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b".parse().unwrap(),
+            name: "n".into(),
+            owner: "o".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            modified_at: OffsetDateTime::UNIX_EPOCH,
+            modified_by: "m".into(),
+            version: 1,
+            values: BTreeMap::new(),
+            tables: BTreeMap::from([("lines".to_owned(), rows), ("empty".to_owned(), Vec::new())]),
+        };
+        let json = document_to_json(&doc).unwrap();
+        assert_eq!(
+            json["lines"],
+            serde_json::json!([{"price": "2.50", "qty": 1}, {"price": null, "qty": null}])
+        );
+        assert_eq!(json["empty"], serde_json::json!([]));
     }
 
     #[test]

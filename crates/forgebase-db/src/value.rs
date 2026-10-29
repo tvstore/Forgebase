@@ -81,7 +81,8 @@ pub(crate) fn cast_type(field_type: &FieldType) -> &'static str {
         FieldType::Check => "boolean",
         FieldType::Date => "date",
         FieldType::Datetime => "timestamptz",
-        FieldType::Link { .. } => "uuid",
+        // A Table field has no column and no parameter; callers never ask.
+        FieldType::Link { .. } | FieldType::Table { .. } => "uuid",
     }
 }
 
@@ -117,6 +118,8 @@ pub(crate) fn decode(
         FieldType::Datetime => row
             .try_get::<_, Option<OffsetDateTime>>(index)?
             .map_or(Value::Null, Value::Datetime),
+        // A Table field has no column; callers read `DocType::column_fields` only.
+        FieldType::Table { .. } => Value::Null,
     })
 }
 

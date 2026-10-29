@@ -14,7 +14,8 @@ use crate::ident::quote_ident;
 
 const TIMESTAMPTZ: &str = "timestamp with time zone";
 
-/// Standard columns of every DocType table: (name, PostgreSQL type). All are `NOT NULL`.
+/// Standard columns of every (non-child) DocType table: (name, PostgreSQL type). All are
+/// `NOT NULL`.
 const STANDARD_COLUMNS: [(&str, &str); 7] = [
     ("id", "uuid"),
     ("name", "text"),
@@ -24,6 +25,20 @@ const STANDARD_COLUMNS: [(&str, &str); 7] = [
     ("modified_by", "text"),
     ("version", "bigint"),
 ];
+
+/// Standard columns of a child DocType table (see [`standard_columns`]); all `NOT NULL`.
+const CHILD_STANDARD_COLUMNS: [(&str, &str); 3] =
+    [("id", "uuid"), ("parent_id", "uuid"), ("idx", "integer")];
+
+/// The standard columns of the table of `doctype`: a child's rows have no name, owner, version
+/// or timestamps (they are saved with their parent) but point at the parent and have a position.
+fn standard_columns(doctype: &DocType) -> &'static [(&'static str, &'static str)] {
+    if doctype.is_child {
+        &CHILD_STANDARD_COLUMNS
+    } else {
+        &STANDARD_COLUMNS
+    }
+}
 
 /// One change the sync would make. Executed in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,9 +58,10 @@ pub enum Step {
         /// The `ALTER TABLE` statement.
         sql: String,
     },
-    /// Add the foreign keys of the Link fields of a new table, or of Link columns added to an
-    /// existing table. Runs after every new table has its primary key, so links between new
-    /// tables (also cycles and self-links) work in one sync.
+    /// Add the foreign keys of a new table (the `parent_id` key of a child table and the keys of
+    /// its Link fields) or of Link columns added to an existing table. Runs after every new
+    /// table has its primary key, so links between new tables (also cycles and self-links) and
+    /// a child created together with its parent work in one sync.
     AddForeignKeys {
         /// DocType name.
         doctype: String,
@@ -70,7 +86,8 @@ pub enum Step {
         /// The `CREATE UNIQUE INDEX` statement.
         sql: String,
     },
-    /// Add a non-unique index on a Link column (PostgreSQL does not index foreign keys itself).
+    /// Add a non-unique index on a Link column or on `parent_id` of a child table (PostgreSQL
+    /// does not index foreign keys itself).
     CreateIndex {
         /// DocType name.
         doctype: String,
@@ -117,9 +134,10 @@ pub enum Conflict {
         /// The relation name (the wanted table name).
         name: String,
     },
-    /// A foreign key does not match the Link field: a Link column without the foreign key to the
+    /// A foreign key does not match the metadata: a Link column without the foreign key to the
     /// target's `id`, a foreign key to another table or column, a delete rule other than
-    /// `RESTRICT`, or a foreign key on a column that is not a Link.
+    /// `RESTRICT`, a foreign key on a column that is not a Link; for a child table the same
+    /// about `parent_id`, whose key must reference the parent's `id` with `ON DELETE CASCADE`.
     ForeignKeyMismatch {
         /// Table name.
         table: String,
@@ -289,6 +307,14 @@ fn expected_foreign_key(target: &str) -> ForeignKey {
     }
 }
 
+/// The foreign key `parent_id` of a child table must have: deleting a parent deletes its rows.
+fn expected_parent_key(parent: &str) -> ForeignKey {
+    ForeignKey {
+        on_delete: 'c',
+        ..expected_foreign_key(parent)
+    }
+}
+
 /// Snapshot of the live schema, limited to the tables of the registry.
 #[derive(Debug, Default)]
 pub(crate) struct Catalog {
@@ -331,6 +357,8 @@ fn pg_type(field_type: &FieldType) -> String {
         FieldType::Date => "date".to_owned(),
         FieldType::Datetime => TIMESTAMPTZ.to_owned(),
         FieldType::Link { .. } => "uuid".to_owned(),
+        // No column: the rows live in the child's table. Callers skip these fields.
+        FieldType::Table { .. } => "uuid".to_owned(),
     }
 }
 
@@ -343,11 +371,11 @@ fn standard_column_sql(name: &str, data_type: &str) -> String {
 }
 
 fn create_table_sql(doctype: &DocType, table: &str) -> String {
-    let mut lines: Vec<String> = STANDARD_COLUMNS
+    let mut lines: Vec<String> = standard_columns(doctype)
         .iter()
         .map(|(name, data_type)| standard_column_sql(name, data_type))
         .collect();
-    for field in &doctype.fields {
+    for field in doctype.column_fields() {
         lines.push(format!(
             "{} {}",
             quote_ident(&field.name),
@@ -365,29 +393,32 @@ fn create_table_sql(doctype: &DocType, table: &str) -> String {
 /// free names (`<table>_<column>_key`, adjusted if taken or too long). Because every table of
 /// the sync already exists, none of those names can clash with a table name.
 fn add_keys_sql(doctype: &DocType, table: &str) -> String {
-    let mut clauses = vec![
-        format!("ADD PRIMARY KEY ({})", quote_ident("id")),
-        format!("ADD UNIQUE ({})", quote_ident("name")),
-    ];
+    let mut clauses = vec![format!("ADD PRIMARY KEY ({})", quote_ident("id"))];
+    // A child's rows have no name, and its fields cannot be unique.
+    if !doctype.is_child {
+        clauses.push(format!("ADD UNIQUE ({})", quote_ident("name")));
+    }
     clauses.extend(
         doctype
-            .fields
-            .iter()
+            .column_fields()
             .filter(|f| f.unique)
             .map(|f| format!("ADD UNIQUE ({})", quote_ident(&f.name))),
     );
     format!("ALTER TABLE {} {}", quote_ident(table), clauses.join(", "))
 }
 
-/// Foreign keys of the given Link fields in one statement. Unnamed on purpose, like the keys.
-/// The delete rule is `RESTRICT`: a document that is still linked cannot be deleted.
-fn add_foreign_keys_sql(table: &str, links: &[(&DocField, &str)]) -> String {
-    let clauses: Vec<String> = links
+/// A foreign key to add: column, target DocType (its table's `id`), delete rule.
+type ForeignKeyClause<'a> = (&'a str, &'a str, &'static str);
+
+/// Foreign keys in one statement. Unnamed on purpose, like the keys. The rule is `RESTRICT` for
+/// a Link (a document that is still linked cannot be deleted) and `CASCADE` for `parent_id`.
+fn add_foreign_keys_sql(table: &str, keys: &[ForeignKeyClause<'_>]) -> String {
+    let clauses: Vec<String> = keys
         .iter()
-        .map(|(field, target)| {
+        .map(|(column, target, rule)| {
             format!(
-                "ADD FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE RESTRICT",
-                quote_ident(&field.name),
+                "ADD FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {rule}",
+                quote_ident(column),
                 quote_ident(&table_name(target)),
                 quote_ident("id")
             )
@@ -452,7 +483,7 @@ pub(crate) fn plan(registry: &Registry, catalog: &Catalog) -> Plan {
     let mut plan = Plan::default();
     let mut phases = Phases::default();
     for doctype in registry.iter() {
-        plan_doctype(doctype, catalog, &mut plan, &mut phases);
+        plan_doctype(registry, doctype, catalog, &mut plan, &mut phases);
     }
     plan.steps = [
         phases.create_tables,
@@ -474,8 +505,19 @@ pub(crate) fn plan(registry: &Registry, catalog: &Catalog) -> Plan {
     plan
 }
 
-fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &mut Phases) {
+fn plan_doctype(
+    registry: &Registry,
+    doctype: &DocType,
+    catalog: &Catalog,
+    plan: &mut Plan,
+    phases: &mut Phases,
+) {
     let table = table_name(&doctype.name);
+    // The parent of a child table; always there once `check_references` passed.
+    let parent = registry
+        .parent_of(&doctype.name)
+        .map(|(parent, _)| parent.name.as_str())
+        .filter(|_| doctype.is_child);
     let managed = catalog.managed.contains(&doctype.name);
     let taken = catalog.relations.contains(&table);
     // Only an ordinary table is ever "unmanaged"; anything else with the name is a name clash.
@@ -500,10 +542,20 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
             sql: add_keys_sql(doctype, &table),
         });
         let links = link_fields(doctype);
-        if !links.is_empty() {
+        let mut keys: Vec<ForeignKeyClause<'_>> = Vec::new();
+        if let Some(parent) = parent {
+            keys.push(("parent_id", parent, "CASCADE"));
+            phases.indexes.push(Step::CreateIndex {
+                doctype: doctype.name.clone(),
+                column: "parent_id".to_owned(),
+                sql: link_index_sql(&table, "parent_id"),
+            });
+        }
+        keys.extend(links.iter().map(|(f, t)| (f.name.as_str(), *t, "RESTRICT")));
+        if !keys.is_empty() {
             phases.add_foreign_keys.push(Step::AddForeignKeys {
                 doctype: doctype.name.clone(),
-                sql: add_foreign_keys_sql(&table, &links),
+                sql: add_foreign_keys_sql(&table, &keys),
             });
         }
         // A unique Link field is already indexed by its unique constraint.
@@ -525,7 +577,7 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
         plan.conflicts.push(Conflict::UnmanagedTable { table });
         return;
     }
-    for (name, data_type) in STANDARD_COLUMNS {
+    for &(name, data_type) in standard_columns(doctype) {
         let mismatch = |actual: String| Conflict::ColumnMismatch {
             table: table.clone(),
             column: name.to_owned(),
@@ -543,20 +595,21 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
         }
     }
     let key = |column: &str| (table.clone(), column.to_owned());
-    for (column, present, expected, actual) in [
-        (
-            "id",
-            catalog.primary.contains(&key("id")),
-            "primary key",
-            "not a primary key",
-        ),
-        (
+    let mut standard_keys = vec![(
+        "id",
+        catalog.primary.contains(&key("id")),
+        "primary key",
+        "not a primary key",
+    )];
+    if !doctype.is_child {
+        standard_keys.push((
             "name",
             catalog.unique.contains(&key("name")),
             "unique",
             "not unique",
-        ),
-    ] {
+        ));
+    }
+    for (column, present, expected, actual) in standard_keys {
         if columns.contains_key(column) && !present {
             plan.conflicts.push(Conflict::ColumnMismatch {
                 table: table.clone(),
@@ -566,8 +619,31 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
             });
         }
     }
-    let mut added_links: Vec<(&DocField, &str)> = Vec::new();
-    for field in &doctype.fields {
+    // The key to the parent: a missing `parent_id` column is already a conflict above.
+    if let Some(parent) = parent
+        && columns.contains_key("parent_id")
+    {
+        let parent_key = key("parent_id");
+        check_foreign_keys(
+            &table,
+            "parent_id",
+            &expected_parent_key(parent),
+            catalog
+                .foreign_keys
+                .get(&parent_key)
+                .map_or(&[][..], Vec::as_slice),
+            &mut plan.conflicts,
+        );
+        if !catalog.indexed.contains(&parent_key) {
+            phases.indexes.push(Step::CreateIndex {
+                doctype: doctype.name.clone(),
+                column: "parent_id".to_owned(),
+                sql: link_index_sql(&table, "parent_id"),
+            });
+        }
+    }
+    let mut added_links: Vec<ForeignKeyClause<'_>> = Vec::new();
+    for field in doctype.column_fields() {
         let key = (table.clone(), field.name.clone());
         let has_unique = catalog.unique.contains(&key);
         let target = match &field.field_type {
@@ -583,7 +659,7 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
                     sql: add_column_sql(&table, field),
                 });
                 if let Some(target) = target {
-                    added_links.push((field, target));
+                    added_links.push((&field.name, target, "RESTRICT"));
                 }
             }
             Some(c) if c.data_type != pg_type(&field.field_type) => {
@@ -624,7 +700,7 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
                 check_foreign_keys(
                     &table,
                     &field.name,
-                    target,
+                    &expected_foreign_key(target),
                     foreign_keys,
                     &mut plan.conflicts,
                 );
@@ -657,8 +733,8 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
         });
     }
     for column in columns.keys() {
-        let known =
-            STANDARD_COLUMNS.iter().any(|(n, _)| n == column) || doctype.field(column).is_some();
+        let known = standard_columns(doctype).iter().any(|(n, _)| n == column)
+            || doctype.column_fields().any(|f| f.name == *column);
         if !known {
             plan.warnings.push(Warning::ColumnNotInMetadata {
                 table: table.clone(),
@@ -668,15 +744,15 @@ fn plan_doctype(doctype: &DocType, catalog: &Catalog, plan: &mut Plan, phases: &
     }
 }
 
-/// A Link column that exists in the database must have exactly the expected foreign key.
+/// A Link column (or `parent_id`) that exists in the database must have exactly the expected
+/// foreign key.
 fn check_foreign_keys(
     table: &str,
     column: &str,
-    target: &str,
+    expected: &ForeignKey,
     found: &[ForeignKey],
     conflicts: &mut Vec<Conflict>,
 ) {
-    let expected = expected_foreign_key(target);
     let mismatch = |actual: String| Conflict::ForeignKeyMismatch {
         table: table.to_owned(),
         column: column.to_owned(),
@@ -686,7 +762,7 @@ fn check_foreign_keys(
     if found.is_empty() {
         conflicts.push(mismatch("missing".to_owned()));
     }
-    for fk in found.iter().filter(|fk| **fk != expected) {
+    for fk in found.iter().filter(|fk| *fk != expected) {
         conflicts.push(mismatch(fk.describe()));
     }
 }
@@ -703,11 +779,30 @@ mod tests {
             ..expected.clone()
         };
         let mut conflicts = Vec::new();
-        check_foreign_keys("doc_x", "link", "item", &[found], &mut conflicts);
+        check_foreign_keys("doc_x", "link", &expected, &[found], &mut conflicts);
         assert!(
             matches!(&conflicts[..], [Conflict::ForeignKeyMismatch { actual, .. }] if actual.contains("not validated")),
             "{conflicts:?}"
         );
+    }
+
+    #[test]
+    fn a_table_field_is_not_a_column_in_the_schema_statements() {
+        let doctype = DocType::from_toml_str(
+            "name = \"ord\"\nlabel = \"O\"\n\
+             [[fields]]\nname = \"title\"\ntype = \"data\"\n\
+             [[fields]]\nname = \"lines\"\ntype = \"table\"\ntarget = \"line\"\n\
+             [[fields]]\nname = \"note\"\ntype = \"text\"\n",
+        )
+        .expect("valid DocType");
+        let create = create_table_sql(&doctype, "doc_ord");
+        assert!(
+            create.contains("\"title\"") && create.contains("\"note\""),
+            "{create}"
+        );
+        assert!(!create.contains("lines"), "{create}");
+        assert!(!add_keys_sql(&doctype, "doc_ord").contains("lines"));
+        assert!(link_fields(&doctype).is_empty());
     }
 
     fn registry(toml: &str) -> Registry {
@@ -1200,6 +1295,279 @@ scale = 2
                 if column == "price" && expected == "no foreign key"),
             "{:?}",
             plan.conflicts
+        );
+    }
+
+    const PARENT: &str = "name = \"ord\"\nlabel = \"O\"\n[[fields]]\nname = \"title\"\ntype = \"data\"\n\
+         [[fields]]\nname = \"lines\"\ntype = \"table\"\ntarget = \"line\"\n";
+    const LINE: &str = "name = \"line\"\nlabel = \"L\"\nis_child = true\n\
+         [[fields]]\nname = \"qty\"\ntype = \"int\"\n\
+         [[fields]]\nname = \"grp\"\ntype = \"link\"\ntarget = \"grp\"\n";
+
+    fn child_registry() -> Registry {
+        registry_of(&[PARENT, LINE, GROUP])
+    }
+
+    #[test]
+    fn new_parent_and_child_tables() {
+        let plan = plan(&child_registry(), &Catalog::default());
+        assert!(plan.conflicts.is_empty() && plan.warnings.is_empty());
+        let sql: Vec<String> = plan.steps.iter().map(ToString::to_string).collect();
+        let position = |needle: &str| {
+            sql.iter()
+                .position(|s| s.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {sql:#?}"))
+        };
+        assert_eq!(
+            sql[position("CREATE TABLE \"doc_line\"")],
+            "CREATE TABLE \"doc_line\" (\n    \
+             \"id\" uuid NOT NULL,\n    \
+             \"parent_id\" uuid NOT NULL,\n    \
+             \"idx\" integer NOT NULL,\n    \
+             \"qty\" bigint,\n    \
+             \"grp\" uuid\n);"
+        );
+        // The Table field is not a column of the parent.
+        let parent_table = &sql[position("CREATE TABLE \"doc_ord\"")];
+        assert!(
+            parent_table.ends_with("\"title\" character varying(140)\n);"),
+            "{parent_table}"
+        );
+        // A child has a primary key only: no name, no unique constraints.
+        assert!(sql.contains(&"ALTER TABLE \"doc_line\" ADD PRIMARY KEY (\"id\");".to_owned()));
+        let keys = &sql[position("ALTER TABLE \"doc_line\" ADD FOREIGN KEY")];
+        assert_eq!(
+            keys,
+            "ALTER TABLE \"doc_line\" ADD FOREIGN KEY (\"parent_id\") REFERENCES \"doc_ord\" (\"id\") ON DELETE CASCADE, \
+             ADD FOREIGN KEY (\"grp\") REFERENCES \"doc_grp\" (\"id\") ON DELETE RESTRICT;"
+        );
+        assert!(
+            position("ADD PRIMARY KEY (\"id\"), ADD UNIQUE (\"name\")")
+                < position("ADD FOREIGN KEY")
+        );
+        assert!(
+            sql.iter().filter(|s| s.contains("ADD PRIMARY KEY")).count() == 3,
+            "{sql:#?}"
+        );
+        let indexes: Vec<&String> = sql
+            .iter()
+            .filter(|s| s.starts_with("CREATE INDEX"))
+            .collect();
+        assert_eq!(
+            indexes,
+            [
+                "CREATE INDEX ON \"doc_line\" (\"parent_id\");",
+                "CREATE INDEX ON \"doc_line\" (\"grp\");"
+            ]
+        );
+        assert!(position("ADD FOREIGN KEY") < position("CREATE INDEX"));
+        assert_eq!(
+            sql.iter().filter(|s| s.starts_with("-- register")).count(),
+            3
+        );
+    }
+
+    /// `ord`, `grp` and the child `line` exist and match.
+    fn child_catalog() -> Catalog {
+        let mut catalog = linked_catalog();
+        let key = |t: &str, c: &str| (t.to_owned(), c.to_owned());
+        // `linked_catalog` has `doc_ord` with Link columns; replace it with the plain parent.
+        catalog.columns.insert("doc_ord".into(), {
+            let mut ord = std_columns();
+            ord.insert(
+                "title".into(),
+                Column {
+                    data_type: "character varying(140)".into(),
+                    not_null: false,
+                },
+            );
+            ord
+        });
+        for column in ["grp", "prev"] {
+            catalog.unique.remove(&key("doc_ord", column));
+            catalog.indexed.remove(&key("doc_ord", column));
+            catalog.foreign_keys.remove(&key("doc_ord", column));
+        }
+        let col = |t: &str, not_null: bool| Column {
+            data_type: t.into(),
+            not_null,
+        };
+        let line = BTreeMap::from([
+            ("id".to_owned(), col("uuid", true)),
+            ("parent_id".to_owned(), col("uuid", true)),
+            ("idx".to_owned(), col("integer", true)),
+            ("qty".to_owned(), col("bigint", false)),
+            ("grp".to_owned(), col("uuid", false)),
+        ]);
+        catalog.columns.insert("doc_line".into(), line);
+        catalog.primary.insert(key("doc_line", "id"));
+        catalog.indexed.extend([
+            key("doc_line", "id"),
+            key("doc_line", "parent_id"),
+            key("doc_line", "grp"),
+        ]);
+        let fk = |table: &str, on_delete: char| ForeignKey {
+            table: table.into(),
+            column: "id".into(),
+            on_delete,
+            validated: true,
+        };
+        catalog
+            .foreign_keys
+            .insert(key("doc_line", "parent_id"), vec![fk("doc_ord", 'c')]);
+        catalog
+            .foreign_keys
+            .insert(key("doc_line", "grp"), vec![fk("doc_grp", 'r')]);
+        catalog.relations.insert("doc_line".into());
+        catalog.tables.insert("doc_line".into());
+        catalog.managed.insert("line".into());
+        catalog
+    }
+
+    #[test]
+    fn matching_child_schema_is_a_no_op() {
+        let plan = plan(&child_registry(), &child_catalog());
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn parent_key_drift_is_a_conflict() {
+        let key = ("doc_line".to_owned(), "parent_id".to_owned());
+        let registry = child_registry();
+        let describe = |catalog: &Catalog| -> Vec<String> {
+            plan(&registry, catalog)
+                .conflicts
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let mut restrict = child_catalog();
+        restrict.foreign_keys.get_mut(&key).unwrap()[0].on_delete = 'r';
+        assert_eq!(
+            describe(&restrict),
+            [
+                "foreign key on doc_line.parent_id is REFERENCES \"doc_ord\" (\"id\") ON DELETE RESTRICT in the \
+                 database but the metadata requires REFERENCES \"doc_ord\" (\"id\") ON DELETE CASCADE"
+            ]
+        );
+        let mut dropped = child_catalog();
+        dropped.foreign_keys.remove(&key);
+        assert_eq!(
+            describe(&dropped),
+            [
+                "foreign key on doc_line.parent_id is missing in the database but the metadata requires \
+                 REFERENCES \"doc_ord\" (\"id\") ON DELETE CASCADE"
+            ]
+        );
+        let mut not_validated = child_catalog();
+        not_validated.foreign_keys.get_mut(&key).unwrap()[0].validated = false;
+        assert_eq!(describe(&not_validated).len(), 1);
+        let mut wrong_table = child_catalog();
+        wrong_table.foreign_keys.get_mut(&key).unwrap()[0].table = "doc_grp".into();
+        assert_eq!(describe(&wrong_table).len(), 1);
+    }
+
+    #[test]
+    fn missing_parent_index_is_a_step_not_a_conflict() {
+        let mut catalog = child_catalog();
+        catalog
+            .indexed
+            .remove(&("doc_line".to_owned(), "parent_id".to_owned()));
+        let plan = plan(&child_registry(), &catalog);
+        assert!(plan.conflicts.is_empty());
+        assert!(
+            matches!(&plan.steps[..], [Step::CreateIndex { sql, .. }]
+                if sql == "CREATE INDEX ON \"doc_line\" (\"parent_id\")"),
+            "{:?}",
+            plan.steps
+        );
+    }
+
+    #[test]
+    fn child_standard_column_drift_and_extra_columns() {
+        let mut catalog = child_catalog();
+        let columns = catalog.columns.get_mut("doc_line").unwrap();
+        columns.get_mut("idx").unwrap().data_type = "bigint".into();
+        columns.remove("parent_id");
+        // A leftover `name` column of a former non-child table is only a warning.
+        columns.insert(
+            "name".into(),
+            Column {
+                data_type: "text".into(),
+                not_null: true,
+            },
+        );
+        let plan = plan(&child_registry(), &catalog);
+        let conflicts: Vec<String> = plan.conflicts.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            conflicts,
+            [
+                "column doc_line.parent_id is missing in the database but the metadata requires uuid NOT NULL",
+                "column doc_line.idx is bigint NOT NULL in the database but the metadata requires integer NOT NULL"
+            ]
+        );
+        assert_eq!(
+            plan.warnings,
+            vec![Warning::ColumnNotInMetadata {
+                table: "doc_line".into(),
+                column: "name".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn switching_between_child_and_not_child_is_a_conflict() {
+        // `item` was a plain DocType and is now a child.
+        let mut catalog = synced_catalog();
+        let registry = registry_of(&[
+            "name = \"item\"\nlabel = \"I\"\nis_child = true\n",
+            "name = \"holder\"\nlabel = \"H\"\n[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"item\"\n",
+        ]);
+        let plan_now = plan(&registry, &catalog);
+        let conflicts: Vec<String> = plan_now.conflicts.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            conflicts,
+            [
+                "column doc_item.parent_id is missing in the database but the metadata requires uuid NOT NULL",
+                "column doc_item.idx is missing in the database but the metadata requires integer NOT NULL"
+            ]
+        );
+        // And the other way round: a child table that becomes a normal DocType.
+        catalog = child_catalog();
+        let registry = registry_of(&["name = \"line\"\nlabel = \"L\"\n"]);
+        let conflicts: Vec<String> = plan(&registry, &catalog)
+            .conflicts
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(conflicts.len(), 6, "{conflicts:?}");
+        assert!(
+            conflicts[0].contains("doc_line.name is missing"),
+            "{conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_field_never_gets_a_column() {
+        // A leftover column with the name of a Table field is reported like any unknown column.
+        let mut catalog = child_catalog();
+        catalog.columns.get_mut("doc_ord").unwrap().insert(
+            "lines".into(),
+            Column {
+                data_type: "text".into(),
+                not_null: false,
+            },
+        );
+        let plan = plan(&child_registry(), &catalog);
+        assert!(plan.steps.is_empty() && plan.conflicts.is_empty());
+        assert_eq!(
+            plan.warnings,
+            vec![Warning::ColumnNotInMetadata {
+                table: "doc_ord".into(),
+                column: "lines".into()
+            }]
         );
     }
 

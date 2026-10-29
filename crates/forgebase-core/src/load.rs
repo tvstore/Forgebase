@@ -14,6 +14,8 @@ struct RawDocType {
     /// Kept as a generic value so a malformed `naming` gets a clear message.
     naming: Option<toml::Value>,
     #[serde(default)]
+    is_child: bool,
+    #[serde(default)]
     fields: Vec<RawField>,
 }
 
@@ -64,7 +66,13 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
     let mut errors = Vec::new();
     let mut failed = Vec::new();
 
-    let naming = convert_naming(raw.naming, &mut errors);
+    // A child has no naming rule at all; `convert_naming` would accept `naming = "random"`.
+    let naming = if raw.is_child && raw.naming.is_some() {
+        errors.push(DefinitionError::ChildWithNaming);
+        Naming::Random
+    } else {
+        convert_naming(raw.naming, &mut errors)
+    };
 
     let mut fields = Vec::with_capacity(raw.fields.len());
     for f in raw.fields {
@@ -88,6 +96,7 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         label: raw.label,
         naming,
         fields,
+        is_child: raw.is_child,
     };
     errors.extend(doctype.check(&failed));
     if errors.is_empty() {
@@ -113,7 +122,7 @@ fn convert_type(f: &RawField) -> Result<FieldType, Vec<DefinitionError>> {
         "datetime" => (Some(FieldType::Datetime), &[]),
         "decimal" => (None, &["precision", "scale"]),
         "select" => (None, &["options"]),
-        "link" => (None, &["target"]),
+        "link" | "table" => (None, &["target"]),
         _ => {
             return Err(vec![DefinitionError::UnknownFieldType {
                 field: f.name.clone(),
@@ -181,6 +190,19 @@ fn convert_type(f: &RawField) -> Result<FieldType, Vec<DefinitionError>> {
                 errors.push(DefinitionError::MissingParam {
                     field: f.name.clone(),
                     field_type: "link",
+                    param: "target",
+                });
+                None
+            }
+        },
+        (None, "table") => match &f.target {
+            Some(target) => Some(FieldType::Table {
+                target: target.clone(),
+            }),
+            None => {
+                errors.push(DefinitionError::MissingParam {
+                    field: f.name.clone(),
+                    field_type: "table",
                     param: "target",
                 });
                 None
@@ -330,6 +352,92 @@ scale = 2
             ),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn parses_table_fields_and_child_doctypes() {
+        let d = from_toml_str(&doc_with_field("type = \"table\"\ntarget = \"row\"")).unwrap();
+        assert_eq!(
+            d.fields[0].field_type,
+            FieldType::Table {
+                target: "row".into()
+            }
+        );
+        assert_eq!(d.fields[0].field_type.name(), "table");
+        assert!(!d.is_child);
+
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\n[[fields]]\nname = \"qty\"\ntype = \"int\"\n";
+        let d = from_toml_str(child).unwrap();
+        assert!(d.is_child);
+        assert_eq!(d.naming, Naming::Random);
+    }
+
+    #[test]
+    fn table_parameter_errors() {
+        assert_eq!(
+            invalid(&doc_with_field("type = \"table\"")),
+            vec![DefinitionError::MissingParam {
+                field: "f".into(),
+                field_type: "table",
+                param: "target",
+            }]
+        );
+        assert_eq!(
+            invalid(&doc_with_field(
+                "type = \"table\"\ntarget = \"row\"\nmax_length = 5"
+            )),
+            vec![DefinitionError::UnexpectedParam {
+                field: "f".into(),
+                field_type: "table".into(),
+                param: "max_length",
+            }]
+        );
+        assert_eq!(
+            invalid(&doc_with_field(
+                "type = \"table\"\ntarget = \"row\"\nunique = true"
+            )),
+            vec![DefinitionError::UniqueTable { field: "f".into() }]
+        );
+        // `required` (at least one row) is fine.
+        assert!(
+            from_toml_str(&doc_with_field(
+                "type = \"table\"\ntarget = \"row\"\nrequired = true"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn child_doctype_rules_in_toml() {
+        let base = "name = \"row\"\nlabel = \"R\"\nis_child = true\n";
+        // Any naming key is refused, also the default one.
+        for naming in ["\"random\"", "{ field = \"code\" }", "\"bogus\""] {
+            assert_eq!(
+                invalid(&format!("naming = {naming}\n{base}")),
+                vec![DefinitionError::ChildWithNaming],
+                "{naming}"
+            );
+        }
+        let nested =
+            format!("{base}[[fields]]\nname = \"more\"\ntype = \"table\"\ntarget = \"x\"\n");
+        assert_eq!(
+            invalid(&nested),
+            vec![DefinitionError::ChildWithTable {
+                field: "more".into()
+            }]
+        );
+        let unique = format!("{base}[[fields]]\nname = \"code\"\ntype = \"data\"\nunique = true\n");
+        assert_eq!(
+            invalid(&unique),
+            vec![DefinitionError::ChildWithUnique {
+                field: "code".into()
+            }]
+        );
+        // A wrong value kind is a parse error.
+        assert!(matches!(
+            from_toml_str("name = \"t\"\nlabel = \"T\"\nis_child = \"yes\"\n"),
+            Err(MetaError::Parse(_))
+        ));
     }
 
     #[test]

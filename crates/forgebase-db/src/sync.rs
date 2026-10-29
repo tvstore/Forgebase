@@ -53,9 +53,11 @@ pub struct SyncReport {
 /// `CREATE INDEX`, which blocks writes on that table while it builds. Adding a foreign key
 /// takes a lock on both tables and validates the existing rows.
 ///
-/// A Link field whose target DocType is not in `registry` is refused first
+/// A Link or Table field whose target DocType is not in `registry`, and the other reference rules
+/// of child tables (a child belongs to exactly one parent), are refused first
 /// ([`DbError::InvalidMetadata`], from [`Registry::check_references`]), before anything touches
-/// the database.
+/// the database. A child DocType's table gets `parent_id` and `idx` columns and a `parent_id`
+/// foreign key with `ON DELETE CASCADE`.
 ///
 /// The framework migrations must have been applied ([`DbError::FrameworkNotMigrated`]).
 pub async fn sync(

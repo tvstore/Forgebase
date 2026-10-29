@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{CUSTOMER, TestDb, registry};
-use forgebase_core::document::{Document, ValidationError};
-use forgebase_core::meta::DocType;
+use forgebase_core::document::{Changes, Document, ValidationError};
+use forgebase_core::meta::{DocType, Registry};
 use forgebase_core::value::Value;
 use forgebase_db::{DbError, delete, get, insert, update};
 use macros_free::{date, datetime};
@@ -44,12 +44,12 @@ name = "points"
 type = "int"
 "#;
 
-async fn setup(texts: &[&str]) -> (TestDb, Vec<DocType>) {
+async fn setup(texts: &[&str]) -> (TestDb, Registry, Vec<DocType>) {
     let db = TestDb::migrated().await;
     let registry = registry(texts);
     db.sync(&registry).await.expect("sync");
     let doctypes = registry.iter().cloned().collect();
-    (db, doctypes)
+    (db, registry, doctypes)
 }
 
 fn doc(values: &[(&str, Value)]) -> Document {
@@ -59,6 +59,15 @@ fn doc(values: &[(&str, Value)]) -> Document {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), v.clone()))
             .collect(),
+        tables: BTreeMap::new(),
+    }
+}
+
+/// Changes to field values only.
+fn values_of<const N: usize>(pairs: [(String, Value); N]) -> Changes {
+    Changes {
+        values: BTreeMap::from(pairs),
+        tables: BTreeMap::new(),
     }
 }
 
@@ -92,13 +101,19 @@ async fn count(db: &TestDb, table: &str) -> i64 {
 
 #[tokio::test]
 async fn round_trips_every_field_type() {
-    let (db, types) = setup(&[CUSTOMER]).await;
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
     let customer = &types[0];
-    let client = db.pool.get().await.unwrap();
+    let mut client = db.pool.get().await.unwrap();
 
-    let stored = insert(&**client, customer, full_customer("a@example.com"), "alice")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        &customer.name,
+        full_customer("a@example.com"),
+        "alice",
+    )
+    .await
+    .unwrap();
     assert_eq!(stored.values["email"], text("a@example.com"));
     assert_eq!(stored.values["points"], Value::Int(-42));
     assert_eq!(stored.values["credit_limit"], dec("1234.50"));
@@ -112,7 +127,7 @@ async fn round_trips_every_field_type() {
     assert_eq!(stored.version, 1);
     assert_eq!(stored.created_at, stored.modified_at);
 
-    let fetched = get(&**client, customer, &stored.name)
+    let fetched = get(&mut **client, &reg, &customer.name, &stored.name)
         .await
         .unwrap()
         .unwrap();
@@ -121,11 +136,12 @@ async fn round_trips_every_field_type() {
 
 #[tokio::test]
 async fn absent_and_null_values_are_null() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     let stored = insert(
-        &**client,
-        &types[0],
+        &mut **client,
+        &reg,
+        &types[0].name,
         doc(&[("email", text("n@example.com")), ("points", Value::Null)]),
         "cli",
     )
@@ -141,9 +157,9 @@ async fn absent_and_null_values_are_null() {
 
 #[tokio::test]
 async fn boundary_values_round_trip() {
-    let (db, types) = setup(&[CUSTOMER]).await;
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
     let customer = &types[0];
-    let client = db.pool.get().await.unwrap();
+    let mut client = db.pool.get().await.unwrap();
 
     // Data at max_length 100, counted in characters (multi-byte characters).
     let longest = "\u{e9}".repeat(100);
@@ -158,8 +174,9 @@ async fn boundary_values_round_trip() {
     .enumerate()
     {
         let stored = insert(
-            &**client,
-            customer,
+            &mut **client,
+            &reg,
+            &customer.name,
             doc(&[("email", text(email)), ("credit_limit", dec(decimal))]),
             "cli",
         )
@@ -171,8 +188,9 @@ async fn boundary_values_round_trip() {
     // i64 extremes.
     for n in [i64::MIN, i64::MAX, 0] {
         let stored = insert(
-            &**client,
-            customer,
+            &mut **client,
+            &reg,
+            &customer.name,
             doc(&[
                 ("email", text(&format!("int{n}"))),
                 ("points", Value::Int(n)),
@@ -186,8 +204,9 @@ async fn boundary_values_round_trip() {
     // A non-UTC offset is stored as the same instant (and comes back in UTC).
     let local = datetime(7);
     let stored = insert(
-        &**client,
-        customer,
+        &mut **client,
+        &reg,
+        &customer.name,
         doc(&[("email", text("tz")), ("last_seen", Value::Datetime(local))]),
         "cli",
     )
@@ -202,24 +221,32 @@ async fn boundary_values_round_trip() {
 
 #[tokio::test]
 async fn random_naming_uses_the_id() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
-    let stored = insert(&**client, &types[0], full_customer("r@example.com"), "cli")
-        .await
-        .unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        &types[0].name,
+        full_customer("r@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(stored.name, stored.id.hyphenated().to_string());
     assert_eq!(stored.id.get_version_num(), 7);
-    let again = get(&**client, &types[0], &stored.name).await.unwrap();
+    let again = get(&mut **client, &reg, &types[0].name, &stored.name)
+        .await
+        .unwrap();
     assert_eq!(again.unwrap().id, stored.id);
 }
 
 #[tokio::test]
 async fn explicit_name_is_rejected_for_random_naming() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     let mut document = full_customer("x@example.com");
     document.name = Some("my-name".to_owned());
-    let error = insert(&**client, &types[0], document, "cli")
+    let error = insert(&mut **client, &reg, &types[0].name, document, "cli")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Naming(_)), "{error}");
@@ -228,38 +255,53 @@ async fn explicit_name_is_rejected_for_random_naming() {
 
 #[tokio::test]
 async fn field_naming_uses_the_field_value() {
-    let (db, types) = setup(&[NAMED]).await;
+    let (db, reg, types) = setup(&[NAMED]).await;
     let account = &types[0];
-    let client = db.pool.get().await.unwrap();
+    let mut client = db.pool.get().await.unwrap();
 
-    let stored = insert(&**client, account, doc(&[("email", text("a@b.c"))]), "cli")
-        .await
-        .unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        &account.name,
+        doc(&[("email", text("a@b.c"))]),
+        "cli",
+    )
+    .await
+    .unwrap();
     assert_eq!(stored.name, "a@b.c");
 
     // An explicit name that equals the field value is accepted, a different one is not.
     let mut same = doc(&[("email", text("same"))]);
     same.name = Some("same".to_owned());
     assert_eq!(
-        insert(&**client, account, same, "cli").await.unwrap().name,
+        insert(&mut **client, &reg, &account.name, same, "cli")
+            .await
+            .unwrap()
+            .name,
         "same"
     );
     let mut different = doc(&[("email", text("other"))]);
     different.name = Some("nope".to_owned());
-    let error = insert(&**client, account, different, "cli")
+    let error = insert(&mut **client, &reg, &account.name, different, "cli")
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Naming(_)), "{error}");
-    assert!(get(&**client, account, "other").await.unwrap().is_none());
+    assert!(
+        get(&mut **client, &reg, &account.name, "other")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn validation_errors_are_collected_and_nothing_is_written() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     let error = insert(
-        &**client,
-        &types[0],
+        &mut **client,
+        &reg,
+        &types[0].name,
         doc(&[
             ("email", text("   ")),
             ("bogus", Value::Int(1)),
@@ -288,7 +330,7 @@ async fn validation_errors_are_collected_and_nothing_is_written() {
     assert_eq!(count(&db, "doc_customer").await, 0);
 
     // A required field that is missing entirely.
-    let error = insert(&**client, &types[0], doc(&[]), "cli")
+    let error = insert(&mut **client, &reg, &types[0].name, doc(&[]), "cli")
         .await
         .unwrap_err();
     assert!(
@@ -299,15 +341,21 @@ async fn validation_errors_are_collected_and_nothing_is_written() {
 
 #[tokio::test]
 async fn invalid_actor_is_rejected() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     for actor in ["", "a\0b"] {
-        let error = insert(&**client, &types[0], full_customer("a@x.y"), actor)
-            .await
-            .unwrap_err();
+        let error = insert(
+            &mut **client,
+            &reg,
+            &types[0].name,
+            full_customer("a@x.y"),
+            actor,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, DbError::InvalidActor), "{error}");
-        let changes = BTreeMap::from([("points".to_owned(), Value::Int(1))]);
-        let error = update(&**client, &types[0], "n", 1, &changes, actor)
+        let changes = values_of([("points".to_owned(), Value::Int(1))]);
+        let error = update(&mut **client, &reg, &types[0].name, "n", 1, &changes, actor)
             .await
             .unwrap_err();
         assert!(matches!(error, DbError::InvalidActor), "{error}");
@@ -317,10 +365,10 @@ async fn invalid_actor_is_rejected() {
 
 #[tokio::test]
 async fn get_missing_is_none() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     assert!(
-        get(&**client, &types[0], "nothing")
+        get(&mut **client, &reg, &types[0].name, "nothing")
             .await
             .unwrap()
             .is_none()
@@ -329,22 +377,36 @@ async fn get_missing_is_none() {
 
 #[tokio::test]
 async fn update_changes_values_and_bumps_version() {
-    let (db, types) = setup(&[CUSTOMER]).await;
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
     let customer = &types[0];
-    let client = db.pool.get().await.unwrap();
-    let created = insert(&**client, customer, full_customer("u@example.com"), "alice")
-        .await
-        .unwrap();
+    let mut client = db.pool.get().await.unwrap();
+    let created = insert(
+        &mut **client,
+        &reg,
+        &customer.name,
+        full_customer("u@example.com"),
+        "alice",
+    )
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let changes = BTreeMap::from([
+    let changes = values_of([
         ("points".to_owned(), Value::Int(7)),
         ("credit_limit".to_owned(), dec("0.5")),
         ("notes".to_owned(), Value::Null),
     ]);
-    let updated = update(&**client, customer, &created.name, 1, &changes, "bob")
-        .await
-        .unwrap();
+    let updated = update(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &created.name,
+        1,
+        &changes,
+        "bob",
+    )
+    .await
+    .unwrap();
     assert_eq!(updated.version, 2);
     assert_eq!(updated.modified_by, "bob");
     assert!(updated.modified_at > created.modified_at);
@@ -358,79 +420,127 @@ async fn update_changes_values_and_bumps_version() {
     assert_eq!(updated.values["tier"], text("gold"));
     assert_eq!(updated.values["email"], created.values["email"]);
 
-    let fetched = get(&**client, customer, &created.name)
+    let fetched = get(&mut **client, &reg, &customer.name, &created.name)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(fetched, updated);
-    let third = update(&**client, customer, &created.name, 2, &changes, "bob")
-        .await
-        .unwrap();
+    let third = update(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &created.name,
+        2,
+        &changes,
+        "bob",
+    )
+    .await
+    .unwrap();
     assert_eq!(third.version, 3);
 }
 
 #[tokio::test]
 async fn update_rejects_bad_changes() {
-    let (db, types) = setup(&[CUSTOMER, NAMED]).await;
+    let (db, reg, types) = setup(&[CUSTOMER, NAMED]).await;
     let (account, customer) = (&types[0], &types[1]);
     assert_eq!(account.name, "account");
-    let client = db.pool.get().await.unwrap();
-    let created = insert(&**client, customer, full_customer("v@example.com"), "cli")
-        .await
-        .unwrap();
+    let mut client = db.pool.get().await.unwrap();
+    let created = insert(
+        &mut **client,
+        &reg,
+        &customer.name,
+        full_customer("v@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap();
 
     // Nothing to change.
     let error = update(
-        &**client,
-        customer,
+        &mut **client,
+        &reg,
+        &customer.name,
         &created.name,
         1,
-        &BTreeMap::new(),
+        &Changes::default(),
         "cli",
     )
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::NoChanges), "{error}");
     // Validation (unknown field, required cleared).
-    let changes = BTreeMap::from([
+    let changes = values_of([
         ("bogus".to_owned(), Value::Int(1)),
         ("email".to_owned(), Value::Null),
     ]);
-    let error = update(&**client, customer, &created.name, 1, &changes, "cli")
-        .await
-        .unwrap_err();
+    let error = update(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &created.name,
+        1,
+        &changes,
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(error, DbError::Validation(ref e) if e.len() == 2),
         "{error}"
     );
 
     // The naming field cannot change, even to the same value.
-    let named = insert(&**client, account, doc(&[("email", text("old"))]), "cli")
-        .await
-        .unwrap();
+    let named = insert(
+        &mut **client,
+        &reg,
+        &account.name,
+        doc(&[("email", text("old"))]),
+        "cli",
+    )
+    .await
+    .unwrap();
     for new in ["new", "old"] {
-        let changes = BTreeMap::from([("email".to_owned(), text(new))]);
-        let error = update(&**client, account, "old", 1, &changes, "cli")
-            .await
-            .unwrap_err();
+        let changes = values_of([("email".to_owned(), text(new))]);
+        let error = update(
+            &mut **client,
+            &reg,
+            &account.name,
+            "old",
+            1,
+            &changes,
+            "cli",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, DbError::Naming(_)), "{error}");
     }
     assert_eq!(
-        get(&**client, account, "old").await.unwrap().unwrap(),
+        get(&mut **client, &reg, &account.name, "old")
+            .await
+            .unwrap()
+            .unwrap(),
         named
     );
 
     // Unknown name.
-    let changes = BTreeMap::from([("points".to_owned(), Value::Int(1))]);
-    let error = update(&**client, customer, "missing", 1, &changes, "cli")
-        .await
-        .unwrap_err();
+    let changes = values_of([("points".to_owned(), Value::Int(1))]);
+    let error = update(
+        &mut **client,
+        &reg,
+        &customer.name,
+        "missing",
+        1,
+        &changes,
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(&error, DbError::NotFound { doctype, name } if doctype == "customer" && name == "missing"),
         "{error}"
     );
     // Nothing changed.
-    let unchanged = get(&**client, customer, &created.name)
+    let unchanged = get(&mut **client, &reg, &customer.name, &created.name)
         .await
         .unwrap()
         .unwrap();
@@ -439,20 +549,28 @@ async fn update_rejects_bad_changes() {
 
 #[tokio::test]
 async fn delete_removes_the_document() {
-    let (db, types) = setup(&[CUSTOMER]).await;
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
     let customer = &types[0];
-    let client = db.pool.get().await.unwrap();
-    let stored = insert(&**client, customer, full_customer("d@example.com"), "cli")
+    let mut client = db.pool.get().await.unwrap();
+    let stored = insert(
+        &mut **client,
+        &reg,
+        &customer.name,
+        full_customer("d@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    delete(&mut **client, &reg, &customer.name, &stored.name, 1)
         .await
         .unwrap();
-    delete(&**client, customer, &stored.name, 1).await.unwrap();
     assert!(
-        get(&**client, customer, &stored.name)
+        get(&mut **client, &reg, &customer.name, &stored.name)
             .await
             .unwrap()
             .is_none()
     );
-    let error = delete(&**client, customer, &stored.name, 1)
+    let error = delete(&mut **client, &reg, &customer.name, &stored.name, 1)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::NotFound { .. }), "{error}");
@@ -460,16 +578,28 @@ async fn delete_removes_the_document() {
 
 #[tokio::test]
 async fn duplicate_unique_values_are_unique_violations() {
-    let (db, types) = setup(&[CUSTOMER, NAMED]).await;
+    let (db, reg, types) = setup(&[CUSTOMER, NAMED]).await;
     let (account, customer) = (&types[0], &types[1]);
-    let client = db.pool.get().await.unwrap();
+    let mut client = db.pool.get().await.unwrap();
 
-    insert(&**client, customer, full_customer("dup@example.com"), "cli")
-        .await
-        .unwrap();
-    let error = insert(&**client, customer, full_customer("dup@example.com"), "cli")
-        .await
-        .unwrap_err();
+    insert(
+        &mut **client,
+        &reg,
+        &customer.name,
+        full_customer("dup@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &customer.name,
+        full_customer("dup@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap_err();
     let DbError::UniqueViolation { message } = &error else {
         panic!("expected unique violation, got {error}");
     };
@@ -481,34 +611,55 @@ async fn duplicate_unique_values_are_unique_violations() {
 
     // Update into a duplicate.
     let other = insert(
-        &**client,
-        customer,
+        &mut **client,
+        &reg,
+        &customer.name,
         full_customer("other@example.com"),
         "cli",
     )
     .await
     .unwrap();
-    let changes = BTreeMap::from([("email".to_owned(), text("dup@example.com"))]);
-    let error = update(&**client, customer, &other.name, 1, &changes, "cli")
-        .await
-        .unwrap_err();
+    let changes = values_of([("email".to_owned(), text("dup@example.com"))]);
+    let error = update(
+        &mut **client,
+        &reg,
+        &customer.name,
+        &other.name,
+        1,
+        &changes,
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::UniqueViolation { .. }), "{error}");
 
     // Field naming: the same name twice.
-    insert(&**client, account, doc(&[("email", text("n"))]), "cli")
-        .await
-        .unwrap();
-    let error = insert(&**client, account, doc(&[("email", text("n"))]), "cli")
-        .await
-        .unwrap_err();
+    insert(
+        &mut **client,
+        &reg,
+        &account.name,
+        doc(&[("email", text("n"))]),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let error = insert(
+        &mut **client,
+        &reg,
+        &account.name,
+        doc(&[("email", text("n"))]),
+        "cli",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DbError::UniqueViolation { .. }), "{error}");
 }
 
 #[tokio::test]
 async fn injection_like_strings_are_stored_literally() {
-    let (db, types) = setup(&[CUSTOMER]).await;
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
     let customer = &types[0];
-    let client = db.pool.get().await.unwrap();
+    let mut client = db.pool.get().await.unwrap();
     let nasty = [
         "x'); DROP TABLE doc_customer; --",
         "\"; DROP TABLE doc_customer; --",
@@ -516,8 +667,9 @@ async fn injection_like_strings_are_stored_literally() {
     ];
     for (i, value) in nasty.iter().enumerate() {
         let stored = insert(
-            &**client,
-            customer,
+            &mut **client,
+            &reg,
+            &customer.name,
             doc(&[("email", text(&format!("{i}@x.y"))), ("notes", text(value))]),
             value,
         )
@@ -525,15 +677,28 @@ async fn injection_like_strings_are_stored_literally() {
         .unwrap();
         assert_eq!(stored.values["notes"], text(value));
         assert_eq!(stored.owner, *value);
-        let changes = BTreeMap::from([("notes".to_owned(), text(value))]);
-        let updated = update(&**client, customer, &stored.name, 1, &changes, value)
-            .await
-            .unwrap();
+        let changes = values_of([("notes".to_owned(), text(value))]);
+        let updated = update(
+            &mut **client,
+            &reg,
+            &customer.name,
+            &stored.name,
+            1,
+            &changes,
+            value,
+        )
+        .await
+        .unwrap();
         assert_eq!(updated.modified_by, *value);
         // Looking up by a hostile name finds nothing and breaks nothing.
-        assert!(get(&**client, customer, value).await.unwrap().is_none());
+        assert!(
+            get(&mut **client, &reg, &customer.name, value)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
-            delete(&**client, customer, value, 1).await,
+            delete(&mut **client, &reg, &customer.name, value, 1).await,
             Err(DbError::NotFound { .. })
         ));
     }
@@ -542,29 +707,54 @@ async fn injection_like_strings_are_stored_literally() {
 
 #[tokio::test]
 async fn operations_in_a_rolled_back_transaction_leave_nothing() {
-    let (db, types) = setup(&[CUSTOMER]).await;
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
     let customer = &types[0];
     let mut client = db.pool.get().await.unwrap();
     let raw: &mut forgebase_db::Client = &mut client;
 
-    let tx = raw.transaction().await.unwrap();
-    let stored = insert(&tx, customer, full_customer("t@example.com"), "cli")
-        .await
-        .unwrap();
-    let changes = BTreeMap::from([("points".to_owned(), Value::Int(9))]);
-    update(&tx, customer, &stored.name, 1, &changes, "cli")
-        .await
-        .unwrap();
+    let mut tx = raw.transaction().await.unwrap();
+    let stored = insert(
+        &mut tx,
+        &reg,
+        &customer.name,
+        full_customer("t@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap();
+    let changes = values_of([("points".to_owned(), Value::Int(9))]);
+    update(
+        &mut tx,
+        &reg,
+        &customer.name,
+        &stored.name,
+        1,
+        &changes,
+        "cli",
+    )
+    .await
+    .unwrap();
     // Visible inside the transaction.
-    assert!(get(&tx, customer, &stored.name).await.unwrap().is_some());
+    assert!(
+        get(&mut tx, &reg, &customer.name, &stored.name)
+            .await
+            .unwrap()
+            .is_some()
+    );
     tx.rollback().await.unwrap();
     assert_eq!(count(&db, "doc_customer").await, 0);
 
     // A committed transaction keeps the document.
-    let tx = raw.transaction().await.unwrap();
-    insert(&tx, customer, full_customer("t@example.com"), "cli")
-        .await
-        .unwrap();
+    let mut tx = raw.transaction().await.unwrap();
+    insert(
+        &mut tx,
+        &reg,
+        &customer.name,
+        full_customer("t@example.com"),
+        "cli",
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(count(&db, "doc_customer").await, 1);
 }
@@ -573,7 +763,7 @@ async fn operations_in_a_rolled_back_transaction_leave_nothing() {
 async fn stored_document_columns_match_the_table() {
     // Documents the standard-column order of the generated DDL. Decoding does not depend on it
     // (every statement selects an explicit column list); this only pins the table layout.
-    let (db, _) = setup(&[CUSTOMER]).await;
+    let (db, _, _) = setup(&[CUSTOMER]).await;
     let names: Vec<String> = db
         .columns("doc_customer")
         .await
@@ -597,8 +787,8 @@ async fn stored_document_columns_match_the_table() {
 
 #[tokio::test]
 async fn datetime_out_of_range_in_utc_is_an_error_not_a_panic() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     // 9999-12-31T23:00:00-05:00 is year 10000 in UTC.
     let edge = time::Date::from_calendar_date(9999, time::Month::December, 31)
         .unwrap()
@@ -606,8 +796,9 @@ async fn datetime_out_of_range_in_utc_is_an_error_not_a_panic() {
         .unwrap()
         .assume_offset(time::UtcOffset::from_hms(-5, 0, 0).unwrap());
     let error = insert(
-        &**client,
-        &types[0],
+        &mut **client,
+        &reg,
+        &types[0].name,
         doc(&[
             ("email", text("e@x.y")),
             ("last_seen", Value::Datetime(edge)),
@@ -622,11 +813,12 @@ async fn datetime_out_of_range_in_utc_is_an_error_not_a_panic() {
 
 #[tokio::test]
 async fn unreadable_stored_values_give_an_error_naming_the_field() {
-    let (db, types) = setup(&[CUSTOMER]).await;
-    let client = db.pool.get().await.unwrap();
+    let (db, reg, types) = setup(&[CUSTOMER]).await;
+    let mut client = db.pool.get().await.unwrap();
     let stored = insert(
-        &**client,
-        &types[0],
+        &mut **client,
+        &reg,
+        &types[0].name,
         full_customer("raw@example.com"),
         "cli",
     )
@@ -635,7 +827,9 @@ async fn unreadable_stored_values_give_an_error_naming_the_field() {
     // Another writer stores a date the `time` crate cannot represent.
     db.exec("UPDATE doc_customer SET joined_on = date '5874897-12-31'")
         .await;
-    let error = get(&**client, &types[0], &stored.name).await.unwrap_err();
+    let error = get(&mut **client, &reg, &types[0].name, &stored.name)
+        .await
+        .unwrap_err();
     assert!(matches!(error, DbError::Decode { .. }), "{error:?}");
     let message = error.to_string();
     assert!(message.contains("`joined_on`"), "{message}");
@@ -644,7 +838,7 @@ async fn unreadable_stored_values_give_an_error_naming_the_field() {
     // Same for timestamptz infinity.
     db.exec("UPDATE doc_customer SET joined_on = NULL, last_seen = 'infinity'")
         .await;
-    let message = get(&**client, &types[0], &stored.name)
+    let message = get(&mut **client, &reg, &types[0].name, &stored.name)
         .await
         .unwrap_err()
         .to_string();

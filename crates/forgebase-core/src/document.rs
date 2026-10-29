@@ -2,8 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::meta::{DocField, DocType, FieldType};
+use crate::meta::{DocField, DocType, FieldType, Registry};
 use crate::value::Value;
+
+/// One row of a child table: field values keyed by field name, like [`Document::values`].
+pub type Row = BTreeMap<String, Value>;
 
 /// A document: an optional name plus field values keyed by field name.
 ///
@@ -12,8 +15,31 @@ use crate::value::Value;
 pub struct Document {
     /// The document name, once assigned.
     pub name: Option<String>,
-    /// Field values.
+    /// Field values. A Table field has no value here; its rows are in [`Document::tables`].
     pub values: BTreeMap<String, Value>,
+    /// The rows of each Table field, keyed by field name. A row's position in the list is its
+    /// order (`idx`, counting from 1); an absent key and an empty list both mean "no rows".
+    pub tables: BTreeMap<String, Vec<Row>>,
+}
+
+/// A partial update: the fields to change.
+///
+/// A field in [`Changes::values`] is set (a [`Value::Null`] clears it). A Table field in
+/// [`Changes::tables`] **replaces all of its rows** with the given ones (an empty list removes
+/// every row); a Table field that is not mentioned keeps its rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Changes {
+    /// New field values.
+    pub values: BTreeMap<String, Value>,
+    /// New rows for Table fields, replacing the existing ones.
+    pub tables: BTreeMap<String, Vec<Row>>,
+}
+
+impl Changes {
+    /// True when nothing is to be changed.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.tables.is_empty()
+    }
 }
 
 /// One problem found while validating a document.
@@ -96,10 +122,20 @@ pub enum ValidationError {
         /// The document name that was not found.
         name: String,
     },
+    /// A row of a Table field has a problem. `row` counts from 1, like the row's position.
+    #[error("field `{field}` row {row}: {error}")]
+    InRow {
+        /// The Table field.
+        field: String,
+        /// The position of the row, starting at 1.
+        row: usize,
+        /// The problem, about a field of the child DocType.
+        error: Box<ValidationError>,
+    },
 }
 
 impl ValidationError {
-    /// The field this problem is about.
+    /// The field this problem is about. For a problem in a row, the Table field.
     pub fn field(&self) -> &str {
         match self {
             ValidationError::UnknownField { field }
@@ -110,7 +146,8 @@ impl ValidationError {
             | ValidationError::ContainsNul { field }
             | ValidationError::DecimalScale { field, .. }
             | ValidationError::DecimalPrecision { field, .. }
-            | ValidationError::LinkNotFound { field, .. } => field,
+            | ValidationError::LinkNotFound { field, .. }
+            | ValidationError::InRow { field, .. } => field,
         }
     }
 }
@@ -124,19 +161,37 @@ impl ValidationError {
 /// an empty or whitespace-only string. Text, Data, Select and Link values must not contain NUL.
 /// Whether a Link target exists is not checked here (no I/O); `forgebase-db` does that.
 ///
-/// `doctype` must be valid ([`DocType::validate`]); a [`Registry`](crate::meta::Registry)
-/// only holds valid DocTypes. The result for an invalid DocType is unspecified (but never a panic).
-pub fn validate(doctype: &DocType, doc: &Document) -> Result<(), Vec<ValidationError>> {
+/// **Tables.** A Table field takes its rows from [`Document::tables`], never from
+/// [`Document::values`] (a value there is a [`ValidationError::TypeMismatch`], and so is a row
+/// list for a field that is not a Table field). A required Table field needs at least one row.
+/// Each row is validated against the child DocType (found in `registry`) like a document:
+/// unknown fields, missing required fields, value kinds and constraints; its problems are
+/// wrapped in [`ValidationError::InRow`] with the row's position. A table whose child DocType
+/// is not in `registry` is not checked (a registry that passed
+/// [`Registry::check_references`] has it).
+///
+/// `doctype` must be valid ([`DocType::validate`]); a [`Registry`] only holds valid DocTypes.
+/// The result for an invalid DocType is unspecified (but never a panic).
+pub fn validate(
+    registry: &Registry,
+    doctype: &DocType,
+    doc: &Document,
+) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
     for field in &doctype.fields {
-        // An explicit null is reported by `check_values`.
-        if field.required && !doc.values.contains_key(&field.name) {
+        let present = match field.field_type {
+            FieldType::Table { .. } => doc.tables.contains_key(&field.name),
+            // An explicit null is reported by `check_values`.
+            _ => doc.values.contains_key(&field.name),
+        };
+        if field.required && !present {
             errors.push(ValidationError::Required {
                 field: field.name.clone(),
             });
         }
     }
     check_values(doctype, &doc.values, &mut errors);
+    check_tables(registry, doctype, &doc.tables, &mut errors);
     finish(errors)
 }
 
@@ -144,16 +199,20 @@ pub fn validate(doctype: &DocType, doc: &Document) -> Result<(), Vec<ValidationE
 ///
 /// Fields that are not in `changes` are left alone, so required fields need not be present,
 /// but a required field may not be set to [`Value::Null`] or, for Text, Data, Select and Link,
-/// to an empty or whitespace-only string (see [`validate`]).
+/// to an empty or whitespace-only string (see [`validate`]). A Table field in
+/// [`Changes::tables`] replaces all its rows: the new rows are validated as in [`validate`]
+/// (a required Table field may not be given an empty list); a Table field that is not mentioned
+/// is not touched.
 ///
-/// `doctype` must be valid ([`DocType::validate`]); a [`Registry`](crate::meta::Registry)
-/// only holds valid DocTypes.
+/// `doctype` must be valid ([`DocType::validate`]); a [`Registry`] only holds valid DocTypes.
 pub fn validate_update(
+    registry: &Registry,
     doctype: &DocType,
-    changes: &BTreeMap<String, Value>,
+    changes: &Changes,
 ) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
-    check_values(doctype, changes, &mut errors);
+    check_values(doctype, &changes.values, &mut errors);
+    check_tables(registry, doctype, &changes.tables, &mut errors);
     finish(errors)
 }
 
@@ -175,7 +234,66 @@ fn check_values(
             None => errors.push(ValidationError::UnknownField {
                 field: name.clone(),
             }),
+            // A Table field has no value; its rows go in `tables`.
+            Some(field) if matches!(field.field_type, FieldType::Table { .. }) => {
+                errors.push(ValidationError::TypeMismatch {
+                    field: name.clone(),
+                    expected: "rows",
+                    found: value.kind(),
+                });
+            }
             Some(field) => check_value(field, value, errors),
+        }
+    }
+}
+
+fn check_tables(
+    registry: &Registry,
+    doctype: &DocType,
+    tables: &BTreeMap<String, Vec<Row>>,
+    errors: &mut Vec<ValidationError>,
+) {
+    for (name, rows) in tables {
+        let field = match doctype.field(name) {
+            None => {
+                errors.push(ValidationError::UnknownField {
+                    field: name.clone(),
+                });
+                continue;
+            }
+            Some(field) => field,
+        };
+        let FieldType::Table { target } = &field.field_type else {
+            errors.push(ValidationError::TypeMismatch {
+                field: name.clone(),
+                expected: expected_kind(&field.field_type),
+                found: "rows",
+            });
+            continue;
+        };
+        if field.required && rows.is_empty() {
+            errors.push(ValidationError::Required {
+                field: name.clone(),
+            });
+        }
+        let Some(child) = registry.get(target) else {
+            continue;
+        };
+        for (i, row) in rows.iter().enumerate() {
+            let mut row_errors = Vec::new();
+            for child_field in &child.fields {
+                if child_field.required && !row.contains_key(&child_field.name) {
+                    row_errors.push(ValidationError::Required {
+                        field: child_field.name.clone(),
+                    });
+                }
+            }
+            check_values(child, row, &mut row_errors);
+            errors.extend(row_errors.into_iter().map(|error| ValidationError::InRow {
+                field: name.clone(),
+                row: i + 1,
+                error: Box::new(error),
+            }));
         }
     }
 }
@@ -274,13 +392,14 @@ fn expected_kind(field_type: &FieldType) -> &'static str {
         FieldType::Check => "bool",
         FieldType::Date => "date",
         FieldType::Datetime => "datetime",
+        FieldType::Table { .. } => "rows",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::Naming;
+    use crate::meta::{Naming, Registry};
     use rust_decimal::Decimal;
     use std::str::FromStr;
     use time::{Date, Month, OffsetDateTime};
@@ -312,6 +431,7 @@ mod tests {
             name: "thing".into(),
             label: "Thing".into(),
             naming: Naming::Random,
+            is_child: false,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, true),
                 f("notes", FieldType::Text, false),
@@ -345,6 +465,13 @@ mod tests {
         }
     }
 
+    fn upd(values: &BTreeMap<String, Value>) -> Changes {
+        Changes {
+            values: values.clone(),
+            tables: BTreeMap::new(),
+        }
+    }
+
     fn doc(pairs: Vec<(&str, Value)>) -> Document {
         let mut d = Document::default();
         d.values.insert("title".into(), text("ok"));
@@ -355,7 +482,7 @@ mod tests {
     }
 
     fn errs(d: &Document) -> Vec<ValidationError> {
-        validate(&doctype(), d).expect_err("expected errors")
+        validate(&Registry::new(), &doctype(), d).expect_err("expected errors")
     }
 
     #[test]
@@ -369,13 +496,13 @@ mod tests {
             ("at", Value::Datetime(OffsetDateTime::UNIX_EPOCH)),
             ("kind", text("b")),
         ]);
-        assert_eq!(validate(&doctype(), &d), Ok(()));
+        assert_eq!(validate(&Registry::new(), &doctype(), &d), Ok(()));
     }
 
     #[test]
     fn optional_fields_may_be_null_or_absent() {
         let d = doc(vec![("count", Value::Null), ("kind", Value::Null)]);
-        assert_eq!(validate(&doctype(), &d), Ok(()));
+        assert_eq!(validate(&Registry::new(), &doctype(), &d), Ok(()));
     }
 
     #[test]
@@ -415,7 +542,7 @@ mod tests {
                 d.values.insert("stage".into(), text("a"));
                 d.values.insert(field.into(), text(blank));
                 assert_eq!(
-                    validate(&dt, &d),
+                    validate(&Registry::new(), &dt, &d),
                     Err(vec![ValidationError::Required {
                         field: field.into()
                     }]),
@@ -423,7 +550,7 @@ mod tests {
                 );
                 let changes = BTreeMap::from([(field.to_string(), text(blank))]);
                 assert_eq!(
-                    validate_update(&dt, &changes),
+                    validate_update(&Registry::new(), &dt, &upd(&changes)),
                     Err(vec![ValidationError::Required {
                         field: field.into()
                     }]),
@@ -437,7 +564,7 @@ mod tests {
             ("stage", text("a")),
             ("notes", text("  ")),
         ]);
-        assert_eq!(validate(&dt, &d), Ok(()));
+        assert_eq!(validate(&Registry::new(), &dt, &d), Ok(()));
     }
 
     #[test]
@@ -454,7 +581,7 @@ mod tests {
         }
         let changes = BTreeMap::from([("notes".to_string(), text("a\0b"))]);
         assert_eq!(
-            validate_update(&doctype(), &changes),
+            validate_update(&Registry::new(), &doctype(), &upd(&changes)),
             Err(vec![ValidationError::ContainsNul {
                 field: "notes".into()
             }])
@@ -474,7 +601,7 @@ mod tests {
         )];
         let changes = BTreeMap::from([("amount".to_string(), dec("0.001"))]);
         // The result is unspecified for an invalid DocType; it must only not panic.
-        let _ = validate_update(&dt, &changes);
+        let _ = validate_update(&Registry::new(), &dt, &upd(&changes));
     }
 
     #[test]
@@ -482,6 +609,7 @@ mod tests {
         // The target name is any non-blank text; existence is checked by forgebase-db.
         assert_eq!(
             validate(
+                &Registry::new(),
                 &doctype(),
                 &doc(vec![("owner_ref", text("ann@example.com"))])
             ),
@@ -512,18 +640,21 @@ mod tests {
         for blank in ["", "  \t"] {
             let mut d = doc(vec![("must_link", text(blank))]);
             assert_eq!(
-                validate(&dt, &d),
+                validate(&Registry::new(), &dt, &d),
                 Err(vec![ValidationError::Required {
                     field: "must_link".into()
                 }]),
                 "{blank:?}"
             );
             d.values.insert("must_link".into(), Value::Null);
-            assert_eq!(validate(&dt, &d).unwrap_err().len(), 1);
+            assert_eq!(validate(&Registry::new(), &dt, &d).unwrap_err().len(), 1);
         }
         // Optional links may be cleared.
         let changes = BTreeMap::from([("owner_ref".to_string(), Value::Null)]);
-        assert_eq!(validate_update(&doctype(), &changes), Ok(()));
+        assert_eq!(
+            validate_update(&Registry::new(), &doctype(), &upd(&changes)),
+            Ok(())
+        );
         assert_eq!(
             ValidationError::LinkNotFound {
                 field: "owner_ref".into(),
@@ -582,10 +713,10 @@ mod tests {
     #[test]
     fn data_max_length_counts_characters() {
         let ok = doc(vec![("title", text("12345"))]);
-        assert_eq!(validate(&doctype(), &ok), Ok(()));
+        assert_eq!(validate(&Registry::new(), &doctype(), &ok), Ok(()));
         // Five multi-byte characters are 10 bytes but still within the limit.
         let multibyte = doc(vec![("title", text("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"))]);
-        assert_eq!(validate(&doctype(), &multibyte), Ok(()));
+        assert_eq!(validate(&Registry::new(), &doctype(), &multibyte), Ok(()));
         let long = doc(vec![("title", text("123456"))]);
         assert_eq!(
             errs(&long),
@@ -600,7 +731,11 @@ mod tests {
     #[test]
     fn select_membership() {
         assert_eq!(
-            validate(&doctype(), &doc(vec![("kind", text("a"))])),
+            validate(
+                &Registry::new(),
+                &doctype(),
+                &doc(vec![("kind", text("a"))])
+            ),
             Ok(())
         );
         assert_eq!(
@@ -621,7 +756,11 @@ mod tests {
             "0", "0.5", "-0.01", "999.99", "-999.99", "1.5", "1.500", "100", "0.00", "12.30000",
         ] {
             assert_eq!(
-                validate(&doctype(), &doc(vec![("amount", dec(ok))])),
+                validate(
+                    &Registry::new(),
+                    &doctype(),
+                    &doc(vec![("amount", dec(ok))])
+                ),
                 Ok(()),
                 "{ok}"
             );
@@ -664,11 +803,11 @@ mod tests {
         ));
         for ok in ["0", "0.999", "-0.5"] {
             let doc = doc(vec![("ratio", dec(ok))]);
-            assert_eq!(validate(&d, &doc), Ok(()), "{ok}");
+            assert_eq!(validate(&Registry::new(), &d, &doc), Ok(()), "{ok}");
         }
         let doc = doc(vec![("ratio", dec("1"))]);
         assert_eq!(
-            validate(&d, &doc),
+            validate(&Registry::new(), &d, &doc),
             Err(vec![ValidationError::DecimalPrecision {
                 field: "ratio".into(),
                 digits: 1,
@@ -685,18 +824,282 @@ mod tests {
         assert_eq!(errs(&d).len(), 3);
     }
 
+    // ---- child tables ----
+
+    fn order_registry() -> (Registry, DocType) {
+        let mut registry = Registry::new();
+        let order = DocType {
+            name: "order".into(),
+            label: "Order".into(),
+            naming: Naming::Random,
+            is_child: false,
+            fields: vec![
+                f("title", FieldType::Data { max_length: 5 }, false),
+                f(
+                    "items",
+                    FieldType::Table {
+                        target: "item".into(),
+                    },
+                    false,
+                ),
+            ],
+        };
+        let item = DocType {
+            name: "item".into(),
+            label: "Item".into(),
+            naming: Naming::Random,
+            is_child: true,
+            fields: vec![
+                f("qty", FieldType::Int, true),
+                f("note", FieldType::Data { max_length: 3 }, false),
+                f(
+                    "customer",
+                    FieldType::Link {
+                        target: "person".into(),
+                    },
+                    false,
+                ),
+            ],
+        };
+        registry.add(item).unwrap();
+        registry.add(order.clone()).unwrap();
+        (registry, order)
+    }
+
+    fn row(pairs: Vec<(&str, Value)>) -> Row {
+        pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
+    }
+
+    fn with_rows(rows: Vec<Row>) -> Document {
+        let mut d = Document::default();
+        d.tables.insert("items".into(), rows);
+        d
+    }
+
+    fn in_row(row: usize, error: ValidationError) -> ValidationError {
+        ValidationError::InRow {
+            field: "items".into(),
+            row,
+            error: Box::new(error),
+        }
+    }
+
+    #[test]
+    fn valid_rows_pass_and_none_or_empty_is_fine() {
+        let (registry, order) = order_registry();
+        let d = with_rows(vec![
+            row(vec![("qty", Value::Int(1)), ("customer", text("ann"))]),
+            row(vec![("qty", Value::Int(2)), ("note", Value::Null)]),
+        ]);
+        assert_eq!(validate(&registry, &order, &d), Ok(()));
+        assert_eq!(validate(&registry, &order, &Document::default()), Ok(()));
+        assert_eq!(validate(&registry, &order, &with_rows(vec![])), Ok(()));
+    }
+
+    #[test]
+    fn row_errors_carry_the_row_position_and_are_all_collected() {
+        let (registry, order) = order_registry();
+        let d = with_rows(vec![
+            row(vec![("qty", Value::Int(1))]),
+            row(vec![]),
+            row(vec![
+                ("qty", text("x")),
+                ("note", text("toolong")),
+                ("nope", Value::Int(1)),
+            ]),
+        ]);
+        let errors = validate(&registry, &order, &d).unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                in_row(
+                    2,
+                    ValidationError::Required {
+                        field: "qty".into()
+                    }
+                ),
+                in_row(
+                    3,
+                    ValidationError::UnknownField {
+                        field: "nope".into()
+                    }
+                ),
+                in_row(
+                    3,
+                    ValidationError::TooLong {
+                        field: "note".into(),
+                        len: 7,
+                        max: 3
+                    }
+                ),
+                in_row(
+                    3,
+                    ValidationError::TypeMismatch {
+                        field: "qty".into(),
+                        expected: "int",
+                        found: "text"
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            errors[0].to_string(),
+            "field `items` row 2: field `qty` is required"
+        );
+        assert_eq!(errors[0].field(), "items");
+        // A row with a blank required value or NUL.
+        let d = with_rows(vec![row(vec![("qty", Value::Null)])]);
+        assert_eq!(
+            validate(&registry, &order, &d),
+            Err(vec![in_row(
+                1,
+                ValidationError::Required {
+                    field: "qty".into()
+                }
+            )])
+        );
+    }
+
+    #[test]
+    fn a_required_table_needs_at_least_one_row() {
+        let (registry, mut order) = order_registry();
+        order.fields[1].required = true;
+        let required = ValidationError::Required {
+            field: "items".into(),
+        };
+        assert_eq!(
+            validate(&registry, &order, &Document::default()),
+            Err(vec![required.clone()])
+        );
+        assert_eq!(
+            validate(&registry, &order, &with_rows(vec![])),
+            Err(vec![required.clone()])
+        );
+        assert_eq!(
+            validate(
+                &registry,
+                &order,
+                &with_rows(vec![row(vec![("qty", Value::Int(1))])])
+            ),
+            Ok(())
+        );
+        // In an update an empty list would remove every row.
+        let mut changes = Changes::default();
+        changes.tables.insert("items".into(), vec![]);
+        assert_eq!(
+            validate_update(&registry, &order, &changes),
+            Err(vec![required])
+        );
+    }
+
+    #[test]
+    fn unknown_table_and_table_misuse() {
+        let (registry, order) = order_registry();
+        let mut d = Document::default();
+        d.tables.insert("ghosts".into(), vec![]);
+        assert_eq!(
+            validate(&registry, &order, &d),
+            Err(vec![ValidationError::UnknownField {
+                field: "ghosts".into()
+            }])
+        );
+        // Rows given for a field that is not a Table field.
+        let mut d = Document::default();
+        d.tables.insert("title".into(), vec![row(vec![])]);
+        assert_eq!(
+            validate(&registry, &order, &d),
+            Err(vec![ValidationError::TypeMismatch {
+                field: "title".into(),
+                expected: "text",
+                found: "rows"
+            }])
+        );
+        // A value given for a Table field (even null).
+        for value in [Value::Int(1), Value::Null, text("x")] {
+            let mut d = Document::default();
+            let found = value.kind();
+            d.values.insert("items".into(), value);
+            assert_eq!(
+                validate(&registry, &order, &d),
+                Err(vec![ValidationError::TypeMismatch {
+                    field: "items".into(),
+                    expected: "rows",
+                    found
+                }])
+            );
+        }
+        // A Table field name inside a row is not a child field.
+        let d = with_rows(vec![row(vec![
+            ("qty", Value::Int(1)),
+            ("items", Value::Int(1)),
+        ])]);
+        assert_eq!(
+            validate(&registry, &order, &d),
+            Err(vec![in_row(
+                1,
+                ValidationError::UnknownField {
+                    field: "items".into()
+                }
+            )])
+        );
+    }
+
+    #[test]
+    fn update_validates_replacement_rows_and_ignores_untouched_tables() {
+        let (registry, mut order) = order_registry();
+        order.fields[1].required = true;
+        // Not mentioning the table is fine even though it is required.
+        let mut changes = Changes::default();
+        changes.values.insert("title".into(), text("t"));
+        assert_eq!(validate_update(&registry, &order, &changes), Ok(()));
+        changes.tables.insert(
+            "items".into(),
+            vec![
+                row(vec![("qty", Value::Int(1))]),
+                row(vec![("note", text("x"))]),
+            ],
+        );
+        assert_eq!(
+            validate_update(&registry, &order, &changes),
+            Err(vec![in_row(
+                2,
+                ValidationError::Required {
+                    field: "qty".into()
+                }
+            )])
+        );
+        assert!(!changes.is_empty());
+        assert!(Changes::default().is_empty());
+    }
+
+    #[test]
+    fn a_table_whose_child_is_missing_does_not_panic() {
+        let (_, order) = order_registry();
+        let d = with_rows(vec![row(vec![])]);
+        assert_eq!(validate(&Registry::new(), &order, &d), Ok(()));
+    }
+
     #[test]
     fn partial_update() {
         let dt = doctype();
         let mut changes = BTreeMap::new();
         // Required `title` need not be present.
         changes.insert("count".to_owned(), Value::Int(3));
-        assert_eq!(validate_update(&dt, &changes), Ok(()));
+        assert_eq!(
+            validate_update(&Registry::new(), &dt, &upd(&changes)),
+            Ok(())
+        );
         // Optional fields may be cleared.
         changes.insert("kind".to_owned(), Value::Null);
-        assert_eq!(validate_update(&dt, &changes), Ok(()));
+        assert_eq!(
+            validate_update(&Registry::new(), &dt, &upd(&changes)),
+            Ok(())
+        );
         // Empty update is fine.
-        assert_eq!(validate_update(&dt, &BTreeMap::new()), Ok(()));
+        assert_eq!(
+            validate_update(&Registry::new(), &dt, &Changes::default()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -707,7 +1110,7 @@ mod tests {
         changes.insert("kind".to_owned(), text("z"));
         changes.insert("nope".to_owned(), Value::Int(1));
         assert_eq!(
-            validate_update(&dt, &changes),
+            validate_update(&Registry::new(), &dt, &upd(&changes)),
             Err(vec![
                 ValidationError::InvalidOption {
                     field: "kind".into(),

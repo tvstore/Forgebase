@@ -13,6 +13,10 @@ pub const MAX_DATA_LENGTH: u32 = 65_535;
 pub const MAX_DECIMAL_PRECISION: u8 = 28;
 
 /// A document type: a named list of fields stored in one table.
+///
+/// A child DocType (`is_child`) has no documents of its own: its rows are stored in a table of
+/// their own but always belong to a parent document, through a [`FieldType::Table`] field of
+/// exactly one other DocType.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocType {
     /// Identifier, see [`ident::validate_doctype_name`].
@@ -23,6 +27,9 @@ pub struct DocType {
     pub naming: Naming,
     /// The fields, in declaration order.
     pub fields: Vec<DocField>,
+    /// A child DocType: rows of a parent's table field, no documents or names of its own.
+    /// A child has random naming, no Table fields (no nesting) and no `unique` fields.
+    pub is_child: bool,
 }
 
 /// One field of a [`DocType`].
@@ -41,7 +48,7 @@ pub struct DocField {
     pub unique: bool,
 }
 
-/// The closed set of field types. Link arrived in M2.1; Table arrives in M2.2.
+/// The closed set of field types. Link arrived in M2.1, Table in M2.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldType {
     /// Short text with a maximum length in characters (`1..=65535`).
@@ -80,6 +87,16 @@ pub enum FieldType {
         /// DocType, see [`Registry::check_references`].
         target: String,
     },
+    /// An ordered list of rows of a child DocType. There is no [`Value`](crate::value::Value)
+    /// for it and no column in the parent's table: the rows live in
+    /// [`Document::tables`](crate::document::Document::tables). `required` means at least one
+    /// row; `unique` is not allowed.
+    Table {
+        /// Name of the child DocType. It must exist in the [`Registry`] that holds this DocType
+        /// and be a child DocType used by no other Table field, see
+        /// [`Registry::check_references`].
+        target: String,
+    },
 }
 
 impl FieldType {
@@ -95,6 +112,7 @@ impl FieldType {
             FieldType::Datetime => "datetime",
             FieldType::Select { .. } => "select",
             FieldType::Link { .. } => "link",
+            FieldType::Table { .. } => "table",
         }
     }
 }
@@ -154,7 +172,7 @@ pub enum DefinitionError {
     },
     /// The `type` value is not one of the supported field types.
     #[error(
-        "field `{field}`: unknown type `{found}` (expected one of data, text, int, decimal, check, date, datetime, select, link)"
+        "field `{field}`: unknown type `{found}` (expected one of data, text, int, decimal, check, date, datetime, select, link, table)"
     )]
     UnknownFieldType {
         /// The field.
@@ -279,6 +297,37 @@ pub enum DefinitionError {
         /// Why it was rejected.
         reason: IdentError,
     },
+    /// A Table field's `target` is not a valid DocType name.
+    #[error("field `{field}`: table target `{target}` {reason}")]
+    InvalidTableTarget {
+        /// The field.
+        field: String,
+        /// The rejected target.
+        target: String,
+        /// Why it was rejected.
+        reason: IdentError,
+    },
+    /// A Table field is `unique`; uniqueness of a list of rows is not meaningful.
+    #[error("field `{field}`: a table field cannot be unique")]
+    UniqueTable {
+        /// The field.
+        field: String,
+    },
+    /// A child DocType has a `naming` rule; its rows have no names.
+    #[error("a child doctype has no naming rule (its rows have no names)")]
+    ChildWithNaming,
+    /// A child DocType has a Table field; child tables cannot be nested.
+    #[error("field `{field}`: a child doctype cannot have table fields (no nesting)")]
+    ChildWithTable {
+        /// The field.
+        field: String,
+    },
+    /// A child DocType has a `unique` field; uniqueness across all parents is not supported.
+    #[error("field `{field}`: a child doctype cannot have unique fields")]
+    ChildWithUnique {
+        /// The field.
+        field: String,
+    },
     /// A registry already holds a DocType with this name.
     #[error("doctype `{name}` is already registered")]
     DuplicateDocType {
@@ -295,6 +344,58 @@ pub enum DefinitionError {
         field: String,
         /// The missing target DocType.
         target: String,
+    },
+    /// A Table field refers to a DocType that is not in the registry
+    /// ([`Registry::check_references`]).
+    #[error("doctype `{doctype}`: field `{field}` is a table of unknown doctype `{target}`")]
+    UnknownTableTarget {
+        /// The DocType that has the Table field.
+        doctype: String,
+        /// The field.
+        field: String,
+        /// The missing target DocType.
+        target: String,
+    },
+    /// A Table field refers to a DocType that is not a child DocType
+    /// ([`Registry::check_references`]).
+    #[error(
+        "doctype `{doctype}`: field `{field}` is a table of `{target}`, which is not a child doctype (`is_child = true`)"
+    )]
+    TableTargetNotChild {
+        /// The DocType that has the Table field.
+        doctype: String,
+        /// The field.
+        field: String,
+        /// The target DocType.
+        target: String,
+    },
+    /// A Link field refers to a child DocType; child rows cannot be linked to
+    /// ([`Registry::check_references`]).
+    #[error(
+        "doctype `{doctype}`: field `{field}` links to child doctype `{target}`, which cannot be linked to"
+    )]
+    LinkToChild {
+        /// The DocType that has the Link field.
+        doctype: String,
+        /// The field.
+        field: String,
+        /// The child DocType.
+        target: String,
+    },
+    /// A child DocType is the target of no Table field ([`Registry::check_references`]).
+    #[error("child doctype `{doctype}` is not used by any table field")]
+    UnusedChild {
+        /// The child DocType.
+        doctype: String,
+    },
+    /// A child DocType is the target of several Table fields; it belongs to exactly one parent
+    /// ([`Registry::check_references`]).
+    #[error("child doctype `{child}` is used by more than one table field: {}", .uses.join(", "))]
+    ChildSharedByTables {
+        /// The child DocType.
+        child: String,
+        /// The Table fields, as `doctype.field`.
+        uses: Vec<String>,
     },
 }
 
@@ -331,6 +432,21 @@ impl DocType {
     /// Looks up a field by name.
     pub fn field(&self, name: &str) -> Option<&DocField> {
         self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// The fields that have a column in the DocType's table: every field except Table fields.
+    pub fn column_fields(&self) -> impl Iterator<Item = &DocField> {
+        self.fields
+            .iter()
+            .filter(|f| !matches!(f.field_type, FieldType::Table { .. }))
+    }
+
+    /// The Table fields with the name of their child DocType, in declaration order.
+    pub fn table_fields(&self) -> impl Iterator<Item = (&DocField, &str)> {
+        self.fields.iter().filter_map(|f| match &f.field_type {
+            FieldType::Table { target } => Some((f, target.as_str())),
+            _ => None,
+        })
     }
 
     /// Checks every definition rule and returns all problems found.
@@ -383,7 +499,24 @@ impl DocType {
                 });
             }
         }
-        if let Naming::Field(name) = &self.naming
+        if self.is_child {
+            if self.naming != Naming::Random {
+                errors.push(DefinitionError::ChildWithNaming);
+            }
+            for field in &self.fields {
+                if matches!(field.field_type, FieldType::Table { .. }) {
+                    errors.push(DefinitionError::ChildWithTable {
+                        field: field.name.clone(),
+                    });
+                }
+                // A unique Table field is reported by the field check.
+                if field.unique && !matches!(field.field_type, FieldType::Table { .. }) {
+                    errors.push(DefinitionError::ChildWithUnique {
+                        field: field.name.clone(),
+                    });
+                }
+            }
+        } else if let Naming::Field(name) = &self.naming
             && !failed.contains(name)
         {
             self.check_naming_field(name, &mut errors);
@@ -480,6 +613,18 @@ impl DocField {
                     });
                 }
             }
+            FieldType::Table { target } => {
+                if let Err(reason) = ident::validate_doctype_name(target) {
+                    errors.push(DefinitionError::InvalidTableTarget {
+                        field: field(),
+                        target: target.clone(),
+                        reason,
+                    });
+                }
+                if self.unique {
+                    errors.push(DefinitionError::UniqueTable { field: field() });
+                }
+            }
             FieldType::Text
             | FieldType::Int
             | FieldType::Check
@@ -505,9 +650,9 @@ impl Registry {
     /// ([`DocType::validate`]), or with [`DefinitionError::DuplicateDocType`] if one with the
     /// same name is already present. The registry therefore only holds valid DocTypes.
     ///
-    /// Only the DocType itself is checked: a Link field may name a DocType that is added later
-    /// (definition files are loaded in any order). **Call [`Registry::check_references`] after
-    /// the last DocType has been added.**
+    /// Only the DocType itself is checked: a Link or Table field may name a DocType that is
+    /// added later (definition files are loaded in any order). **Call
+    /// [`Registry::check_references`] after the last DocType has been added.**
     pub fn add(&mut self, doctype: DocType) -> Result<(), Vec<DefinitionError>> {
         doctype.validate()?;
         if self.doctypes.contains_key(&doctype.name) {
@@ -519,24 +664,71 @@ impl Registry {
         Ok(())
     }
 
-    /// Checks that every Link field refers to a DocType in this registry (a DocType may link to
-    /// itself). Returns every unknown target.
+    /// Checks that the DocTypes of this registry fit together. Returns every problem found:
+    ///
+    /// - a Link field refers to a DocType that is in the registry (a DocType may link to itself)
+    ///   and is not a child DocType;
+    /// - a Table field refers to a DocType that is in the registry and is a child DocType;
+    /// - every child DocType is the target of exactly one Table field (it belongs to exactly
+    ///   one parent).
     ///
     /// [`Registry::add`] cannot do this because DocTypes arrive one at a time. Call it once
     /// after all DocTypes are loaded; `forgebase-db`'s `sync` and the CLI loader do.
     pub fn check_references(&self) -> Result<(), Vec<DefinitionError>> {
         let mut errors = Vec::new();
+        // child DocType -> the `doctype.field` of every Table field that targets it
+        let mut used_by: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for doctype in self.doctypes.values() {
             for field in &doctype.fields {
-                if let FieldType::Link { target } = &field.field_type
-                    && !self.doctypes.contains_key(target)
-                {
-                    errors.push(DefinitionError::UnknownLinkTarget {
-                        doctype: doctype.name.clone(),
-                        field: field.name.clone(),
-                        target: target.clone(),
+                let (doctype_name, field_name) = (doctype.name.clone(), field.name.clone());
+                match &field.field_type {
+                    FieldType::Link { target } => match self.doctypes.get(target) {
+                        None => errors.push(DefinitionError::UnknownLinkTarget {
+                            doctype: doctype_name,
+                            field: field_name,
+                            target: target.clone(),
+                        }),
+                        Some(t) if t.is_child => errors.push(DefinitionError::LinkToChild {
+                            doctype: doctype_name,
+                            field: field_name,
+                            target: target.clone(),
+                        }),
+                        Some(_) => {}
+                    },
+                    FieldType::Table { target } => match self.doctypes.get(target) {
+                        None => errors.push(DefinitionError::UnknownTableTarget {
+                            doctype: doctype_name,
+                            field: field_name,
+                            target: target.clone(),
+                        }),
+                        Some(t) if !t.is_child => {
+                            errors.push(DefinitionError::TableTargetNotChild {
+                                doctype: doctype_name,
+                                field: field_name,
+                                target: target.clone(),
+                            });
+                        }
+                        Some(_) => used_by
+                            .entry(target.as_str())
+                            .or_default()
+                            .push(format!("{doctype_name}.{field_name}")),
+                    },
+                    _ => {}
+                }
+            }
+        }
+        for child in self.doctypes.values().filter(|d| d.is_child) {
+            match used_by.remove(child.name.as_str()) {
+                None => errors.push(DefinitionError::UnusedChild {
+                    doctype: child.name.clone(),
+                }),
+                Some(uses) if uses.len() > 1 => {
+                    errors.push(DefinitionError::ChildSharedByTables {
+                        child: child.name.clone(),
+                        uses,
                     });
                 }
+                Some(_) => {}
             }
         }
         if errors.is_empty() {
@@ -544,6 +736,18 @@ impl Registry {
         } else {
             Err(errors)
         }
+    }
+
+    /// The DocType and Table field that own the rows of child DocType `child`, if a Table field
+    /// targets it. After [`Registry::check_references`] succeeded that is exactly one for every
+    /// child DocType.
+    pub fn parent_of(&self, child: &str) -> Option<(&DocType, &DocField)> {
+        self.doctypes.values().find_map(|doctype| {
+            doctype
+                .table_fields()
+                .find(|(_, target)| *target == child)
+                .map(|(field, _)| (doctype, field))
+        })
     }
 
     /// Looks up a DocType by name.
@@ -593,6 +797,7 @@ mod tests {
             label: "Thing".into(),
             naming: Naming::Random,
             fields,
+            is_child: false,
         }
     }
 
@@ -950,6 +1155,192 @@ mod tests {
         tree.name = "tree".into();
         registry.add(tree).unwrap();
         assert_eq!(registry.check_references(), Ok(()));
+    }
+
+    fn table(name: &str, target: &str) -> DocField {
+        field(
+            name,
+            FieldType::Table {
+                target: target.into(),
+            },
+        )
+    }
+
+    fn named(name: &str, is_child: bool, fields: Vec<DocField>) -> DocType {
+        DocType {
+            name: name.into(),
+            is_child,
+            ..doctype(fields)
+        }
+    }
+
+    #[test]
+    fn table_target_must_be_a_valid_doctype_name_and_not_unique() {
+        assert_eq!(doctype(vec![table("rows", "row")]).validate(), Ok(()));
+        let errors = errors_of(&doctype(vec![table("rows", "Bad Name")]));
+        assert!(
+            matches!(errors.as_slice(), [DefinitionError::InvalidTableTarget { target, .. }] if target == "Bad Name"),
+            "{errors:?}"
+        );
+        let mut unique = table("rows", "row");
+        unique.unique = true;
+        assert_eq!(
+            errors_of(&doctype(vec![unique])),
+            vec![DefinitionError::UniqueTable {
+                field: "rows".into()
+            }]
+        );
+        // `required` is allowed: at least one row.
+        let mut required = table("rows", "row");
+        required.required = true;
+        assert_eq!(doctype(vec![required]).validate(), Ok(()));
+        assert_eq!(FieldType::Table { target: "r".into() }.name(), "table");
+    }
+
+    #[test]
+    fn child_doctype_rules() {
+        let child = |fields| named("row", true, fields);
+        assert_eq!(
+            child(vec![field("qty", FieldType::Int), link("c", "x")]).validate(),
+            Ok(())
+        );
+        assert_eq!(
+            errors_of(&child(vec![table("more", "other")])),
+            vec![DefinitionError::ChildWithTable {
+                field: "more".into()
+            }]
+        );
+        let mut unique = field("code", FieldType::Int);
+        unique.unique = true;
+        assert_eq!(
+            errors_of(&child(vec![unique])),
+            vec![DefinitionError::ChildWithUnique {
+                field: "code".into()
+            }]
+        );
+        let mut with_naming = child(vec![]);
+        with_naming.naming = Naming::Field("code".into());
+        assert_eq!(
+            errors_of(&with_naming),
+            vec![DefinitionError::ChildWithNaming]
+        );
+        // The same fields are fine in a non-child DocType (apart from the table target rules).
+        let mut unique = field("code", FieldType::Int);
+        unique.unique = true;
+        assert_eq!(doctype(vec![unique]).validate(), Ok(()));
+    }
+
+    fn registry_of(doctypes: Vec<DocType>) -> Registry {
+        let mut registry = Registry::new();
+        for doctype in doctypes {
+            registry.add(doctype).unwrap();
+        }
+        registry
+    }
+
+    #[test]
+    fn check_references_for_child_tables() {
+        let good = registry_of(vec![
+            named("order", false, vec![table("items", "item")]),
+            named("item", true, vec![field("qty", FieldType::Int)]),
+        ]);
+        assert_eq!(good.check_references(), Ok(()));
+        let (parent, field) = good.parent_of("item").unwrap();
+        assert_eq!(
+            (parent.name.as_str(), field.name.as_str()),
+            ("order", "items")
+        );
+        assert!(good.parent_of("order").is_none());
+
+        // Unknown target, target that is not a child.
+        let bad = registry_of(vec![
+            named(
+                "order",
+                false,
+                vec![table("a", "nope"), table("b", "plain")],
+            ),
+            named("plain", false, vec![]),
+        ]);
+        assert_eq!(
+            bad.check_references(),
+            Err(vec![
+                DefinitionError::UnknownTableTarget {
+                    doctype: "order".into(),
+                    field: "a".into(),
+                    target: "nope".into()
+                },
+                DefinitionError::TableTargetNotChild {
+                    doctype: "order".into(),
+                    field: "b".into(),
+                    target: "plain".into()
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_child_belongs_to_exactly_one_table_field() {
+        let shared = registry_of(vec![
+            named("a", false, vec![table("rows", "row"), table("more", "row")]),
+            named("b", false, vec![table("rows", "row")]),
+            named("row", true, vec![]),
+        ]);
+        assert_eq!(
+            shared.check_references(),
+            Err(vec![DefinitionError::ChildSharedByTables {
+                child: "row".into(),
+                uses: vec!["a.rows".into(), "a.more".into(), "b.rows".into()],
+            }])
+        );
+        let message = shared.check_references().unwrap_err()[0].to_string();
+        assert_eq!(
+            message,
+            "child doctype `row` is used by more than one table field: a.rows, a.more, b.rows"
+        );
+
+        let unused = registry_of(vec![named("row", true, vec![])]);
+        assert_eq!(
+            unused.check_references(),
+            Err(vec![DefinitionError::UnusedChild {
+                doctype: "row".into()
+            }])
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_child_is_refused() {
+        let registry = registry_of(vec![
+            named(
+                "order",
+                false,
+                vec![table("items", "item"), link("fav", "item")],
+            ),
+            named("item", true, vec![]),
+        ]);
+        assert_eq!(
+            registry.check_references(),
+            Err(vec![DefinitionError::LinkToChild {
+                doctype: "order".into(),
+                field: "fav".into(),
+                target: "item".into()
+            }])
+        );
+    }
+
+    #[test]
+    fn column_and_table_fields() {
+        let d = doctype(vec![
+            field("a", FieldType::Int),
+            table("rows", "row"),
+            field("b", FieldType::Text),
+        ]);
+        let columns: Vec<&str> = d.column_fields().map(|f| f.name.as_str()).collect();
+        assert_eq!(columns, ["a", "b"]);
+        let tables: Vec<(&str, &str)> = d
+            .table_fields()
+            .map(|(f, t)| (f.name.as_str(), t))
+            .collect();
+        assert_eq!(tables, [("rows", "row")]);
     }
 
     #[test]
