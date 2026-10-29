@@ -12,7 +12,7 @@ use forgebase_db::{connect, quote_ident};
 use serde_json::Value as Json;
 
 const ENV_VAR: &str = "FORGEBASE_TEST_DATABASE_URL";
-const DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/doctypes");
+const DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/quickstart");
 
 /// Removes `customer` and the example DocTypes that depend on it, as if they had never been synced.
 const DROP_CUSTOMER: &str = "DROP TABLE doc_sales_order_item, doc_sales_order, doc_customer; \
