@@ -42,6 +42,7 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 
 ## M3 Auth, permissions, REST API
 
+- **Status:** In progress (the owner approved the M3 plan on 2026-10-29). Delivered as three PRs: **M3.1** users, roles, sessions, API tokens and login lockout (`forgebase_db::auth`, migration 0003, `forgebase user` and `forgebase token`; [ADR 0010](../adr/0010-authentication-and-sessions.md); this PR), **M3.2** role permissions and permission-filtered queries, **M3.3** the HTTP layer (`/api/v1/resource`, cookies, CSRF, login endpoints).
 - **Scope:** users and roles; sessions; API tokens; role permissions; permission-filtered queries; `/api/v1/resource`. See [security-model](security-model.md).
 - **Exit criteria:** authorization test matrix including negative tests.
 - **Non-goals:** OAuth/SSO, 2FA, field-level permissions, user permissions, sharing, GraphQL.

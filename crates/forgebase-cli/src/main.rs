@@ -1,9 +1,10 @@
 //! The `forgebase` command-line binary.
 //!
-//! Commands: `migrate` (framework migrations and DocType schema sync) and `doc`
+//! Commands: `migrate` (framework migrations and DocType schema sync), `doc`
 //! (`insert`, `get`, `update`, `delete` of single documents; `update` and `delete` need
-//! `--version`). The binary is a trusted local tool: it has no authentication or permissions,
-//! and `--actor` is only recorded (in `owner` / `modified_by` on insert and update). See
+//! `--version`), `user` (`create`, `set-password`, `add-role`, `remove-role`, `disable`,
+//! `enable`; passwords come from standard input) and `token` (`create`, `revoke`). The binary is a trusted local tool: it has no authentication or
+//! permissions, and `--actor` is only recorded (in `owner` / `modified_by` on insert and update). See
 //! `docs/blueprint/architecture.md` and ADR 0002.
 //!
 //! Exit codes: 0 success; 1 runtime, validation or database error (message on standard error,

@@ -90,7 +90,9 @@ mod tests {
         };
         let text = migrate_report(&report, false);
         assert!(
-            text.starts_with("framework migrations: 2 applied\n  0001 init\n  0002 series\n"),
+            text.starts_with(
+                "framework migrations: 3 applied\n  0001 init\n  0002 series\n  0003 auth\n"
+            ),
             "{text}"
         );
         assert!(
@@ -108,7 +110,7 @@ mod tests {
             sync: None,
         };
         let text = migrate_report(&report, true);
-        assert!(text.contains("2 pending"), "{text}");
+        assert!(text.contains("3 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 
