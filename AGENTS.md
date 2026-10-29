@@ -73,7 +73,7 @@ Keep Plan, Doing and Review separate. Do not rely on the implementing agent to d
 ## 5. Git and repository safety
 
 - Do not change `main` directly without permission.
-- Do not merge a PR or publish a release without explicit approval.
+- Do not merge a PR or publish a release without explicit approval. The standing merge authorization in [section 10](#10-operating-model) is such an approval, limited to its conditions.
 - Do not delete data, files or configuration without a reason and permission.
 - Do not force push or perform other destructive operations without approval.
 - Do not silently change files outside the approved scope.
@@ -84,7 +84,7 @@ Keep Plan, Doing and Review separate. Do not rely on the implementing agent to d
 
 | Path | Purpose |
 |---|---|
-| [AGENTS.md](AGENTS.md) | Permanent project instructions and agent workflow (this file) |
+| [AGENTS.md](AGENTS.md) | Permanent project instructions, agent workflow and operating model (this file) |
 | [README.md](README.md) | Purpose, status, how to get started |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, run local checks and contribute |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes, Keep a Changelog format |
@@ -225,3 +225,32 @@ For the first Forgebase session:
 The highest priority remains: minimize long-term maintenance costs through simple architecture, clear boundaries, good tests, careful dependency selection, and documented decisions.
 
 See also [ADR 0008](docs/adr/0008-model-selection-policy.md) (records the adoption of this policy; this section is the normative text).
+
+## 10. Operating model
+
+Owner decision of 2026-10-28, confirmed by the owner on 2026-10-29. It changes who carries out the workflow, not the workflow itself: sections 3 to 9 still apply.
+
+### 10.1 Sessions
+
+- **Information session.** The original planning session holds approved plans and confirmed results. New plans, requirement changes and owner decisions are made there.
+- **Working session.** A separate session executes approved plans: implementation, review, pull requests, CI fixes and merging, with automatic permissions. After each merge, each deviation from the plan and each blocker it sends the information session a short report: what was done, the evidence (tests, CI, review status, PR link) and any deviation with its reason.
+
+### 10.2 Roles in the working session
+
+- The orchestrator (Opus) writes specifications and coordinates.
+- Stage 2 Doing is a Sonnet subagent.
+- Stage 3 Review is a new Opus subagent for each review round. It did not write the change and receives the specification and the diff, not the implementer's summary. Findings go back to Stage 2 and the review repeats until PASS. A minor documentation-only fix may be applied directly by the orchestrator and is disclosed.
+
+### 10.3 Standing merge authorization
+
+The working session may merge a pull request into `main` without asking again, using a merge commit, only when all of these hold:
+
+1. the work is part of a plan the owner approved;
+2. CI is green on the pull request head;
+3. an independent review (section 10.2) reports PASS.
+
+Red or unreviewed work is never merged. Force pushes to `main` are never allowed. Publishing a release still needs explicit approval.
+
+### 10.4 Deviations (PDCA)
+
+When execution deviates from the approved plan, the working session applies Plan → Do → Check → Act and reports the deviation. It does not take decisions that belong to the owner: new requirements, architecture changes beyond the plan, significant new dependencies, changes to Accepted ADRs, and starting a milestone that is not in an approved plan. It reports such an item and pauses it.
