@@ -1017,6 +1017,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "sales"
+version = "0.0.0"
+dependencies = [
+ "forgebase",
+ "tokio",
+]
+
+[[package]]
+name = "sales_extension"
+version = "0.0.0"
+dependencies = [
+ "forgebase",
+ "sales",
+ "tokio",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

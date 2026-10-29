@@ -5,9 +5,12 @@
 #
 #   FORGEBASE_DATABASE_URL=postgres://... desk/e2e/seed.sh
 #
-# It writes the DocTypes the test serves to $E2E_DIR/doctypes (default target/e2e): the example
-# DocTypes plus a role "Sales Clerk" that may read, write and create sales orders but not submit
-# them (no example role is like that). It then migrates, and creates:
+# It writes the DocTypes the test serves to $E2E_DIR/doctypes (default target/e2e): the DocTypes of
+# the example app examples/sales plus a role "Sales Clerk" that may read, write and create sales
+# orders but not submit them (no example role is like that). That e2e-only role is why the test
+# uses the stock binary with --doctypes, and not the binary of the sales app (whose DocTypes are
+# embedded and cannot take the extra role). The sales app's hooks do not run in this
+# test: `amount` and `total` are plain editable fields here. It then migrates, and creates:
 #   - e2e_manager, role "Sales Manager": every right on sales orders (and customers);
 #   - e2e_clerk, role "Sales Clerk": no submit, cancel, amend or delete right;
 #   - the customer "ada@example.com" for the orders.
@@ -23,7 +26,7 @@ DOCTYPES="$E2E_DIR/doctypes"
 
 rm -rf "$DOCTYPES"
 mkdir -p "$DOCTYPES"
-cp examples/doctypes/*.toml "$DOCTYPES/"
+cp examples/sales/doctypes/*.toml "$DOCTYPES/"
 cat >> "$DOCTYPES/sales_order.toml" <<'TOML'
 
 # e2e only: may work on orders but not submit them.

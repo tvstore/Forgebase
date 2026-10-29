@@ -1,0 +1,21 @@
+[package]
+name = "sales_extension"
+description = "Example Forgebase app that extends the sales app (the custom app role)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sales = { path = "../sales" }
+forgebase = { path = "../../crates/forgebase" }
+
+[dev-dependencies]
+# `testing` gives the tests a throwaway database and an in-process HTTP client; it is not
+# compiled into the binary.
+forgebase = { path = "../../crates/forgebase", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

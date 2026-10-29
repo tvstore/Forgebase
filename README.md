@@ -33,7 +33,8 @@ The repository is currently **private**. It is intended to be open source under 
 | [docs/blueprint/milestones.md](docs/blueprint/milestones.md) | M0 to M10 (roadmap) and later work, with exit criteria |
 | [docs/blueprint/maintenance-policy.md](docs/blueprint/maintenance-policy.md) | Toolchain, dependency admission, testing, docs and review rules |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Prerequisites and local checks |
-| [examples/doctypes/](examples/doctypes/customer.toml) | Example DocTypes used by the quick start (a link, a child table) |
+| [examples/sales/](examples/sales/README.md) | Example app used by the quick start: DocTypes (a link, a child table), hooks, a data migration, tests |
+| [examples/sales_extension/](examples/sales_extension/README.md) | Example app that extends `sales` (a Link across apps, a hook on another app's DocType) |
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records |
 
 ## Getting started
@@ -47,86 +48,100 @@ cargo run -p forgebase -- --version
 
 Needs a PostgreSQL 16 server and an empty database. Connections are not encrypted yet (no TLS), so use a local or private network.
 
+The quick start runs the binary of the example app [`examples/sales`](examples/sales/README.md), so its DocTypes, hooks and data migration are built in and there is no `--doctypes` option. (The stock `forgebase` binary has no apps: it takes the DocTypes of a directory with `--doctypes DIR`, see [Apps](#apps).) Every command here was run against a fresh database.
+
 ```sh
 export FORGEBASE_DATABASE_URL=postgres://user:password@localhost:5432/mydb
 
-# Create the framework tables and the DocType tables (add --dry-run to only print the plan; on a fresh database it shows the pending framework migrations only, the DocType plan appears once they are applied)
-cargo run -p forgebase -- migrate --doctypes examples/doctypes
+# Create the framework tables and the DocType tables, then apply the app's data migrations (add --dry-run to only print the plan; on a fresh database it shows the pending framework migrations only, the DocType plan appears once they are applied)
+cargo run -p sales -- migrate
 
-# Insert a customer group, then a customer that links to it by name (the name comes from the DocType's naming field)
-cargo run -p forgebase -- doc insert customer_group --doctypes examples/doctypes \
-  --data '{"title": "retail"}'
-cargo run -p forgebase -- doc insert customer --doctypes examples/doctypes \
-  --data '{"email": "ann@example.com", "full_name": "Ann", "credit_limit": "1250.50", "customer_group": "retail"}'
+# The migration `default_customer_groups` of the app created two customer groups, Retail and Wholesale
+cargo run -p sales -- doc list customer_group
+
+# Insert another customer group, then a customer that links to it by name (the name comes from the DocType's naming field)
+cargo run -p sales -- doc insert customer_group \
+  --data '{"title": "Partner"}'
+cargo run -p sales -- doc insert customer \
+  --data '{"email": "ann@example.com", "full_name": "Ann", "credit_limit": "1250.50", "customer_group": "Partner"}'
 
 # Read it (note its "version"), change it, then delete it (below). update and delete need --version, the version you last read;
 # if someone changed the document meanwhile they fail with a conflict that shows the current version.
-cargo run -p forgebase -- doc get customer ann@example.com --doctypes examples/doctypes
-cargo run -p forgebase -- doc update customer ann@example.com --version 1 --doctypes examples/doctypes \
+cargo run -p sales -- doc get customer ann@example.com
+cargo run -p sales -- doc update customer ann@example.com --version 1 \
   --data '{"loyalty_points": 10}'
 
 # A customer group that a customer still links to cannot be deleted: this command fails (exit code 1, the error names `customer`)
-cargo run -p forgebase -- doc delete customer_group retail --version 1 --doctypes examples/doctypes
+cargo run -p sales -- doc delete customer_group Partner --version 1
 # Delete the customer first, then the group can be deleted
-cargo run -p forgebase -- doc delete customer ann@example.com --version 2 --doctypes examples/doctypes
-cargo run -p forgebase -- doc delete customer_group retail --version 1 --doctypes examples/doctypes
+cargo run -p sales -- doc delete customer ann@example.com --version 2
+cargo run -p sales -- doc delete customer_group Partner --version 1
 
 # A sales order has a child table, `items`: the rows are an array in the same JSON and are saved with the order in one transaction.
-# Its name is generated (a UUID); the output shows it, the rows in order and the version. The sed keeps just the name for the next commands.
-cargo run -p forgebase -- doc insert customer --doctypes examples/doctypes \
+# Its name comes from a naming series (SO-<year>-00001, ...); the output shows it, the rows in order and the version. The sed keeps just the name for the next commands.
+# The `validate` hook of the app computes each row's `amount` (qty * rate, 2 places) and the order's `total`. A row without a rate has no amount.
+cargo run -p sales -- doc insert customer \
   --data '{"email": "bob@example.com", "full_name": "Bob"}'
-ORDER=$(cargo run -q -p forgebase -- doc insert sales_order --doctypes examples/doctypes \
+ORDER=$(cargo run -q -p sales -- doc insert sales_order \
   --data '{"customer": "bob@example.com", "order_date": "2026-10-28", "items": [
     {"description": "Widget", "qty": 2, "rate": "9.50"},
     {"description": "Gadget", "qty": 1}]}' | sed -n 's/^  "name": "\(.*\)",$/\1/p')
 
 # An update that names `items` replaces its rows when they differ from the stored ones (a table with identical rows keeps its row ids); one that leaves it out keeps them.
-cargo run -p forgebase -- doc update sales_order "$ORDER" --version 1 --doctypes examples/doctypes \
+# The hook runs again: the amount becomes 47.50 and the total 47.50.
+cargo run -p sales -- doc update sales_order "$ORDER" --version 1 \
   --data '{"items": [{"description": "Widget", "qty": 5, "rate": "9.50"}]}'
-cargo run -p forgebase -- doc delete sales_order "$ORDER" --version 2 --doctypes examples/doctypes
+cargo run -p sales -- doc delete sales_order "$ORDER" --version 2
 ```
 
 ### Submit, cancel and amend
 
-`sales_order` is `submittable` and uses a naming series ([sales_order.toml](examples/doctypes/sales_order.toml)): a new order is a **draft** (`docstatus` 0, named `SO-<year>-00001`, ...), `submit` locks it (`docstatus` 1; only fields marked `allow_on_submit`, here `remarks`, can still change), `cancel` makes it `docstatus` 2, and `amend` creates a new draft from a cancelled order, named `<original>-<n>` with `amended_from` set. Every step needs `--version`, the version you last read (each one adds 1).
+`sales_order` is `submittable` and uses a naming series ([sales_order.toml](examples/sales/doctypes/sales_order.toml)): a new order is a **draft** (`docstatus` 0, named `SO-<year>-00001`, ...; it may have no items yet), `submit` needs at least one item and a positive total (the `before_submit` hook of the app refuses otherwise) and locks it (`docstatus` 1; only fields marked `allow_on_submit`, here `remarks`, can still change), `cancel` makes it `docstatus` 2, and `amend` creates a new draft from a cancelled order, named `<original>-<n>` with `amended_from` set. Every step needs `--version`, the version you last read (each one adds 1).
 
 ```sh
 # Continues the example above (the `bob@example.com` customer exists). A new order is a draft: "docstatus": 0, named by the series.
-NAME=$(cargo run -q -p forgebase -- doc insert sales_order --doctypes examples/doctypes \
-  --data '{"customer": "bob@example.com", "items": [{"description": "Widget", "qty": 2}]}' | sed -n 's/^  "name": "\(.*\)",$/\1/p')
+NAME=$(cargo run -q -p sales -- doc insert sales_order \
+  --data '{"customer": "bob@example.com", "items": [{"description": "Widget", "qty": 2, "rate": "9.50"}]}' | sed -n 's/^  "name": "\(.*\)",$/\1/p')
+
+# An order without items can be saved as a draft but not submitted: this fails (exit code 1) with the hook's message
+# "a sales order needs at least one item to be submitted". (Delete the draft again; it is version 1.)
+EMPTY=$(cargo run -q -p sales -- doc insert sales_order \
+  --data '{"customer": "bob@example.com"}' | sed -n 's/^  "name": "\(.*\)",$/\1/p')
+cargo run -p sales -- doc submit sales_order "$EMPTY" --version 1
+cargo run -p sales -- doc delete sales_order "$EMPTY" --version 1
 
 # Submit it (version 1 -> 2): "docstatus": 1. A submitted order is locked: this update fails (exit code 1) ...
-cargo run -p forgebase -- doc submit sales_order "$NAME" --version 1 --doctypes examples/doctypes
-cargo run -p forgebase -- doc update sales_order "$NAME" --version 2 --doctypes examples/doctypes \
+cargo run -p sales -- doc submit sales_order "$NAME" --version 1
+cargo run -p sales -- doc update sales_order "$NAME" --version 2 \
   --data '{"order_date": "2026-11-01"}'
 # ... and this one, on the allow_on_submit field, works (version 2 -> 3). A submitted order cannot be deleted either.
-cargo run -p forgebase -- doc update sales_order "$NAME" --version 2 --doctypes examples/doctypes \
+cargo run -p sales -- doc update sales_order "$NAME" --version 2 \
   --data '{"remarks": "rush delivery"}'
 
 # Cancel it (3 -> 4: "docstatus": 2), then amend it: a new draft with the same values and rows, named "<NAME>-1", "amended_from": "<NAME>".
-cargo run -p forgebase -- doc cancel sales_order "$NAME" --version 3 --doctypes examples/doctypes
-cargo run -p forgebase -- doc amend sales_order "$NAME" --version 4 --doctypes examples/doctypes
+cargo run -p sales -- doc cancel sales_order "$NAME" --version 3
+cargo run -p sales -- doc amend sales_order "$NAME" --version 4
 # The amendment is a draft again: edit it, submit it, and so on. A cancelled order can be amended once (the second try fails), or deleted.
-cargo run -p forgebase -- doc delete sales_order "$NAME" --version 4 --doctypes examples/doctypes
+cargo run -p sales -- doc delete sales_order "$NAME" --version 4
 ```
 
 `doc submit`, `doc cancel` and `doc amend` take `--actor` like the other commands and no data; the output of a submittable DocType includes `docstatus` (0, 1 or 2) and `amended_from`. `docstatus` and `amended_from` cannot be set through `--data`.
 
-DocTypes are TOML files, one per DocType, in the directory given by `--doctypes` (see [examples/doctypes/customer.toml](examples/doctypes/customer.toml) and the [file format](docs/blueprint/architecture.md#doctype-file-format)). A `link` field names its target DocType (`target = "customer_group"`); in JSON a link is the target document's name, and the database enforces it with a foreign key. A `table` field names a child DocType (`is_child = true`, see [sales_order.toml](examples/doctypes/sales_order.toml) and [sales_order_item.toml](examples/doctypes/sales_order_item.toml)); in JSON it is an array of row objects. A child DocType belongs to exactly one parent and has no commands of its own. A `submittable = true` DocType also has a docstatus and `doc submit`, `doc cancel` and `doc amend` (next section); `naming = { series = "SO-.YYYY.-.#####" }` names documents `SO-2026-00001`, `SO-2026-00002`, ... from a counter that is incremented in the same transaction as the insert, so numbers have no gaps per rendered prefix (date parts are the UTC date of the transaction; DocTypes whose patterns render the same prefix share one counter and see gaps, so give each DocType a distinct prefix). `--data -` reads the JSON from standard input. Decimal values are JSON strings (any form `rust_decimal` parses, such as `"1e3"` or `".5"`), dates are `YYYY-MM-DD`, datetimes are RFC 3339 with microsecond precision (finer digits are truncated). Duplicate JSON keys: the last one wins. Output keys are sorted alphabetically. DocType files: `*.toml` directly in the directory, hidden files skipped, not recursive. The tool prints the stored document as JSON; errors go to standard error as `error: ...` with exit code 1 (2 for a usage error). The `--actor` option (default `cli`) names the trusted **system context** the `doc` commands run as: it is recorded as owner / modified_by on insert, update, submit, cancel and amend, and given to the hooks (on delete it is only given to hooks, not stored); the tool has no authentication, and no permission rule applies to it (see "Permissions" below). The tool registers no lifecycle hooks: hooks are Rust code of an app built with the `forgebase` crate (see [Apps](#apps) and [ADR 0009](docs/adr/0009-lifecycle-pipeline-and-hooks.md)).
+DocTypes are TOML files, one per DocType, in the `doctypes/` directory of an app (embedded in its binary) or in the directory given by `--doctypes` of the stock binary (see [examples/sales/doctypes/customer.toml](examples/sales/doctypes/customer.toml) and the [file format](docs/blueprint/architecture.md#doctype-file-format)). A `link` field names its target DocType (`target = "customer_group"`); in JSON a link is the target document's name, and the database enforces it with a foreign key. A `table` field names a child DocType (`is_child = true`, see [sales_order.toml](examples/sales/doctypes/sales_order.toml) and [sales_order_item.toml](examples/sales/doctypes/sales_order_item.toml)); in JSON it is an array of row objects. A child DocType belongs to exactly one parent and has no commands of its own. A `submittable = true` DocType also has a docstatus and `doc submit`, `doc cancel` and `doc amend` (next section); `naming = { series = "SO-.YYYY.-.#####" }` names documents `SO-2026-00001`, `SO-2026-00002`, ... from a counter that is incremented in the same transaction as the insert, so numbers have no gaps per rendered prefix (date parts are the UTC date of the transaction; DocTypes whose patterns render the same prefix share one counter and see gaps, so give each DocType a distinct prefix). `--data -` reads the JSON from standard input. Decimal values are JSON strings (any form `rust_decimal` parses, such as `"1e3"` or `".5"`), dates are `YYYY-MM-DD`, datetimes are RFC 3339 with microsecond precision (finer digits are truncated). Duplicate JSON keys: the last one wins. Output keys are sorted alphabetically. DocType files: `*.toml` directly in the directory, hidden files skipped, not recursive. The tool prints the stored document as JSON; errors go to standard error as `error: ...` with exit code 1 (2 for a usage error). The `--actor` option (default `cli`) names the trusted **system context** the `doc` commands run as: it is recorded as owner / modified_by on insert, update, submit, cancel and amend, and given to the hooks (on delete it is only given to hooks, not stored); the tool has no authentication, and no permission rule applies to it (see "Permissions" below). The stock `forgebase` binary registers no lifecycle hooks; hooks are Rust code of an app built with the `forgebase` crate, which is why the `sales` binary computes `amount` and `total` and checks submits (see [Apps](#apps) and [ADR 0009](docs/adr/0009-lifecycle-pipeline-and-hooks.md)).
 
 ### List documents
 
 `doc list` prints a page of documents as a JSON array (default 20, at most 500; child table rows are not listed). `--filter` is a JSON array of conditions combined with AND, `--sort` can be repeated (`FIELD` or `FIELD:desc`; `name` is always the last key, so paging is stable), `--limit` and `--offset` page. Operators: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in` (the value is an array), `like` (text fields only; a SQL pattern with `%` and `_`), `is null` and `is not null`. Values are written as in `--data`; a link is filtered by the target's name; the standard columns `name`, `owner`, `modified_by`, `created_at`, `modified_at`, `version` and (submittable DocTypes) `docstatus` can be used too.
 
 ```sh
-cargo run -p forgebase -- doc list customer --doctypes examples/doctypes \
+cargo run -p sales -- doc list customer \
   --filter '[{"field":"tier","op":"=","value":"gold"},{"field":"loyalty_points","op":">=","value":10}]' \
   --sort loyalty_points:desc --limit 10
 ```
 
 ### Permissions
 
-A DocType file can list `[[permissions]]` (see [sales_order.toml](examples/doctypes/sales_order.toml)): a `role`, the rights it grants (`read`, `write`, `create`, `delete`, `submit`, `cancel`, `amend`) and optionally `if_owner = true` (the rights then apply to documents the user owns only). A user may do what any of their roles grants; the role `Administrator` may do everything; **a DocType without rules is closed to everyone else**. Child rows follow their parent. The rules are enforced by `forgebase-db` in every operation (`insert`, `get`, `update`, `delete`, `submit`, `cancel`, `amend`, `list`), which take a `Caller`: a user with roles (`AuthUser::caller()`), or the trusted system context. A document a user is not allowed to read is treated as if it did not exist (`get`, `list`, updates, links, errors), with the known limits listed in [ADR 0011](docs/adr/0011-permission-model-phase-1.md). The `forgebase doc` commands run as the system context; the rules apply to real users of the [HTTP API](#http-api) (and to Rust code that calls `forgebase_db` with `Caller::user(...)`). See [ADR 0011](docs/adr/0011-permission-model-phase-1.md) and the [security model](docs/blueprint/security-model.md).
+A DocType file can list `[[permissions]]` (see [sales_order.toml](examples/sales/doctypes/sales_order.toml)): a `role`, the rights it grants (`read`, `write`, `create`, `delete`, `submit`, `cancel`, `amend`) and optionally `if_owner = true` (the rights then apply to documents the user owns only). A user may do what any of their roles grants; the role `Administrator` may do everything; **a DocType without rules is closed to everyone else**. Child rows follow their parent. The rules are enforced by `forgebase-db` in every operation (`insert`, `get`, `update`, `delete`, `submit`, `cancel`, `amend`, `list`), which take a `Caller`: a user with roles (`AuthUser::caller()`), or the trusted system context. A document a user is not allowed to read is treated as if it did not exist (`get`, `list`, updates, links, errors), with the known limits listed in [ADR 0011](docs/adr/0011-permission-model-phase-1.md). The `forgebase doc` commands run as the system context; the rules apply to real users of the [HTTP API](#http-api) (and to Rust code that calls `forgebase_db` with `Caller::user(...)`). See [ADR 0011](docs/adr/0011-permission-model-phase-1.md) and the [security model](docs/blueprint/security-model.md).
 
 ### Users and tokens
 
@@ -134,31 +149,31 @@ Passwords are read from the first line of **standard input**, never from an argu
 
 ```sh
 # Create a user with two roles (usernames: 1-140 ASCII letters, digits and _ . @ -; passwords: 8-1024 bytes)
-printf '%s\n' 'a long password' | cargo run -p forgebase -- user create ann --role Sales --role Accounts
-# Without echo on a terminal: read -s -r PW && printf '%s\n' "$PW" | cargo run -p forgebase -- user create ann
-cargo run -p forgebase -- user add-role ann Admin
-cargo run -p forgebase -- user remove-role ann Admin
-printf '%s\n' 'another password' | cargo run -p forgebase -- user set-password ann   # also ends all sessions
-cargo run -p forgebase -- user disable ann    # sessions and tokens stop working; `user enable` undoes it
+printf '%s\n' 'a long password' | cargo run -p sales -- user create ann --role Sales --role Accounts
+# Without echo on a terminal: read -s -r PW && printf '%s\n' "$PW" | cargo run -p sales -- user create ann
+cargo run -p sales -- user add-role ann Admin
+cargo run -p sales -- user remove-role ann Admin
+printf '%s\n' 'another password' | cargo run -p sales -- user set-password ann   # also ends all sessions
+cargo run -p sales -- user disable ann    # sessions and tokens stop working; `user enable` undoes it
 
 # An API token for a machine client: prints key:secret once
-cargo run -p forgebase -- token create ann
-cargo run -p forgebase -- token revoke <key>
+cargo run -p sales -- token create ann
+cargo run -p sales -- token revoke <key>
 ```
 
 Five consecutive failed logins for a username (each within 15 minutes of the previous one) lock it for 15 minutes; see [ADR 0010](docs/adr/0010-authentication-and-sessions.md) and the [security model](docs/blueprint/security-model.md).
 
 ### HTTP API
 
-`forgebase serve` runs the API on `FORGEBASE_LISTEN` (default `127.0.0.1:8000`). It reads the DocType files like `migrate` but **does not run migrations**: run `migrate` first. Requests need a `Host` header from `FORGEBASE_ALLOWED_HOSTS` (comma separated host names without ports, default `localhost,127.0.0.1`; an entry with a port is refused at startup). Ctrl-C or SIGTERM stops accepting connections and lets running requests finish for up to 10 seconds; a second signal, or the end of that period, exits at once (exit code 0; open database transactions are rolled back by PostgreSQL when the connection closes). The session cookie is `Secure`, so browsers send it over HTTPS only: put a TLS-terminating reverse proxy in front (the application has no TLS). For local development over plain HTTP, `FORGEBASE_DEV_INSECURE_COOKIES=1` omits `Secure` (and prints a warning); never use it in production. There is no CORS: serve the front-end from the same origin.
+`serve` (here `cargo run -p sales -- serve`) runs the API on `FORGEBASE_LISTEN` (default `127.0.0.1:8000`). It serves the same DocTypes as `migrate` (the app's, or the `--doctypes` directory in the stock binary) but **does not run migrations**: run `migrate` first. Requests need a `Host` header from `FORGEBASE_ALLOWED_HOSTS` (comma separated host names without ports, default `localhost,127.0.0.1`; an entry with a port is refused at startup). Ctrl-C or SIGTERM stops accepting connections and lets running requests finish for up to 10 seconds; a second signal, or the end of that period, exits at once (exit code 0; open database transactions are rolled back by PostgreSQL when the connection closes). The session cookie is `Secure`, so browsers send it over HTTPS only: put a TLS-terminating reverse proxy in front (the application has no TLS). For local development over plain HTTP, `FORGEBASE_DEV_INSECURE_COOKIES=1` omits `Secure` (and prints a warning); never use it in production. There is no CORS: serve the front-end from the same origin.
 
 ```sh
 # Prepare: tables, a user with the Administrator role (the example DocTypes name other roles; Administrator may do everything)
-cargo run -p forgebase -- migrate --doctypes examples/doctypes
-printf '%s\n' 'a long password' | cargo run -p forgebase -- user create root --role Administrator
+cargo run -p sales -- migrate
+printf '%s\n' 'a long password' | cargo run -p sales -- user create root --role Administrator
 
 # Terminal 1: serve (development mode)
-FORGEBASE_DEV_INSECURE_COOKIES=1 cargo run -p forgebase -- serve --doctypes examples/doctypes
+FORGEBASE_DEV_INSECURE_COOKIES=1 cargo run -p sales -- serve
 
 # Terminal 2: log in. The response has the one-time CSRF token; the session cookie is saved in jar.txt.
 CSRF=$(curl -s -c jar.txt -H 'Content-Type: application/json' \
@@ -183,7 +198,7 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
 
 # Create a sales order (its name comes from the series; use the `name` in the response below), then submit it (submit, cancel and amend take {"version": N}; amend answers 201 with the new draft)
 curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
-  -d '{"customer": "ann@example.com", "items": [{"description": "Widget", "qty": 2}]}' \
+  -d '{"customer": "ann@example.com", "items": [{"description": "Widget", "qty": 2, "rate": "9.50"}]}' \
   http://localhost:8000/api/v1/resource/sales_order
 curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
   -d '{"version": 1}' http://localhost:8000/api/v1/resource/sales_order/SO-2026-00001/submit
@@ -196,7 +211,7 @@ curl -s -b jar.txt -X DELETE -H "X-Forgebase-CSRF: $CSRF" \
 curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" http://localhost:8000/api/v1/logout
 
 # A machine client uses an API token instead: no cookie, no CSRF header. The token header wins over any cookie.
-TOKEN=$(cargo run -q -p forgebase -- token create root)    # prints key:secret once
+TOKEN=$(cargo run -q -p sales -- token create root)    # prints key:secret once
 curl -s -H "Authorization: token $TOKEN" http://localhost:8000/api/v1/resource/customer
 ```
 
@@ -212,7 +227,7 @@ cd desk && npm ci && npm run build && cd ..
 
 # Run it with the API from the HTTP API section above (a user and the tables must exist), then open http://localhost:8000/desk/
 # FORGEBASE_DEV_INSECURE_COOKIES=1 is for plain HTTP on localhost only; behind HTTPS leave it out.
-FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist cargo run -p forgebase -- serve --doctypes examples/doctypes
+FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist cargo run -p sales -- serve
 
 # Develop the desk with hot reload (proxies /api to a running `forgebase serve` on port 8000): http://localhost:5173/desk/
 cd desk && npm run dev
@@ -225,7 +240,7 @@ The desk keeps no secret in the browser except the HttpOnly session cookie: the 
 ```sh
 export FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/fb_e2e   # an empty scratch database
 cargo build -p forgebase && (cd desk && npm ci && npm run build)
-desk/e2e/seed.sh                                   # migrates, creates the users e2e_manager and e2e_clerk and a customer
+desk/e2e/seed.sh                                   # migrates, creates the users e2e_manager and e2e_clerk and a customer (stock binary and `--doctypes`: it adds a role that only the e2e test uses)
 FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/forgebase serve --doctypes target/e2e/doctypes &
 cd desk && npx playwright install chromium && npx playwright test   # or set PLAYWRIGHT_CHROMIUM_EXECUTABLE to an installed Chromium
 ```
@@ -234,7 +249,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks. To get oriented, re
 
 ### Apps
 
-The stock `forgebase` binary above has no apps: it loads DocTypes from `--doctypes DIR`, and that is all the quick start needs. To build an application, make a crate that depends on `forgebase` (the only public API; `forgebase-core`, `forgebase-db` and `forgebase-http` are internal) and write apps and a binary:
+The stock `forgebase` binary has no apps: it loads DocTypes from `--doctypes DIR` (the quick start above uses the binary of an example app instead). Two example apps in this repository show what an app looks like, using the public `forgebase` API only (they change nothing under `crates/`): [`examples/sales`](examples/sales/README.md) (DocTypes, hooks that compute and refuse, a data migration, tests) and [`examples/sales_extension`](examples/sales_extension/README.md) (a custom app that depends on `sales`: a DocType that links to one of `sales`, and a hook on a DocType of `sales`; `cargo run -p sales_extension` is the composed binary). To build an application, make a crate that depends on `forgebase` (the only public API; `forgebase-core`, `forgebase-db` and `forgebase-http` are internal) and write apps and a binary:
 
 ```rust
 // An app is a plain function that returns data: no registry, no macros that generate code.

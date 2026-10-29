@@ -1,0 +1,36 @@
+# A DocType of the `sales_extension` example app (examples/sales_extension): a visit to a customer.
+# Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+name = "customer_visit"
+label = "Customer Visit"
+# Random naming (the default, written out here on purpose): a visit has no natural key, and a
+# naming series would serialize every insert on one counter row for no benefit.
+naming = "random"
+
+# A Link to a DocType of another app: allowed because `sales_extension` depends on `sales`.
+[[fields]]
+name = "customer"
+type = "link"
+target = "customer"
+required = true
+
+[[fields]]
+name = "visited_on"
+type = "date"
+required = true
+
+[[fields]]
+name = "notes"
+type = "text"
+
+[[permissions]]
+role = "Sales User"
+read = true
+write = true
+create = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+create = true
+delete = true
