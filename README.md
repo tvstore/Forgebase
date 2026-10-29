@@ -200,7 +200,7 @@ TOKEN=$(cargo run -q -p forgebase-cli -- token create root)    # prints key:secr
 curl -s -H "Authorization: token $TOKEN" http://localhost:8000/api/v1/resource/customer
 ```
 
-Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one. The route table, the request pipeline, the codes and the limits are in the [architecture](docs/blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-the-rest-proposed) and the [security model](docs/blueprint/security-model.md#the-http-layer-implemented-in-m33). `/api/v1/method` (custom endpoints) is not implemented.
+Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one. The route table, the request pipeline, the codes and the limits are in the [architecture](docs/blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) and the [security model](docs/blueprint/security-model.md#the-http-layer-implemented-in-m33). `/api/v1/method` (custom endpoints) is not implemented.
 
 ### Desk
 

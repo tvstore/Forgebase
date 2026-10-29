@@ -37,7 +37,7 @@ JWT for first-party browser sessions is avoided (revocation complexity).
 
 ## The HTTP layer (implemented in M3.3)
 
-Routes, statuses and the error envelope: [architecture, section 7](architecture.md#7-api-rest-resource-api-implemented-in-m33-the-rest-proposed). The security properties, in the order a request meets them:
+Routes, statuses and the error envelope: [architecture, section 7](architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed). The security properties, in the order a request meets them:
 
 - **Host validation first (owner decision 8).** The `Host` header (port ignored, case-insensitive) must be in `FORGEBASE_ALLOWED_HOSTS` (default `localhost,127.0.0.1`); a missing, repeated or unknown `Host` is `400 invalid_host`. An entry with a port can never match, so `forgebase serve` refuses it at startup (exit 1). It runs before routing, authentication, body parsing and the 404/405 answers, so it covers login too. This protects against Host-header poisoning and DNS rebinding for a single site; multi-site will resolve the site from the same list.
 - **Authentication, uniform 401.** The `Authorization` header wins over the cookie. A missing, malformed, wrong, expired, revoked, idle or tampered credential, a disabled user and an unknown token all give the same `401 unauthenticated` body (a failed login has its own, equally uniform message). Authentication and CSRF are decided before the path, query or body of a request is looked at; an unauthenticated request with an oversized or malformed body is a 401.
