@@ -135,8 +135,11 @@ pub struct StoredDocument {
 /// **A name collision blocks the series.** If the rendered name already exists (for example
 /// after the pattern changed to another prefix that renders a used name), the insert fails with
 /// [`DbError::UniqueViolation`] and the rollback returns the number, so every later insert
-/// retries the same number and fails too. Move the counter by hand, for example
-/// `UPDATE fb_series SET current = <n> WHERE prefix = '<prefix>'`. Numbering is gapless per
+/// retries the same number and fails too. Set the counter by hand with an upsert (the row may
+/// not exist yet, since the rollback also removes a row the failed insert created):
+/// `INSERT INTO fb_series (prefix, current) VALUES ('<prefix>', <n>) ON CONFLICT (prefix) DO
+/// UPDATE SET current = EXCLUDED.current`, choosing `<n>` so that the names rendered for
+/// `<n> + 1` and the numbers after it are not already used. Numbering is gapless per
 /// rendered prefix (the `fb_series` key): two DocTypes whose patterns render the same prefix
 /// share one counter and each sees gaps; use a distinct prefix per DocType.
 ///
@@ -805,7 +808,8 @@ async fn cancel_in(
 /// **Edge case: `unique` fields.** The copy repeats every value, and the cancelled original
 /// still holds them, so a DocType with a `unique` field fails with [`DbError::UniqueViolation`]
 /// unless a `before_insert` or `validate` hook checks `ctx.operation == Operation::Amend` and
-/// changes the value (or the original is deleted first).
+/// changes the value (the original cannot be deleted or updated first: amend needs it, and a
+/// cancelled document cannot be updated).
 ///
 /// **Pipeline.** The cancelled document is read and locked, as for [`submit`]; then the
 /// **insert** pipeline of [`insert`] runs on the copy: the `before_insert` and `validate` hooks

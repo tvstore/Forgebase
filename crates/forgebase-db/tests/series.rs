@@ -1,5 +1,5 @@
 //! Naming series (M2.4) against a real PostgreSQL (see `common`): the counter lives in `fb_series`
-//! and moves with the insert's transaction, so numbering has no gaps.
+//! and moves with the insert's transaction, so numbering has no gaps per prefix.
 
 mod common;
 
