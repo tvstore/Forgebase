@@ -661,6 +661,40 @@ pub async fn check_csrf(
     Ok(row.get(0))
 }
 
+/// Replaces the CSRF token of the session `session_token` with a new one and returns it, so that
+/// a page can recover the token after a reload without ever storing it (the desk keeps it in
+/// memory only). The old token stops working at once. The session must be valid by the same rules
+/// as [`validate_session`] (token matches, user enabled, not expired, not idle); otherwise
+/// `Ok(None)` and nothing changes. Only the digest of the new token is stored. It does not touch
+/// the session (`last_seen_at`): the caller has validated it already.
+///
+/// Whoever holds the session token can obtain a token this way, which gives them nothing they
+/// did not have; a cross-site page cannot read the response (the HTTP API sends no CORS headers),
+/// so it cannot learn the new token.
+pub async fn rotate_csrf(
+    client: &impl GenericClient,
+    session_token: &str,
+) -> Result<Option<String>, AuthError> {
+    if !is_hex(session_token, SECRET_HEX_LEN) {
+        return Ok(None);
+    }
+    let csrf_token = random_hex(32)?;
+    let updated = client
+        .execute(
+            concat!(
+                "UPDATE fb_session s SET csrf_hash = ",
+                digest!("2"),
+                " FROM fb_user u WHERE s.token_hash = ",
+                digest!("1"),
+                " AND u.id = s.user_id AND u.enabled AND now() < s.expires_at \
+                 AND now() < s.last_seen_at + make_interval(secs => $3::float8)"
+            ),
+            &[&session_token, &csrf_token, &SESSION_IDLE_SECS],
+        )
+        .await?;
+    Ok((updated > 0).then_some(csrf_token))
+}
+
 /// Deletes a session. Returns `false` if there was none for this token.
 pub async fn logout(client: &impl GenericClient, token: &str) -> Result<bool, AuthError> {
     if !is_hex(token, SECRET_HEX_LEN) {

@@ -7,7 +7,7 @@ use axum::Json as AxumJson;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::header::SET_COOKIE;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::DocType;
@@ -26,7 +26,7 @@ use crate::json::{
 /// Session lifetime in the cookie (`Max-Age`): the 7 days of the session's absolute expiry.
 const COOKIE_MAX_AGE_SECS: u32 = 7 * 24 * 3600;
 
-type Reply = Result<Response, ApiError>;
+pub(crate) type Reply = Result<Response, ApiError>;
 
 /// The raw query string as ordered pairs, so that a repeated parameter is still visible.
 type RawQuery = Result<Query<Vec<(String, String)>>, QueryRejection>;
@@ -45,11 +45,11 @@ impl FromRequest<AppState> for ApiJson {
     }
 }
 
-fn data(status: StatusCode, value: Json) -> Response {
+pub(crate) fn data(status: StatusCode, value: Json) -> Response {
     (status, AxumJson(json!({ "data": value }))).into_response()
 }
 
-fn doctype<'a>(state: &'a AppState, name: &str) -> Result<&'a DocType, ApiError> {
+pub(crate) fn doctype<'a>(state: &'a AppState, name: &str) -> Result<&'a DocType, ApiError> {
     state
         .registry()
         .get(name)
@@ -194,6 +194,50 @@ pub async fn logout(State(state): State<AppState>, authenticated: Authenticated)
     auth::logout(&**client, &token).await?;
     let header = cookie(&state, "", 0)?;
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, header)]).into_response())
+}
+
+/// `GET /api/v1/session`: the user of the cookie session and a **new** CSRF token, so that the
+/// desk can keep the token in memory only and recover it after a page reload. The session's
+/// stored CSRF digest is replaced: the previous token (also the one another tab holds) stops
+/// working, and a request that fails with `csrf_failed` can call this once and retry. Safe
+/// because the response cannot be read cross-origin (no CORS) and the cookie is `SameSite=Lax`.
+/// An API token has no session: 400.
+///
+/// The request must carry `X-Forgebase-CSRF: refresh`, else 400 `bad_request` and nothing is
+/// rotated. A navigation or an `<img>` cannot send a custom header, and a cross-origin `fetch`
+/// with it needs a preflight, which this server answers with 405 and no CORS headers; so a
+/// foreign page cannot make the desk's in-memory token stop working.
+pub async fn session(
+    State(state): State<AppState>,
+    authenticated: Authenticated,
+    headers: HeaderMap,
+) -> Reply {
+    let marked = headers
+        .get("x-forgebase-csrf")
+        .is_some_and(|v| v.as_bytes() == b"refresh");
+    if !marked {
+        return Err(ApiError::bad_request(
+            "this request needs the header X-Forgebase-CSRF: refresh",
+        ));
+    }
+    let Credential::Session(token) = &authenticated.credential else {
+        return Err(ApiError::bad_request(
+            "a session needs a cookie; an API token has none",
+        ));
+    };
+    let client = state.client().await?;
+    // `None`: the session ended between the check and now; the same 401 as any other.
+    let csrf_token = auth::rotate_csrf(&**client, token)
+        .await?
+        .ok_or_else(ApiError::unauthenticated)?;
+    Ok(data(
+        StatusCode::OK,
+        json!({
+            "username": authenticated.user.username,
+            "roles": authenticated.user.roles,
+            "csrf_token": csrf_token,
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------

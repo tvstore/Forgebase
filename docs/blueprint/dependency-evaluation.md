@@ -282,9 +282,45 @@ Hashing of tokens needs no crate: SHA-256 is computed by PostgreSQL (`sha256(con
 - cargo-deny (licenses, advisories, bans, sources) in CI; cargo-audit mostly redundant. Both are CI tools, not workspace dependencies. Details: [maintenance-policy](maintenance-policy.md).
 - Measured floors: stack A **1.89** (set by `uuid` 1.29.0); stack B **1.94** (set by sqlx).
 
-### 12. Frontend (brief)
+### 12. Frontend
 
-React + TypeScript for `desk/` is Accepted ([ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md), arriving at M4); Vite remains an owner-given candidate (Proposed). React, TypeScript and Vite were given by the owner as candidates; this evaluation checked license compatibility only (compatible with an MIT project; Apache-2.0 requires keeping NOTICE files if present). Alternatives, listed briefly and not evaluated (Unverified): Vue, Svelte or Solid as the UI framework; Webpack or esbuild-based tooling instead of Vite; server-rendered HTML (for example with htmx) instead of a SPA. Trade-offs were not assessed. UI library, router, data-fetching and form libraries are deferred (UI library decided in M4). Apply equivalent npm supply-chain checks (committed lockfile, audit, license checker; tooling not evaluated).
+React + TypeScript for `desk/` is Accepted ([ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md)). Alternatives, listed briefly and not evaluated (Unverified): Vue, Svelte or Solid as the UI framework; server-rendered HTML (for example with htmx) instead of a SPA.
+
+#### Owner decisions for M4 (2026-10-29, Accepted)
+
+- **No UI component library, no router library, no data-fetching library.** Native inputs and a small own stylesheet; an own hash router (`desk/src/router.ts`); plain `fetch` (`desk/src/api.ts`). Reason: every runtime dependency is a long-term maintenance cost; the desk needs a login, a list and (M4.2) a form. Revisit only if a real need appears (an ADR then).
+- **Toolchain: Vite + TypeScript + Vitest**, with ESLint (`@eslint/js`, `typescript-eslint`, `eslint-plugin-react-hooks`: the smallest set that lints TypeScript and the React hooks rules; the project's own rules forbid browser storage, `dangerouslySetInnerHTML` and inline `style`). Tests are pure-module tests in Vitest's `node` environment with a stubbed `fetch`; no `jsdom`, no testing library (not needed for M4.1).
+- **Only `react` and `react-dom` are runtime dependencies.** `npm run licenses` fails otherwise.
+
+#### Admission notes for M4.1 (2026-10-29)
+
+Versions are pinned exactly in `desk/package.json` (no `^` or `~`) and the lockfile (`desk/package-lock.json`, lockfile version 3) is committed. Licenses are the `license` field of the lockfile (`Verified (local measurement)`, npm 10.9.4, Node 22.22.0); versions from `npm view` on 2026-10-29.
+
+| Package | Version | License | Use |
+|---|---|---|---|
+| `react`, `react-dom` | 19.3.1 | MIT | runtime (shipped) |
+| `vite` | 8.3.5 | MIT | build and dev server |
+| `@vitejs/plugin-react` | 6.1.2 | MIT | JSX transform for Vite |
+| `typescript` | 6.0.3 | Apache-2.0 | `tsc --noEmit` (type check only; Vite transpiles) |
+| `vitest` | 5.0.5 | MIT | tests |
+| `eslint`, `@eslint/js` | 10.13.0, 10.0.1 | MIT | lint |
+| `typescript-eslint` | 8.72.1 | MIT | lint rules for TypeScript |
+| `eslint-plugin-react-hooks` | 7.1.1 | MIT | hooks rules |
+| `@types/react`, `@types/react-dom` | 19.3.0 | MIT | types |
+
+**TypeScript 6.0.3, not 7.0.2.** TypeScript 7.0.2 exists and the pre-research named it, but `typescript-eslint` 8.72.1 declares the peer range `typescript >=4.8.4 <6.1.0`, so `npm install` refuses the combination (`ERESOLVE`; `--legacy-peer-deps` was not used). The newest TypeScript inside that range, 6.0.3, is pinned. Move to 7 when `typescript-eslint` supports it.
+
+**Package count (`Verified (local measurement)`).** The lockfile lists **197** packages (172 are installed on Linux x64; the rest are optional platform binaries of `rolldown`, `lightningcss` and similar that other platforms install). Only **3** are shipped in the built desk (`react`, `react-dom`, `scheduler`, all MIT); the other 194 are development tooling. By license: MIT 149 (3 shipped), Apache-2.0 16, ISC 10, BSD-2-Clause 6, BSD-3-Clause 2, **MPL-2.0 12** (all dev only: `lightningcss` 1.33.0 and its 11 platform packages, used by Vite's CSS tooling), BlueOak-1.0.0 1 (`minimatch`), CC-BY-4.0 1 (`caniuse-lite`, browser data).
+
+**Frontend license allow-list (Accepted).** Enforced by `desk/scripts/check-licenses.mjs` (`npm run licenses`, plain Node, run in CI):
+
+- every package in `package-lock.json` needs a `license` that is exactly one of these strings (a missing license, an SPDX expression or anything else fails);
+- packages that are **shipped** (not `dev` in the lockfile): MIT, ISC, Apache-2.0, BSD-2-Clause, BSD-3-Clause;
+- packages that are **development only**: the same plus MPL-2.0, BlueOak-1.0.0 and CC-BY-4.0.
+
+**MPL-2.0 is accepted for development tooling only.** MPL-2.0 is file-level copyleft; nothing of `lightningcss` is part of the built desk, so it places no obligation on the MIT-licensed result. If an MPL-2.0 package ever becomes a shipped dependency (not `dev` in the lockfile), the check fails and the owner decides. The same check keeps the runtime dependency list to `react` and `react-dom`. **Limit of the "dev" flag.** The lockfile's `dev` flag says whether a package is reachable from `dependencies` only; it is as good as the imports of `desk/src/`. A development-only package (for example an MPL-2.0 one) that is `import`ed from `src/` would be bundled into the shipped desk although the lockfile calls it dev. Reviewers must check imports in `src/` for that; there is deliberately no scanner of `desk/dist`. Install scripts of dependencies are off: `desk/.npmrc` sets `ignore-scripts=true`, so `npm ci` (locally and in CI) runs none. Node: `^20.19.0 || >=22.12.0` (the range Vite 8 needs). The CI job also runs `npm audit --audit-level=high` (high and critical advisories fail the job; the daily schedule runs it too). `typescript` at 6.x is Apache-2.0 (NOTICE files are kept in `node_modules`, which is not shipped).
+
+The earlier remark that "UI library, router, data-fetching and form libraries are deferred" is answered by the decisions above.
 
 ## Recommended baseline
 
@@ -305,7 +341,7 @@ Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 
 | Jobs | custom Postgres SKIP LOCKED queue | apalis (if sqlx, after maturing) |
 | Config | toml + serde + env overlay | figment |
 | TLS | none in app, TLS terminated at a reverse proxy (Accepted, ADR 0005); rustls+ring for Postgres behind a feature (Proposed) | native-tls |
-| Frontend | React + TypeScript (Accepted, ADR 0002) + Vite (Proposed, owner-given candidate) | Vue/Svelte/Solid, htmx (not evaluated) |
+| Frontend | React + TypeScript (Accepted, ADR 0002) + Vite + Vitest, no UI, router or data library (Accepted 2026-10-29, M4.1) | Vue/Svelte/Solid, htmx (not evaluated) |
 
 Approximate core-stack weight: 136 packages (A) vs 179 (B); excludes TLS, sessions and sha2.
 
@@ -345,5 +381,5 @@ Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md
 11. serde_json `preserve_order` / `arbitrary_precision` workspace-wide implications.
 12. ~~Session token hashing: `sha2` weight and license; cookie handling via `cookie`/`axum-extra` vs hand-written.~~ Resolved: hashing in PostgreSQL (M3.1), cookie hand-written (M3.3, see the admission notes).
 13. MSRV-aware resolver (resolver "3") behavior with the pinned toolchain.
-14. React license confirmation; frontend audit tooling.
+14. ~~React license confirmation; frontend audit tooling.~~ Resolved in M4.1: React 19.3.1 is MIT; `npm audit` and the license allow-list run in CI (see section 12). Still open: bus factor and release cadence of the Vite and Vitest toolchain, and the move to TypeScript 7 once `typescript-eslint` supports it.
 15. Re-run every `cargo info` check at decision time.

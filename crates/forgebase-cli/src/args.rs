@@ -41,7 +41,8 @@ pub enum Command {
     /// Serve the HTTP API (`/api/v1`) until Ctrl-C or SIGTERM (running requests get 10 seconds; a second signal exits at once). It does not run migrations: run `migrate`
     /// first. Environment: `FORGEBASE_LISTEN` (default `127.0.0.1:8000`),
     /// `FORGEBASE_ALLOWED_HOSTS` (comma separated host names without ports, default `localhost,127.0.0.1`) and
-    /// `FORGEBASE_DEV_INSECURE_COOKIES=1` (development only: no `Secure` on the session cookie).
+    /// `FORGEBASE_DEV_INSECURE_COOKIES=1` (development only: no `Secure` on the session cookie)
+    /// and `FORGEBASE_DESK_DIR` (the built desk, typically `desk/dist`, served under `/desk/`; unset: no desk).
     Serve {
         #[command(flatten)]
         doctypes: DocTypesDir,

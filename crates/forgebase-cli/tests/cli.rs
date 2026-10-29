@@ -1666,3 +1666,56 @@ fn serve_dev_mode_and_configuration() {
         .expect("run");
     assert_eq!(code(&output), Some(2));
 }
+
+#[test]
+fn serve_serves_the_desk_only_when_configured() {
+    let db = TestDb::new();
+    let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+
+    let desk = std::env::temp_dir().join(format!("forgebase_cli_desk_{}", std::process::id()));
+    std::fs::create_dir_all(desk.join("assets")).expect("desk directory");
+    std::fs::write(desk.join("index.html"), "<title>desk</title>").expect("index");
+    std::fs::write(desk.join("assets/app.js"), "1").expect("asset");
+
+    // Not configured: no desk.
+    let server = Server::start(&db, &[]);
+    let host = server.address.clone();
+    let (status, _, _) = server.request("GET", "/desk/", &host, &[], "");
+    assert_eq!(status, 404);
+    server.stop();
+
+    // Configured: the index and the asset, with the security headers.
+    let server = Server::start(
+        &db,
+        &[("FORGEBASE_DESK_DIR", desk.to_str().expect("UTF-8"))],
+    );
+    let host = server.address.clone();
+    let (status, head, body) = server.request("GET", "/desk/", &host, &[], "");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "<title>desk</title>");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("content-security-policy: default-src 'self'")
+    );
+    let (status, _, body) = server.request("GET", "/desk/assets/app.js", &host, &[], "");
+    assert_eq!((status, body.as_str()), (200, "1"));
+    server.stop();
+
+    // A directory without index.html ends the command with exit code 1.
+    let output = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+        .args(["serve", "--doctypes", DOCTYPES])
+        .env("FORGEBASE_DATABASE_URL", &db.url)
+        .env("FORGEBASE_DESK_DIR", desk.join("assets"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run");
+    assert_eq!(code(&output), Some(1));
+    assert!(
+        stderr(&output).contains("FORGEBASE_DESK_DIR"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stderr(&output).contains(&db.url), "{}", stderr(&output));
+    let _ = std::fs::remove_dir_all(&desk);
+}

@@ -74,3 +74,27 @@ jobs:
         run: rustup toolchain install
       - run: cargo install --locked cargo-deny --version 0.20.2
       - run: cargo deny --locked check
+
+  # The desk (React + TypeScript, desk/). Uses the Node that ships with the runner (no extra
+  # action). Also runs on the daily schedule, so a new npm advisory is noticed. `npm audit` fails
+  # the job for high and critical advisories (low and moderate are reported only).
+  desk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: desk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the Node version
+        run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
+      # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run licenses
+      - run: npm audit --audit-level=high

@@ -19,7 +19,7 @@ rust_decimal.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing", "formatting"] }
-tokio = { workspace = true, features = ["net", "sync"] }
+tokio = { workspace = true, features = ["fs", "net", "sync"] }
 
 [dev-dependencies]
 deadpool-postgres.workspace = true
