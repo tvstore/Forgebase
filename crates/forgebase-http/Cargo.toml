@@ -12,4 +12,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+forgebase-core.workspace = true
 forgebase-db.workspace = true
+axum.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["parsing", "formatting"] }
+tokio = { workspace = true, features = ["net", "sync"] }
+
+[dev-dependencies]
+deadpool-postgres.workspace = true
+tower.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

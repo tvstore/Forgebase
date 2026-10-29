@@ -33,7 +33,7 @@
 //!   documentation of the functions for the exact rules.
 //! - [`auth`]: users, roles, Argon2id password hashing, server-side sessions with CSRF tokens, API
 //!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP or
-//!   cookies yet; [`auth::AuthUser::caller`] gives the [`Caller`] for the document functions.
+//!   cookies here (they are in `forgebase-http`); [`auth::AuthUser::caller`] gives the [`Caller`] for the document functions.
 
 pub mod auth;
 mod document;

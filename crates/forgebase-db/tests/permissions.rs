@@ -1288,3 +1288,216 @@ async fn stored_links_to_unreadable_targets_do_not_block_update_or_submit() {
         Some(forgebase_core::document::DocStatus::Submitted)
     );
 }
+
+// ---- Stored Links are kept per field and per table ----------------------------------------
+
+/// Two Link fields with different targets and two child tables, one Link in each. The caller
+/// (`CaseWriter`) can read neither `party` nor `vendor`.
+const CASE: &str = r#"
+name = "case"
+label = "Case"
+[[fields]]
+name = "a"
+type = "link"
+target = "party"
+[[fields]]
+name = "b"
+type = "link"
+target = "vendor"
+[[fields]]
+name = "rows"
+type = "table"
+target = "case_row"
+[[fields]]
+name = "others"
+type = "table"
+target = "case_other"
+[[permissions]]
+role = "CaseWriter"
+read = true
+write = true
+create = true
+"#;
+
+const CASE_ROW: &str = r#"
+name = "case_row"
+label = "Case Row"
+is_child = true
+[[fields]]
+name = "a_ref"
+type = "link"
+target = "party"
+"#;
+
+const CASE_OTHER: &str = r#"
+name = "case_other"
+label = "Case Other"
+is_child = true
+[[fields]]
+name = "b_ref"
+type = "link"
+target = "vendor"
+"#;
+
+const VENDOR: &str = r#"
+name = "vendor"
+label = "Vendor"
+naming = { field = "email" }
+[[fields]]
+name = "email"
+type = "data"
+required = true
+unique = true
+"#;
+
+/// A stored Link is kept only in the field (and table) it is stored in: the same name moved to
+/// another field of another target DocType, or to the other table, is a new value and is checked
+/// against the caller's read access like any other.
+#[tokio::test]
+async fn the_kept_rule_is_scoped_per_field_and_per_table() {
+    let (db, reg) = setup_with(registry(&[
+        CASE,
+        CASE_ROW,
+        CASE_OTHER,
+        PARTY,
+        VENDOR,
+        TICKET,
+        TICKET_LINE,
+        MEMO,
+        SECRET,
+    ]))
+    .await;
+    let mut client = db.pool.get().await.unwrap();
+    let client = &mut **client;
+    // The same names exist as `party` and as `vendor`, so only the permission can refuse them.
+    for name in ["x1@x.y", "y1@x.y"] {
+        make_party(&db, &reg, name, &sys()).await;
+        insert(
+            client,
+            &reg,
+            "vendor",
+            doc(&[("email", text(name))]),
+            &sys(),
+        )
+        .await
+        .unwrap();
+    }
+    let u = user("u", &["CaseWriter"]);
+    let mut stored = doc(&[("a", text("x1@x.y")), ("b", text("y1@x.y"))]);
+    stored.tables.insert(
+        "rows".into(),
+        vec![BTreeMap::from([("a_ref".to_owned(), text("x1@x.y"))])],
+    );
+    stored.tables.insert(
+        "others".into(),
+        vec![BTreeMap::from([("b_ref".to_owned(), text("y1@x.y"))])],
+    );
+    let made = insert(client, &reg, "case", stored, &sys()).await.unwrap();
+
+    let rows = |table: &str, field: &str, name: &str| Changes {
+        values: BTreeMap::new(),
+        tables: BTreeMap::from([(
+            table.to_owned(),
+            vec![BTreeMap::from([(field.to_owned(), text(name))])],
+        )]),
+    };
+    let mut version = made.version;
+
+    // Refused: a stored name moved to the other Link field.
+    for (changes, expected) in [
+        (change("b", text("x1@x.y")), "b:vendor"),
+        (change("a", text("y1@x.y")), "a:party"),
+        // Moved between the tables: each table keeps only its own stored value.
+        (rows("others", "b_ref", "x1@x.y"), "others[1].b_ref:vendor"),
+        (rows("rows", "a_ref", "y1@x.y"), "rows[1].a_ref:party"),
+    ] {
+        let error = update(client, &reg, "case", &made.name, version, &changes, &u)
+            .await
+            .unwrap_err();
+        let found = link_not_found(&error);
+        assert_eq!(found.len(), 1, "{expected}: {error:?}");
+        assert_eq!(found[0].0, expected);
+    }
+    // Kept: the same values in their own fields and tables (a changed title would be no
+    // change at all, so the Links are rewritten as they are stored).
+    let same = Changes {
+        values: BTreeMap::from([
+            ("a".to_owned(), text("x1@x.y")),
+            ("b".to_owned(), text("y1@x.y")),
+        ]),
+        tables: BTreeMap::from([
+            (
+                "rows".to_owned(),
+                vec![
+                    BTreeMap::from([("a_ref".to_owned(), text("x1@x.y"))]),
+                    BTreeMap::from([("a_ref".to_owned(), text("x1@x.y"))]),
+                ],
+            ),
+            (
+                "others".to_owned(),
+                vec![BTreeMap::from([("b_ref".to_owned(), text("y1@x.y"))])],
+            ),
+        ]),
+    };
+    let updated = update(client, &reg, "case", &made.name, version, &same, &u)
+        .await
+        .unwrap();
+    version = updated.version;
+    assert_eq!(updated.tables["rows"].len(), 2);
+    assert_eq!(version, made.version + 1);
+}
+
+/// A `before_submit` hook that sets a Link to a document the caller cannot read gets the same
+/// `LinkNotFound` as the caller would for their own input: hooks do not widen read access.
+#[tokio::test]
+async fn a_before_submit_hook_cannot_link_to_an_unreadable_document() {
+    struct Linker(String);
+    impl DocTypeHooks for Linker {
+        fn before_submit(&self, _: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+            doc.values.insert("customer".to_owned(), text(&self.0));
+            Ok(())
+        }
+    }
+    let mut reg = registry(&[TICKET, TICKET_LINE, PARTY, MEMO, SECRET]);
+    reg.add_hooks("ticket", Arc::new(Linker("hidden@x.y".to_owned())))
+        .unwrap();
+    let (db, reg) = setup_with(reg).await;
+    let hidden = make_party(&db, &reg, "hidden@x.y", &sys()).await;
+    let made = make_ticket(&db, &reg, &sys()).await;
+    let mut client = db.pool.get().await.unwrap();
+    let client = &mut **client;
+
+    // `Submitter` reads tickets but has no right on `party`.
+    let error = submit(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        made.version,
+        &user("u", &["Submitter"]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        link_not_found(&error),
+        vec![("customer:party".to_owned(), hidden.name.clone())]
+    );
+    // Nothing was persisted: still a draft, and the same hook is fine for a caller who can read it.
+    let stored = get(client, &reg, "ticket", &made.name, &sys())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.version, made.version);
+    assert_eq!(stored.values["customer"], Value::Null);
+    let submitted = submit(
+        client,
+        &reg,
+        "ticket",
+        &made.name,
+        made.version,
+        &user("v", &["Submitter", "Reader"]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(submitted.values["customer"], text(&hidden.name));
+}

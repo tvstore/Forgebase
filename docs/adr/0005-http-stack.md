@@ -21,3 +21,7 @@ Use axum (0.8.x) on tokio, with tower-http only as needed (body limits, tracing,
 
 - axum is 0.x: expect a breaking migration roughly every 1-2 years; keeping it inside one crate limits the blast radius.
 - Middleware comes from the tower ecosystem.
+
+## Implementation note (M3.3, 2026-10-29)
+
+No decision changed. `forgebase-http` uses `axum` 0.8.9 with only the `http1`, `json`, `query` and `tokio` features, and **no `tower-http`**: the body limit is axum's `DefaultBodyLimit`, CORS is deliberately not used (owner decision 8: no CORS), and tracing and compression are not needed yet. Admission notes: [dependency-evaluation](../blueprint/dependency-evaluation.md#admission-notes-for-m33-2026-10-29).

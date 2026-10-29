@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use forgebase_db::DbError;
 use forgebase_db::auth::AuthError;
 
-use crate::json::JsonError;
+use forgebase_http::json::JsonError;
 
 /// Everything that can make a command fail.
 #[derive(Debug, thiserror::Error)]
@@ -15,6 +15,12 @@ pub enum CliError {
         "{0} is not set; set it to the PostgreSQL URL, for example postgres://user:password@localhost:5432/database"
     )]
     MissingDatabaseUrl(&'static str),
+    /// An environment variable of `serve` has an unusable value.
+    #[error("{0}")]
+    Config(String),
+    /// The server could not listen or stopped with an I/O error.
+    #[error("server error: {0}")]
+    Serve(std::io::Error),
     /// The DocType directory has unreadable or invalid files.
     #[error("cannot load DocType files:\n{}", bullets(.0))]
     DocTypes(Vec<String>),

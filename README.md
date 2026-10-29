@@ -6,7 +6,7 @@ Forgebase is a Rust framework for building business applications, inspired by th
 
 ## Status
 
-**M0 Foundations, M1 Metadata and storage and M2 Relationships and lifecycle are done** (M1.1: DocType metadata model and document validation in `forgebase-core`; M1.2: PostgreSQL pool, framework migrations and additive schema sync in `forgebase-db`; M1.3: document insert/get/update/delete in `forgebase-db` and the `forgebase` command-line tool). M2 was delivered in four PRs: M2.1 adds Link fields (foreign keys) and optimistic concurrency (`update` and `delete` need the expected version); M2.2 adds child tables (Table fields: rows saved with their parent in one transaction); M2.3 adds the lifecycle pipeline and hooks (`DocTypeHooks`, registered by the app; see ADR 0009); M2.4 adds docstatus (`submittable` DocTypes with `submit`, `cancel` and `amend`) and naming series (counters gapless per prefix). M3 is in progress: M3.1 adds users, roles, Argon2id passwords, server-side sessions, API tokens and login lockout (`forgebase_db::auth`, ADR 0010) and the `forgebase user` and `forgebase token` commands; M3.2 adds role permissions (`[[permissions]]` in the DocType file, enforced in every document operation, deny by default; ADR 0011) and the list query (`forgebase_db::list`, `forgebase doc list`); there is no HTTP API yet (M3.3). The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
+**M0 Foundations, M1 Metadata and storage, M2 Relationships and lifecycle and M3 Auth, permissions and REST API are done** (M1.1: DocType metadata model and document validation in `forgebase-core`; M1.2: PostgreSQL pool, framework migrations and additive schema sync in `forgebase-db`; M1.3: document insert/get/update/delete in `forgebase-db` and the `forgebase` command-line tool). M2 was delivered in four PRs: M2.1 adds Link fields (foreign keys) and optimistic concurrency (`update` and `delete` need the expected version); M2.2 adds child tables (Table fields: rows saved with their parent in one transaction); M2.3 adds the lifecycle pipeline and hooks (`DocTypeHooks`, registered by the app; see ADR 0009); M2.4 adds docstatus (`submittable` DocTypes with `submit`, `cancel` and `amend`) and naming series (counters gapless per prefix). M3 was delivered in three PRs: M3.1 adds users, roles, Argon2id passwords, server-side sessions, API tokens and login lockout (`forgebase_db::auth`, ADR 0010) and the `forgebase user` and `forgebase token` commands; M3.2 adds role permissions (`[[permissions]]` in the DocType file, enforced in every document operation, deny by default; ADR 0011) and the list query (`forgebase_db::list`, `forgebase doc list`); M3.3 adds the HTTP API (`forgebase serve`: `/api/v1/resource`, login and logout, cookie sessions with CSRF protection, API tokens, `Host` validation, no CORS). The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
 
 The repository is currently **private**. It is intended to be open source under the MIT license; it is not open source yet.
 
@@ -116,7 +116,7 @@ cargo run -p forgebase-cli -- doc list customer --doctypes examples/doctypes \
 
 ### Permissions
 
-A DocType file can list `[[permissions]]` (see [sales_order.toml](examples/doctypes/sales_order.toml)): a `role`, the rights it grants (`read`, `write`, `create`, `delete`, `submit`, `cancel`, `amend`) and optionally `if_owner = true` (the rights then apply to documents the user owns only). A user may do what any of their roles grants; the role `Administrator` may do everything; **a DocType without rules is closed to everyone else**. Child rows follow their parent. The rules are enforced by `forgebase-db` in every operation (`insert`, `get`, `update`, `delete`, `submit`, `cancel`, `amend`, `list`), which take a `Caller`: a user with roles (`AuthUser::caller()`), or the trusted system context. A document a user is not allowed to read is treated as if it did not exist (`get`, `list`, updates, links, errors), with the known limits listed in [ADR 0011](docs/adr/0011-permission-model-phase-1.md). The `forgebase doc` commands run as the system context, so the rules apply to real users once the HTTP API (M3.3) exists; to use them from Rust today, call `forgebase_db` with `Caller::user(...)`. See [ADR 0011](docs/adr/0011-permission-model-phase-1.md) and the [security model](docs/blueprint/security-model.md).
+A DocType file can list `[[permissions]]` (see [sales_order.toml](examples/doctypes/sales_order.toml)): a `role`, the rights it grants (`read`, `write`, `create`, `delete`, `submit`, `cancel`, `amend`) and optionally `if_owner = true` (the rights then apply to documents the user owns only). A user may do what any of their roles grants; the role `Administrator` may do everything; **a DocType without rules is closed to everyone else**. Child rows follow their parent. The rules are enforced by `forgebase-db` in every operation (`insert`, `get`, `update`, `delete`, `submit`, `cancel`, `amend`, `list`), which take a `Caller`: a user with roles (`AuthUser::caller()`), or the trusted system context. A document a user is not allowed to read is treated as if it did not exist (`get`, `list`, updates, links, errors), with the known limits listed in [ADR 0011](docs/adr/0011-permission-model-phase-1.md). The `forgebase doc` commands run as the system context; the rules apply to real users of the [HTTP API](#http-api) (and to Rust code that calls `forgebase_db` with `Caller::user(...)`). See [ADR 0011](docs/adr/0011-permission-model-phase-1.md) and the [security model](docs/blueprint/security-model.md).
 
 ### Users and tokens
 
@@ -137,6 +137,60 @@ cargo run -p forgebase-cli -- token revoke <key>
 ```
 
 Five consecutive failed logins for a username (each within 15 minutes of the previous one) lock it for 15 minutes; see [ADR 0010](docs/adr/0010-authentication-and-sessions.md) and the [security model](docs/blueprint/security-model.md).
+
+### HTTP API
+
+`forgebase serve` runs the API on `FORGEBASE_LISTEN` (default `127.0.0.1:8000`). It reads the DocType files like `migrate` but **does not run migrations**: run `migrate` first. Requests need a `Host` header from `FORGEBASE_ALLOWED_HOSTS` (comma separated host names without ports, default `localhost,127.0.0.1`; an entry with a port is refused at startup). Ctrl-C or SIGTERM stops accepting connections and lets running requests finish for up to 10 seconds; a second signal, or the end of that period, exits at once (exit code 0; open database transactions are rolled back by PostgreSQL when the connection closes). The session cookie is `Secure`, so browsers send it over HTTPS only: put a TLS-terminating reverse proxy in front (the application has no TLS). For local development over plain HTTP, `FORGEBASE_DEV_INSECURE_COOKIES=1` omits `Secure` (and prints a warning); never use it in production. There is no CORS: serve the front-end from the same origin.
+
+```sh
+# Prepare: tables, a user with the Administrator role (the example DocTypes name other roles; Administrator may do everything)
+cargo run -p forgebase-cli -- migrate --doctypes examples/doctypes
+printf '%s\n' 'a long password' | cargo run -p forgebase-cli -- user create root --role Administrator
+
+# Terminal 1: serve (development mode)
+FORGEBASE_DEV_INSECURE_COOKIES=1 cargo run -p forgebase-cli -- serve --doctypes examples/doctypes
+
+# Terminal 2: log in. The response has the one-time CSRF token; the session cookie is saved in jar.txt.
+CSRF=$(curl -s -c jar.txt -H 'Content-Type: application/json' \
+  -d '{"username": "root", "password": "a long password"}' \
+  http://localhost:8000/api/v1/login | sed -n 's/.*"csrf_token":"\([0-9a-f]*\)".*/\1/p')
+
+# Create (201). Changing requests with the cookie need the CSRF header; reads do not.
+curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"email": "ann@example.com", "full_name": "Ann", "tier": "gold", "loyalty_points": 12}' \
+  http://localhost:8000/api/v1/resource/customer
+
+# List with filters (a JSON array like `doc list --filter`), sort, limit and offset
+curl -s -b jar.txt -G http://localhost:8000/api/v1/resource/customer \
+  --data-urlencode 'filters=[{"field":"tier","op":"=","value":"gold"}]' \
+  --data-urlencode 'sort=loyalty_points:desc' --data-urlencode 'limit=10'
+
+# Read, then change with the version you read (PATCH needs {"version", "data"}; a stale version is 409 `conflict`)
+curl -s -b jar.txt http://localhost:8000/api/v1/resource/customer/ann@example.com
+curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"version": 1, "data": {"loyalty_points": 20}}' \
+  http://localhost:8000/api/v1/resource/customer/ann@example.com
+
+# Create a sales order (its name comes from the series; use the `name` in the response below), then submit it (submit, cancel and amend take {"version": N}; amend answers 201 with the new draft)
+curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"customer": "ann@example.com", "items": [{"description": "Widget", "qty": 2}]}' \
+  http://localhost:8000/api/v1/resource/sales_order
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"version": 1}' http://localhost:8000/api/v1/resource/sales_order/SO-2026-00001/submit
+
+# Delete (204; the version goes in the query string). Here it is refused with 409 `linked_document_exists`, because the sales order links to the customer
+curl -s -b jar.txt -X DELETE -H "X-Forgebase-CSRF: $CSRF" \
+  'http://localhost:8000/api/v1/resource/customer/ann@example.com?version=2'
+
+# Log out (204; clears the cookie and ends the session)
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" http://localhost:8000/api/v1/logout
+
+# A machine client uses an API token instead: no cookie, no CSRF header. The token header wins over any cookie.
+TOKEN=$(cargo run -q -p forgebase-cli -- token create root)    # prints key:secret once
+curl -s -H "Authorization: token $TOKEN" http://localhost:8000/api/v1/resource/customer
+```
+
+Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one. The route table, the request pipeline, the codes and the limits are in the [architecture](docs/blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-the-rest-proposed) and the [security model](docs/blueprint/security-model.md#the-http-layer-implemented-in-m33). `/api/v1/method` (custom endpoints) is not implemented.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks. To get oriented, read the blueprint in this order: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [milestones](docs/blueprint/milestones.md). Contributors and agents must follow [AGENTS.md](AGENTS.md).
 

@@ -24,4 +24,4 @@ rust_decimal.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing", "formatting"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
