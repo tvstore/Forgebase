@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 
 use forgebase_db::DbError;
+use forgebase_db::auth::AuthError;
 
 use crate::json::JsonError;
 
@@ -34,6 +35,9 @@ pub enum CliError {
     /// Writing the result failed.
     #[error("cannot write output: {0}")]
     Output(std::io::Error),
+    /// A user, role or token error. Never contains a password or a secret.
+    #[error("{0}")]
+    Auth(#[from] AuthError),
     /// A database or validation error.
     #[error("{}", describe_db(.0))]
     Db(#[from] DbError),

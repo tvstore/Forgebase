@@ -2,12 +2,12 @@
 //!
 //! Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3 and M2.4):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4 and M3.1):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
-//! - [`migrate_framework`]: Forgebase's own tables (`fb_migration`, `fb_doctype`, and `fb_series`, the
-//!   naming series counters, from migration 0002).
+//! - [`migrate_framework`]: Forgebase's own tables (`fb_migration`, `fb_doctype`, `fb_series`, the
+//!   naming series counters, from migration 0002, and the auth tables of migration 0003).
 //! - [`sync`]: additive DocType schema sync with dry-run, conflict refusal and `lock_timeout`;
 //!   Link fields become `uuid` columns with a foreign key (`ON DELETE RESTRICT`) and an index; a
 //!   child DocType's table has `id`, `parent_id` (foreign key `ON DELETE CASCADE`, indexed) and
@@ -26,7 +26,11 @@
 //!   the changes merged in. [`submit`], [`cancel`] and [`amend`] move a document of a `submittable`
 //!   DocType through draft, submitted and cancelled (M2.4), and a naming series takes its number
 //!   from `fb_series` inside the insert's transaction. No permissions and no renames yet.
+//! - [`auth`]: users, roles, Argon2id password hashing, server-side sessions with CSRF tokens, API
+//!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP,
+//!   cookies or permissions yet.
 
+pub mod auth;
 mod document;
 mod error;
 mod ident;

@@ -13,13 +13,13 @@ workspace = true
 
 [dependencies]
 forgebase-core.workspace = true
+argon2.workspace = true
 bytes.workspace = true
 deadpool-postgres.workspace = true
+getrandom.workspace = true
 rust_decimal = { workspace = true, features = ["db-tokio-postgres"] }
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
 tokio-postgres.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true

@@ -1,6 +1,6 @@
 # Security model
 
-Status: **Proposed** unless stated; of the sections below only identifier and value handling in `forgebase-db` (M1.2, M1.3, M2.1, M2.2) and the trust note for the command-line tool are implemented. Authentication, authorization and multi-site isolation are not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
+Status: **Proposed** unless stated; of the sections below identifier and value handling in `forgebase-db` (M1.2, M1.3, M2.1, M2.2), the trust note for the command-line tool and the storage side of authentication (M3.1, [ADR 0010](../adr/0010-authentication-and-sessions.md), Accepted) are implemented. Cookies and HTTP handling (M3.3), authorization (M3.2) and multi-site isolation are not. Architecture context: [architecture](architecture.md). Frappe behavior referenced is labelled in the [feature matrix](feature-matrix.md). Changes to authentication, authorization or multi-site isolation are high-impact: they need Stage 1 planning and independent Stage 3 review per [AGENTS.md](../../AGENTS.md).
 
 ## Principles
 
@@ -9,16 +9,21 @@ Status: **Proposed** unless stated; of the sections below only identifier and va
 - **Framework owns the dangerous parts.** Identifiers, SQL, transactions and sessions are handled by the framework, not by app code.
 - **Secrets stay out of the data plane** (see Secrets).
 
-## Authentication (milestone M3)
+## Authentication (milestone M3; storage side implemented in M3.1, [ADR 0010](../adr/0010-authentication-and-sessions.md))
 
 | Mechanism | Design |
 |---|---|
-| Browser sessions | Opaque random token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. Only a hash is stored in Postgres. Expiry and revocation supported. CSRF protection for cookie-authenticated state-changing requests. |
-| API tokens (machine clients) | Key + secret; the secret is stored hashed. |
-| Passwords | Argon2id (`argon2` crate; Proposed, see [dependency-evaluation](dependency-evaluation.md#8-authentication)). |
-| Deferred | OAuth/SSO, 2FA. |
+| Browser sessions | Opaque random token (32 bytes from the operating system, 64 hex characters). **Implemented (M3.1):** only the SHA-256 digest is stored in `fb_session`, with a CSRF token digest, the user, an absolute expiry (7 days) and an idle expiry (24 hours since last use); every login creates a new session; logout, password change and disabling the user delete sessions. **M3.3:** carried in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie; the CSRF check for cookie-authenticated state-changing requests (`check_csrf` exists since M3.1). |
+| API tokens (machine clients) | **Implemented (M3.1):** public key (32 hex) and secret (64 hex); only the secret's SHA-256 digest is stored; the secret is shown once; tokens do not expire and can be revoked; a disabled user's tokens stop working. |
+| Passwords | **Implemented (M3.1):** Argon2id (`argon2` 0.6) with m = 19456 KiB, t = 2, p = 1, random 16-byte salt, PHC string; verified with the parameters inside the string; 8 to 1024 bytes; hashing runs on the blocking thread pool. |
+| Login lockout | **Implemented (M3.1):** per submitted username (also unknown ones), 5 failures lock it for 15 minutes; counting is committed even when the login fails; concurrent attempts are serialized by a row lock. Unknown, disabled, wrong-password and locked all give one uniform error and spend one Argon2 verification (a dummy hash when there is no real one). |
+| Deferred | OAuth/SSO, 2FA, password reset by email. |
 
 JWT for first-party browser sessions is avoided (revocation complexity).
+
+**Secrets rule.** No password, session token, CSRF token or API secret is stored in plaintext, logged, or part of an error, `Debug` or `Display` output. The only exceptions are the one-time return values of `login` and `create_api_token` and the one-time output of `forgebase token create`. Types that carry a secret implement `Debug` by hand and redact it; tests assert this.
+
+**Known limits (M3.1).** The lockout can be used to lock a known user out (denial of service); `fb_login_failure` has one small row per failed username that is not cleaned up automatically; a caller that runs `login` inside its own transaction loses the failure counting if that transaction rolls back (call it on a pooled client); digests are compared by PostgreSQL, not in constant time (acceptable for 256-bit random values); there is no password complexity or breach check; Argon2 memory use (about 19 MiB per verification) needs concurrency limits in the HTTP layer.
 
 ## Authorization
 
@@ -55,7 +60,7 @@ Config file and environment variables only; never in DB metadata or logs. Sessio
 
 ## The command-line tool (M1.3)
 
-`forgebase` is a **trusted local tool**: whoever can run it with a database URL has full access to that database. It has no authentication and no permission checks (those arrive with M3 in the HTTP layer), and `--actor` is only recorded in `owner` / `modified_by` on insert and update (on delete it is given to hooks and not stored); it is not verified and must not be treated as an identity. The database URL (with its password) is read from the `FORGEBASE_DATABASE_URL` environment variable, never from a command-line argument, and is not printed. Input is checked before any SQL runs (JSON mapping, then core validation), and a datetime whose UTC instant is outside the supported range is an error, not a panic.
+`forgebase` is a **trusted local tool**: whoever can run it with a database URL has full access to that database, including creating users, setting passwords and creating API tokens (`forgebase user ...` and `forgebase token ...`, M3.1; passwords are read from standard input, never from an argument or environment variable, and `token create` is the only output of a secret). It has no authentication and no permission checks (those arrive with M3 in the HTTP layer), and `--actor` is only recorded in `owner` / `modified_by` on insert and update (on delete it is given to hooks and not stored); it is not verified and must not be treated as an identity. The database URL (with its password) is read from the `FORGEBASE_DATABASE_URL` environment variable, never from a command-line argument, and is not printed. Input is checked before any SQL runs (JSON mapping, then core validation), and a datetime whose UTC instant is outside the supported range is an error, not a panic.
 
 ## Audit
 
@@ -69,11 +74,11 @@ OAuth/SSO, 2FA, field-level permissions, user permissions, sharing, full audit/v
 
 Not decided; each needs an answer in the M3 plan:
 
-- Login rate limiting / brute-force protection.
-- Session rotation: issue a new session token on login, and invalidate sessions on password change and logout.
+- ~~Login rate limiting / brute-force protection.~~ Answered in M3.1 (ADR 0010): per-username lockout (5 failures, 15 minutes). Throttling by client address and bounded login concurrency belong to M3.3.
+- ~~Session rotation: issue a new session token on login, and invalidate sessions on password change and logout.~~ Answered in M3.1 (ADR 0010): a new session on every login; password change and disabling delete all of the user's sessions; logout deletes the session.
 - CORS policy when cookies are used (CORS middleware is planned in [ADR 0005](../adr/0005-http-stack.md)).
 - `Host` header validation in single-site mode (today it appears only under multi-site).
-- Argon2id parameters (see [dependency-evaluation, open question 9](dependency-evaluation.md#open-questions)).
+- ~~Argon2id parameters~~ Answered in M3.1 (ADR 0010): m = 19456 KiB, t = 2, p = 1 (see [dependency-evaluation, open question 9](dependency-evaluation.md#open-questions)).
 - Permission-aware Link name resolution: the API resolves a target `name` to `id` internally, so foreign key or lookup errors must not reveal whether a document the user cannot read exists. M2.1 resolves names without any permission check (the command-line tool is trusted); its `LinkNotFound` and `LinkedDocumentExists` errors confirm that a document does or does not exist, and the referencing DocType is named. M3 must decide what an unprivileged caller may learn from them.
 - Link lookups take `FOR KEY SHARE` on the target row, which PostgreSQL allows only to a role with `UPDATE` privilege on the target table. A read-only database role (planned for M3) therefore cannot write documents that have Link fields unless it also gets that privilege or the lookup changes.
 

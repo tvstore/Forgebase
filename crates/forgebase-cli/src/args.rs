@@ -31,6 +31,69 @@ pub enum Command {
     /// Insert, read, update, delete, submit, cancel and amend single documents.
     #[command(subcommand)]
     Doc(DocCommand),
+    /// Create and manage users and their roles. Passwords are read from standard input.
+    #[command(subcommand)]
+    User(UserCommand),
+    /// Create and revoke API tokens.
+    #[command(subcommand)]
+    Token(TokenCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UserCommand {
+    /// Create an enabled user. The password is read from the first line of standard input.
+    Create {
+        /// Username: 1 to 140 ASCII letters, digits and `_ . @ -` (case-sensitive).
+        username: String,
+        /// A role to give the user; repeat for several.
+        #[arg(long = "role", value_name = "ROLE")]
+        roles: Vec<String>,
+    },
+    /// Change a user's password (read from the first line of standard input) and end all of the
+    /// user's sessions.
+    SetPassword {
+        /// Username.
+        username: String,
+    },
+    /// Give a user a role.
+    AddRole {
+        /// Username.
+        username: String,
+        /// Role name.
+        role: String,
+    },
+    /// Take a role from a user.
+    RemoveRole {
+        /// Username.
+        username: String,
+        /// Role name.
+        role: String,
+    },
+    /// Disable a user: no login, and its sessions and API tokens stop working.
+    Disable {
+        /// Username.
+        username: String,
+    },
+    /// Enable a disabled user.
+    Enable {
+        /// Username.
+        username: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenCommand {
+    /// Create an API token for a user and print `key:secret` once. The secret cannot be shown
+    /// again; store it now.
+    Create {
+        /// Username.
+        username: String,
+    },
+    /// Revoke an API token by its key.
+    Revoke {
+        /// The key (the part before the colon).
+        key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

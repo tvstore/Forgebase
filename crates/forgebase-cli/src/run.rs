@@ -1,13 +1,16 @@
 //! Executes the commands.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::time::Duration;
 
 use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_db::auth;
 use forgebase_db::{DbError, StoredDocument, SyncOptions};
 
-use crate::args::{ActorArg, Command, DocCommand, DocTypesDir, VersionArg};
+use crate::args::{
+    ActorArg, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
+};
 use crate::doctypes::load_dir;
 use crate::error::CliError;
 use crate::json::{Input, document_to_json, parse_input};
@@ -35,6 +38,8 @@ pub async fn run(command: Command) -> Result<(), CliError> {
             write_stdout(&migrate_report(&report, dry_run))
         }
         Command::Doc(command) => execute(&url, prepare(command)?).await,
+        Command::User(command) => user(&url, command).await,
+        Command::Token(command) => token(&url, command).await,
     }
 }
 
@@ -284,6 +289,85 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
         }
     };
     print_document(&stored)
+}
+
+/// Runs a `user` command. The password (if any) is read from standard input before the database
+/// is touched, and never printed.
+async fn user(url: &str, command: UserCommand) -> Result<(), CliError> {
+    let password = match &command {
+        UserCommand::Create { .. } | UserCommand::SetPassword { .. } => Some(read_password()?),
+        _ => None,
+    };
+    let pool = forgebase_db::connect(url).await?;
+    let mut client = pool.get().await.map_err(DbError::from)?;
+    let client = &mut **client;
+    let password = password.as_deref().unwrap_or_default();
+    let text = match command {
+        UserCommand::Create { username, roles } => {
+            let roles: Vec<&str> = roles.iter().map(String::as_str).collect();
+            auth::create_user(client, &username, password, &roles).await?;
+            format!("created user {username}\n")
+        }
+        UserCommand::SetPassword { username } => {
+            auth::set_password(client, &username, password).await?;
+            format!("changed the password of user {username}; its sessions were ended\n")
+        }
+        UserCommand::AddRole { username, role } => {
+            if auth::add_role(client, &username, &role).await? {
+                format!("added role {role} to user {username}\n")
+            } else {
+                format!("user {username} has role {role} already\n")
+            }
+        }
+        UserCommand::RemoveRole { username, role } => {
+            if auth::remove_role(client, &username, &role).await? {
+                format!("removed role {role} from user {username}\n")
+            } else {
+                format!("user {username} does not have role {role}\n")
+            }
+        }
+        UserCommand::Disable { username } => {
+            auth::set_enabled(client, &username, false).await?;
+            format!("disabled user {username}; its sessions were ended\n")
+        }
+        UserCommand::Enable { username } => {
+            auth::set_enabled(client, &username, true).await?;
+            format!("enabled user {username}\n")
+        }
+    };
+    write_stdout(&text)
+}
+
+/// Runs a `token` command. `create` prints `key:secret` and nothing else.
+async fn token(url: &str, command: TokenCommand) -> Result<(), CliError> {
+    let pool = forgebase_db::connect(url).await?;
+    let client = pool.get().await.map_err(DbError::from)?;
+    let client = &**client;
+    match command {
+        TokenCommand::Create { username } => {
+            let token = auth::create_api_token(client, &username).await?;
+            write_stdout(&format!("{}:{}\n", token.key, token.secret))
+        }
+        TokenCommand::Revoke { key } => {
+            auth::revoke_api_token(client, &key).await?;
+            write_stdout(&format!("revoked API token {key}\n"))
+        }
+    }
+}
+
+/// The first line of standard input without its line ending. At most 4096 bytes are read, far
+/// more than the longest valid password, so a runaway input cannot fill memory.
+fn read_password() -> Result<String, CliError> {
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .take(4096)
+        .read_line(&mut line)
+        .map_err(CliError::Stdin)?;
+    while line.ends_with(['\n', '\r']) {
+        line.pop();
+    }
+    Ok(line)
 }
 
 fn database_url() -> Result<String, CliError> {

@@ -234,6 +234,18 @@ Alternatives (not evaluated in the research; all Unverified, from general knowle
 
 **Recommendation (Proposed):** argon2 (Argon2id) + custom DB-backed opaque session tokens and hashed API tokens. Alternative: tower-sessions with a self-written store.
 
+#### Admission notes for M3.1 (2026-10-29)
+
+Approved by the owner with the M3 plan; recorded in [ADR 0010](../adr/0010-authentication-and-sessions.md). Licenses checked with `cargo deny --locked check` (licenses ok); MSRV from `cargo metadata`, all at or below 1.85 (project MSRV 1.97; `cargo +1.97 check` passes).
+
+| Dependency | Where | Need | Alternatives considered | Maintenance, weight |
+|---|---|---|---|---|
+| `argon2` 0.6.0 (MIT OR Apache-2.0, MSRV 1.85), features `alloc` and `password-hash` only | `forgebase-db` | Argon2id password hashing and verification of PHC strings. | bcrypt (72-byte input limit, not memory-hard), scrypt, hand-written: no. Argon2id is the default recommendation (Unverified, see below). | RustCrypto, pure Rust. New packages in `Cargo.lock`: `argon2`, `password-hash` 0.6.1, `phc` 0.6.1, `base64ct` 1.8.3, `blake2` 0.11.0 (all MIT or Apache-2.0, MSRV 1.85); `cpufeatures` was already there. The `getrandom` and `parallel` features are off: the salt comes from our own `getrandom` call and hashing is single-lane. `password-hash` comes only through `argon2`'s re-exports, not as a direct dependency. |
+| `getrandom` 0.4.3 (MIT OR Apache-2.0, MSRV 1.85), default features | `forgebase-db` | 32-byte tokens and the 16-byte salt from the operating system's random source (`getrandom::fill`). | `uuid`'s internal use (not an API), `rand` (more weight, not needed). | rust-random organisation. Version 0.4.3 was already in the tree (through `uuid` and others); it is now also a direct dependency. No new package. |
+| `tokio` (normal dependency of `forgebase-db`; features unchanged: `macros`, `rt-multi-thread`) | `forgebase-db` | `tokio::task::spawn_blocking` so Argon2 does not block the async executor. | A dedicated thread pool: more code. | Already in the tree (tokio-postgres, and a dev-dependency of this crate before). |
+
+Hashing of tokens needs no crate: SHA-256 is computed by PostgreSQL (`sha256(convert_to($1::text, 'UTF8'))`), as for migration checksums. Parameters: m = 19456 KiB, t = 2, p = 1; they match the OWASP Password Storage Cheat Sheet's minimum Argon2id configuration as far as known (Unverified: the cheat sheet was not re-read for this change). The crate's API change between 0.5 and 0.6 does not matter here: no 0.5 code existed. No independent audit of the crate was checked (Unverified).
+
 ### 9. Background jobs
 
 - apalis 1.0.0 is very new (still at 1.0.0-rc.4 in Feb 2026; Source-indexed, https://lib.rs/crates/apalis), apalis-postgres has **no license field**, 155 packages, and is built on sqlx.
@@ -315,7 +327,7 @@ Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md
 6. figment: upstream activity.
 7. apalis-postgres: missing license metadata and maturity.
 8. axum: any announced 0.9 plans; tokio's current LTS line.
-9. argon2 0.6: API changes, audit status, current OWASP Argon2id parameters.
+9. ~~argon2 0.6: API changes, audit status, current OWASP Argon2id parameters.~~ Partly resolved in M3.1: admitted at 0.6.0 (features `alloc`, `password-hash`), parameters m = 19456 KiB, t = 2, p = 1 (owner decision, ADR 0010). Audit status and a re-check of the current OWASP numbers stay Unverified.
 10. ~~Decimal and date/time types~~ Resolved (Accepted, owner decision 2026-10-28): `rust_decimal` and `time`, see the section in 4. Database access.
 11. serde_json `preserve_order` / `arbitrary_precision` workspace-wide implications.
 12. Session token hashing: `sha2` weight and license; cookie handling via `cookie`/`axum-extra` vs hand-written.

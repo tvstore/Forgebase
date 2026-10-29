@@ -246,9 +246,9 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 2 pending"), "{text}");
+    assert!(text.contains("framework migrations: 3 pending"), "{text}");
     assert!(
-        text.contains("0001 init") && text.contains("0002 series"),
+        text.contains("0001 init") && text.contains("0002 series") && text.contains("0003 auth"),
         "{text}"
     );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
@@ -283,7 +283,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 2 applied"), "{text}");
+    assert!(text.contains("framework migrations: 3 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -291,7 +291,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
         Some("doc_customer")
     );
     assert_eq!(
-        db.scalar("SELECT count(*)::text FROM pg_constraint WHERE contype = 'f'")
+        db.scalar("SELECT count(*)::text FROM pg_constraint WHERE contype = 'f' AND conrelid::regclass::text LIKE 'doc\\_%'")
             .as_deref(),
         // customer -> customer_group, sales_order -> customer, sales_order_item -> sales_order
         Some("3")
@@ -1133,4 +1133,157 @@ fn submit_cancel_and_amend_end_to_end() {
     assert_eq!(code(&data), Some(2), "a usage error: {}", stderr(&data));
     let counter = db.scalar("SELECT current::text FROM fb_series");
     assert_eq!(counter.as_deref(), Some("1"));
+}
+
+const SECRET_PASSWORD: &str = "s3cret pass phrase";
+
+fn migrated_db() -> TestDb {
+    let db = TestDb::new();
+    let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    db
+}
+
+#[test]
+fn user_commands_manage_users_and_roles() {
+    let db = migrated_db();
+
+    // The password comes from the first line of standard input only.
+    let out = db.forgebase_with_stdin(
+        &[
+            "user", "create", "alice", "--role", "Sales", "--role", "Admin",
+        ],
+        Some(&format!("{SECRET_PASSWORD}\nsecond line is ignored\n")),
+    );
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "created user alice\n");
+    assert!(!stdout(&out).contains(SECRET_PASSWORD) && !stderr(&out).contains(SECRET_PASSWORD));
+    assert_eq!(
+        db.scalar("SELECT string_agg(role, ',' ORDER BY role) FROM fb_user_role"),
+        Some("Admin,Sales".to_owned())
+    );
+    let hash = db.scalar("SELECT password_hash FROM fb_user").unwrap();
+    assert!(hash.starts_with("$argon2id$"), "{hash}");
+    assert!(!hash.contains(SECRET_PASSWORD));
+
+    // A duplicate, a bad password and a missing password are errors that never show the password.
+    let out = db.forgebase_with_stdin(&["user", "create", "alice"], Some("another password\n"));
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
+    let out = db.forgebase_with_stdin(&["user", "create", "bob"], Some("short\n"));
+    assert_eq!(code(&out), Some(1));
+    assert!(
+        stderr(&out).contains("invalid password"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("short\n"));
+    let out = db.forgebase_with_stdin(&["user", "create", "bob"], Some(""));
+    assert_eq!(code(&out), Some(1));
+    assert!(
+        stderr(&out).contains("invalid password"),
+        "{}",
+        stderr(&out)
+    );
+    // The password is never an argument: a second positional argument is a usage error.
+    let out = db.forgebase(&["user", "create", "bob", "hunter2hunter2"]);
+    assert_eq!(code(&out), Some(2));
+
+    let out = db.forgebase(&["user", "add-role", "alice", "Accounts"]);
+    assert_eq!(stdout(&out), "added role Accounts to user alice\n");
+    let out = db.forgebase(&["user", "add-role", "alice", "Accounts"]);
+    assert_eq!(stdout(&out), "user alice has role Accounts already\n");
+    let out = db.forgebase(&["user", "remove-role", "alice", "Admin"]);
+    assert_eq!(stdout(&out), "removed role Admin from user alice\n");
+    let out = db.forgebase(&["user", "remove-role", "alice", "Admin"]);
+    assert_eq!(stdout(&out), "user alice does not have role Admin\n");
+    assert_eq!(
+        db.scalar("SELECT string_agg(role, ',' ORDER BY role) FROM fb_user_role"),
+        Some("Accounts,Sales".to_owned())
+    );
+    let out = db.forgebase(&["user", "add-role", "nobody", "Admin"]);
+    assert_eq!(code(&out), Some(1));
+    assert!(
+        stderr(&out).contains("user `nobody` not found"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = db.forgebase(&["user", "disable", "alice"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        db.scalar("SELECT enabled::text FROM fb_user"),
+        Some("false".into())
+    );
+    let out = db.forgebase(&["user", "enable", "alice"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        db.scalar("SELECT enabled::text FROM fb_user"),
+        Some("true".into())
+    );
+
+    // Set the password (CRLF line ending stripped) and end the sessions.
+    db.exec(
+        "INSERT INTO fb_session (token_hash, csrf_hash, user_id, expires_at) \
+         SELECT '\\x00', '\\x01', id, now() + interval '1 day' FROM fb_user",
+    );
+    let before = db.scalar("SELECT password_hash FROM fb_user").unwrap();
+    let out = db.forgebase_with_stdin(
+        &["user", "set-password", "alice"],
+        Some("a new password phrase\r\n"),
+    );
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert!(!stdout(&out).contains("a new password phrase"));
+    assert_ne!(
+        db.scalar("SELECT password_hash FROM fb_user").unwrap(),
+        before
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_session"),
+        Some("0".into())
+    );
+}
+
+#[test]
+fn token_create_prints_the_secret_once_and_revoke_works() {
+    let db = migrated_db();
+    let out = db.forgebase_with_stdin(&["user", "create", "alice"], Some("an ordinary password\n"));
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+
+    let out = db.forgebase(&["token", "create", "alice"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    let printed = stdout(&out);
+    let (key, secret) = printed.trim_end().split_once(':').expect("key:secret");
+    assert_eq!((key.len(), secret.len()), (32, 64), "{printed}");
+    assert!(printed.ends_with('\n') && printed.lines().count() == 1);
+    // The secret is not stored; the digest is.
+    assert_eq!(
+        db.scalar("SELECT key FROM fb_api_token"),
+        Some(key.to_owned())
+    );
+    let dump = db.scalar("SELECT t::text FROM fb_api_token t").unwrap();
+    assert!(!dump.contains(secret), "{dump}");
+    assert_eq!(
+        db.scalar(&format!(
+            "SELECT (secret_hash = sha256(convert_to('{secret}', 'UTF8')))::text FROM fb_api_token"
+        )),
+        Some("true".into())
+    );
+
+    let out = db.forgebase(&["token", "revoke", key]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("revoked API token {key}\n"));
+    assert!(!stdout(&out).contains(secret));
+    assert_eq!(
+        db.scalar("SELECT (revoked_at IS NOT NULL)::text FROM fb_api_token"),
+        Some("true".into())
+    );
+
+    let out = db.forgebase(&["token", "revoke", "nope"]);
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("API token `nope` not found"));
+    let out = db.forgebase(&["token", "create", "nobody"]);
+    assert_eq!(code(&out), Some(1));
+    assert_eq!(stdout(&out), "");
 }

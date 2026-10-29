@@ -20,6 +20,7 @@ async fn migrates_empty_database_and_is_idempotent() {
         vec![
             vec!["1".to_owned(), "init".into(), "64".into()],
             vec!["2".to_owned(), "series".into(), "64".into()],
+            vec!["3".to_owned(), "auth".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -35,7 +36,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["2".to_owned()]]
+        vec![vec!["3".to_owned()]]
     );
 }
 
@@ -60,36 +61,68 @@ async fn the_series_counter_table_is_created_by_migration_2() {
     );
 }
 
-#[tokio::test]
-async fn a_database_at_migration_1_is_upgraded_to_2() {
-    let db = TestDb::new().await;
-    let mut client = db.pool.get().await.unwrap();
-    // Apply only migration 1 by hand, with the checksum the runner computes.
-    let first = &MIGRATIONS[0];
+/// Applies the first `count` migrations by hand, with the checksums the runner computes.
+async fn apply_first(db: &TestDb, count: usize) {
     db.exec(
         "CREATE TABLE fb_migration (version integer PRIMARY KEY, name text NOT NULL, \
          checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
     )
     .await;
-    db.exec(first.sql).await;
-    db.exec(&format!(
-        "INSERT INTO fb_migration (version, name, checksum) VALUES (1, 'init', \
-         encode(sha256(convert_to($sql${}$sql$, 'UTF8')), 'hex'))",
-        first.sql
-    ))
-    .await;
+    for migration in &MIGRATIONS[..count] {
+        db.exec(migration.sql).await;
+        db.exec(&format!(
+            "INSERT INTO fb_migration (version, name, checksum) VALUES ({}, '{}', \
+             encode(sha256(convert_to($sql${}$sql$, 'UTF8')), 'hex'))",
+            migration.version, migration.name, migration.sql
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
+    let db = TestDb::new().await;
+    let mut client = db.pool.get().await.unwrap();
+    apply_first(&db, 1).await;
     let applied = migrate_framework(&mut client, false).await.unwrap();
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].version, 2);
+    assert_eq!(
+        applied.iter().map(|m| m.version).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY version")
             .await,
-        vec![vec!["1".to_owned()], vec!["2".to_owned()]]
+        vec![vec!["1".to_owned()], vec!["2".into()], vec!["3".into()]]
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_series").await,
         vec![vec!["0".to_owned()]]
     );
+}
+
+#[tokio::test]
+async fn a_database_at_migration_2_is_upgraded_to_3() {
+    let db = TestDb::new().await;
+    let mut client = db.pool.get().await.unwrap();
+    apply_first(&db, 2).await;
+    let applied = migrate_framework(&mut client, false).await.unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].version, 3);
+    assert_eq!(applied[0].name, "auth");
+    for table in [
+        "fb_user",
+        "fb_user_role",
+        "fb_session",
+        "fb_api_token",
+        "fb_login_failure",
+    ] {
+        assert_eq!(
+            db.rows(&format!("SELECT count(*)::text FROM {table}"))
+                .await,
+            vec![vec!["0".to_owned()]],
+            "{table}"
+        );
+    }
 }
 
 #[tokio::test]
