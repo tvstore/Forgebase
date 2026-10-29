@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
+use crate::series::{SeriesError, SeriesPattern};
 
 /// Default `max_length` of a Data field.
 pub const DEFAULT_MAX_LENGTH: u32 = 140;
@@ -32,6 +33,10 @@ pub struct DocType {
     /// A child DocType: rows of a parent's table field, no documents or names of its own.
     /// A child has random naming, no Table fields (no nesting) and no `unique` fields.
     pub is_child: bool,
+    /// A submittable DocType has a docstatus (draft, submitted, cancelled) and can be amended
+    /// (M2.4): its table gets the `docstatus` and `amended_from` columns. It cannot be a child
+    /// DocType and cannot use [`Naming::Field`].
+    pub submittable: bool,
 }
 
 /// One field of a [`DocType`].
@@ -48,6 +53,10 @@ pub struct DocField {
     pub required: bool,
     /// Values must be unique across documents.
     pub unique: bool,
+    /// The field may still be changed on a submitted document. Only allowed on a column field
+    /// (not a Table field) of a submittable DocType; the rows of Table fields are always locked
+    /// once the document is submitted.
+    pub allow_on_submit: bool,
 }
 
 /// The closed set of field types. Link arrived in M2.1, Table in M2.2.
@@ -127,6 +136,9 @@ pub enum Naming {
     Random,
     /// The value of the named field. That field must be a required, unique Data field.
     Field(String),
+    /// A generated name from a counter, such as `INV-2026-00007`, see [`SeriesPattern`]
+    /// (`naming = { series = "INV-.YYYY.-.#####" }`). Not allowed on a child DocType.
+    Series(SeriesPattern),
 }
 
 /// One problem found in a DocType definition.
@@ -255,14 +267,49 @@ pub enum DefinitionError {
         option: String,
     },
     /// `naming` is a string other than `"random"`.
-    #[error("unknown naming strategy `{found}` (expected \"random\" or {{ field = \"<name>\" }})")]
+    #[error(
+        "unknown naming strategy `{found}` (expected \"random\", {{ field = \"<name>\" }} or {{ series = \"<pattern>\" }})"
+    )]
     UnknownNamingStrategy {
         /// The rejected value.
         found: String,
     },
-    /// `naming` is neither a string nor a table with the single key `field`.
-    #[error("naming must be \"random\" or {{ field = \"<fieldname>\" }}")]
+    /// `naming` is neither a string nor a table with the single key `field` or `series`.
+    #[error(
+        "naming must be \"random\", {{ field = \"<fieldname>\" }} or {{ series = \"<pattern>\" }}"
+    )]
     MalformedNaming,
+    /// The series pattern of `naming = { series = ... }` is not valid.
+    #[error("naming series pattern `{pattern}` {reason}")]
+    InvalidSeriesPattern {
+        /// The rejected pattern.
+        pattern: String,
+        /// Why it was rejected.
+        reason: SeriesError,
+    },
+    /// A child DocType is `submittable`; only the parent has a docstatus.
+    #[error("a child doctype cannot be submittable (the document that owns its rows is)")]
+    ChildSubmittable,
+    /// A submittable DocType uses field naming; amended documents are named
+    /// `<original>-<n>`, which a field value cannot provide.
+    #[error(
+        "a submittable doctype cannot use field naming (an amended document is named <original>-<n>); use random naming or a series"
+    )]
+    SubmittableWithFieldNaming,
+    /// `allow_on_submit` on a field of a DocType that is not submittable.
+    #[error("field `{field}`: allow_on_submit needs a submittable doctype (`submittable = true`)")]
+    AllowOnSubmitNotSubmittable {
+        /// The field.
+        field: String,
+    },
+    /// `allow_on_submit` on a Table field: the rows of a submitted document are always locked.
+    #[error(
+        "field `{field}`: a table field cannot be allow_on_submit (its rows are locked once submitted)"
+    )]
+    AllowOnSubmitTable {
+        /// The field.
+        field: String,
+    },
     /// The naming field does not exist.
     #[error("naming refers to field `{field}`, which does not exist")]
     NamingFieldMissing {
@@ -514,6 +561,28 @@ impl DocType {
                 errors.push(DefinitionError::DuplicateField {
                     field: name.clone(),
                 });
+            }
+        }
+        for field in &self.fields {
+            if !field.allow_on_submit {
+                continue;
+            }
+            if matches!(field.field_type, FieldType::Table { .. }) {
+                errors.push(DefinitionError::AllowOnSubmitTable {
+                    field: field.name.clone(),
+                });
+            } else if !self.submittable {
+                errors.push(DefinitionError::AllowOnSubmitNotSubmittable {
+                    field: field.name.clone(),
+                });
+            }
+        }
+        if self.submittable {
+            if self.is_child {
+                errors.push(DefinitionError::ChildSubmittable);
+            }
+            if matches!(self.naming, Naming::Field(_)) {
+                errors.push(DefinitionError::SubmittableWithFieldNaming);
             }
         }
         if self.is_child {
@@ -861,6 +930,7 @@ mod tests {
             field_type,
             required: false,
             unique: false,
+            allow_on_submit: false,
         }
     }
 
@@ -871,6 +941,7 @@ mod tests {
             naming: Naming::Random,
             fields,
             is_child: false,
+            submittable: false,
         }
     }
 

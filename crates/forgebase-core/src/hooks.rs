@@ -19,7 +19,17 @@
 //! |---|---|
 //! | insert | `before_insert`, `validate`, framework validation, Link resolution, naming, write |
 //! | update | lock and load the stored document (not found and version conflict are reported here, before any hook), merge the changes, `validate`, framework validation of the whole document, Link resolution, write |
-//! | delete | lock and load the stored document (not found and version conflict as above), `before_delete`, delete |
+//! | delete | lock and load the stored document (not found and version conflict as above), docstatus check, `before_delete`, delete |
+//! | submit | lock and load the stored document (as above), docstatus check (draft only), `validate`, `before_submit`, framework validation of the whole document, Link resolution, write with docstatus 1 |
+//! | cancel | lock and load the stored document (as above), docstatus check (submitted only), `before_cancel`, write with docstatus 2 |
+//! | amend | lock and load the cancelled document (as above), docstatus check (cancelled only, not amended yet), then the **insert** pipeline on a copy of it: `before_insert`, `validate`, framework validation, Link resolution, naming (the amended name), write as a draft |
+//!
+//! `submit`, `cancel` and `amend` exist only for DocTypes with `submittable = true`. A hook sees
+//! which operation it runs for in [`HookContext::operation`]: `validate` runs for
+//! [`Operation::Insert`], [`Operation::Update`], [`Operation::Submit`] and [`Operation::Amend`],
+//! and `before_insert` for [`Operation::Insert`] and [`Operation::Amend`] (an amended
+//! document is a new draft, so the hooks that every new document goes through run for it; check
+//! the operation where the two must differ).
 //!
 //! # Rules
 //!
@@ -90,8 +100,8 @@ use std::fmt;
 
 use crate::document::Document;
 
-/// The operation a hook runs for. New operations are added in later milestones (submit and
-/// cancel), so match with a wildcard arm.
+/// The operation a hook runs for. New operations may be added later, so match with a wildcard
+/// arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Operation {
@@ -101,6 +111,12 @@ pub enum Operation {
     Update,
     /// An existing document is being deleted.
     Delete,
+    /// A draft of a submittable DocType is being submitted.
+    Submit,
+    /// A submitted document is being cancelled.
+    Cancel,
+    /// A cancelled document is being amended: a new draft is created from a copy of it.
+    Amend,
 }
 
 /// What a hook is told about the operation, besides the document.
@@ -148,8 +164,6 @@ impl std::error::Error for HookError {}
 /// [module documentation](self) for the pipeline order and the rules every hook follows.
 ///
 /// A hook that returns an error rejects the whole operation; nothing is persisted.
-/// `before_submit` and `before_cancel` will be added as further default methods with
-/// docstatus (M2.4), so adding them does not break existing implementations.
 pub trait DocTypeHooks: Send + Sync {
     /// Runs first when a document is inserted, on the input document, which may be modified.
     /// The document is not validated yet.
@@ -158,8 +172,9 @@ pub trait DocTypeHooks: Send + Sync {
         Ok(())
     }
 
-    /// Runs on insert (after `before_insert`) and on update. The document may be modified.
-    /// It is not validated yet by the framework.
+    /// Runs on insert (after `before_insert`), on update, on submit (before `before_submit`) and
+    /// on amend (after `before_insert`). The document may be modified. It is not validated yet
+    /// by the framework.
     ///
     /// On update `doc` is the **whole** document: the stored values with the changes applied,
     /// and the rows of every table (the stored ones for a table the changes do not mention).
@@ -180,6 +195,23 @@ pub trait DocTypeHooks: Send + Sync {
     /// Runs before a document is deleted. `doc` is a read-only view of the stored document,
     /// including its table rows.
     fn before_delete(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), HookError> {
+        let _ = (ctx, doc);
+        Ok(())
+    }
+
+    /// Runs when a draft is submitted, after `validate`. `doc` is the **whole** stored document
+    /// (values and the rows of every table) and may be modified, like in `validate` (it takes
+    /// `&mut` because a submit hook typically finalizes values, for example a total); the
+    /// framework validates the result afterwards, and the changes are written together with the
+    /// new docstatus. Changing `doc.name` is ignored.
+    fn before_submit(&self, ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+        let _ = (ctx, doc);
+        Ok(())
+    }
+
+    /// Runs before a submitted document is cancelled. `doc` is a read-only view of the stored
+    /// document, including its table rows (like `before_delete`: a veto, not a modification).
+    fn before_cancel(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), HookError> {
         let _ = (ctx, doc);
         Ok(())
     }

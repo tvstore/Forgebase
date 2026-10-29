@@ -32,6 +32,17 @@ These choices were made while implementing M2.3 and passed the independent revie
 - **Behaviour change of `update`** (0.x): it reads the document first (a `FOR NO KEY UPDATE` lock), validates the whole merged document, writes every column field, and replaces only tables whose rows differ. A stale update with invalid changes now reports `Conflict`, not the validation errors. An update always bumps `version`, even when nothing differs (an explicit save). `delete` also reads the document first, for `before_delete`.
 - **Lock choice.** `update` locks with `FOR NO KEY UPDATE`: it is the lock the UPDATE itself takes, it serializes with other updates and deletes, and it leaves Link lookups (`FOR KEY SHARE`) and foreign key checks unblocked (PostgreSQL upgrades it to `FOR UPDATE` when a unique (key) column changes). `delete` locks with `FOR UPDATE`, so concurrent linkers wait and `before_delete` hooks do not run for a delete that would then be refused.
 
+## Implementation details (M2.4)
+
+These choices were made while implementing M2.4 (docstatus). They concern the hooks and the pipeline only; they are implementer decisions for review with that change, not owner decisions. The docstatus rules themselves are in [architecture, section 6](../blueprint/architecture.md).
+
+- **Submit pipeline:** load with `FOR NO KEY UPDATE` (`NotFound`, `Conflict`); the document must be a draft; `validate` hooks, then `before_submit` hooks, both on the whole stored document with `Operation::Submit`; framework validation of the whole document; Link resolution; write like an update (so changes made by hooks are persisted) with `docstatus = 1` and the version bump in one statement.
+- **Cancel pipeline:** load with `FOR NO KEY UPDATE`; the document must be submitted; `before_cancel` with the stored document and rows; write `docstatus = 2` and bump the version. No validation: nothing else changes.
+- **Amend pipeline:** load the cancelled document with `FOR NO KEY UPDATE`; it must be cancelled and not amended yet; then the insert pipeline on a copy, with `Operation::Amend`: `before_insert`, `validate`, framework validation, Link resolution, naming (the amend name rule; a series takes no number), write as a draft. Hooks that must see every new document keep working for amendments and tell them apart with `ctx.operation`.
+- **Hook signatures.** `before_submit` takes `&mut Document` (like `validate`: a submit hook typically finalizes values, and the framework validates the result afterwards); `before_cancel` takes `&Document` (like `before_delete`: a veto).
+- **Docstatus checks come after the locking read and before any hook:** a cancelled document cannot be updated, a submitted one cannot be deleted. On a submitted document an update may only change `allow_on_submit` fields; the check runs on the merged document before the `validate` hooks and again after them, so a hook cannot change a locked field (`DbError::FieldLocked`).
+- **Series and the pipeline.** A naming series takes its number at the naming step, in the insert transaction, so a document refused by a hook or by validation takes no number, and a rollback gives the number back.
+
 ## Alternatives considered
 
 - **Async hooks with a restricted database handle.** Would let hooks read other documents, but needs a handle design (what it may do, user or system permissions, savepoints, a way to forbid `COMMIT`) and makes `forgebase-core` async or `forgebase-db`-aware. Not needed by any approved requirement; deferred.

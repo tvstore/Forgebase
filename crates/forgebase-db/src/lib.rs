@@ -2,15 +2,16 @@
 //!
 //! Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2 and M2.3):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3 and M2.4):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
-//! - [`migrate_framework`]: Forgebase's own tables (`fb_migration`, `fb_doctype`).
+//! - [`migrate_framework`]: Forgebase's own tables (`fb_migration`, `fb_doctype`, and `fb_series`, the
+//!   naming series counters, from migration 0002).
 //! - [`sync`]: additive DocType schema sync with dry-run, conflict refusal and `lock_timeout`;
 //!   Link fields become `uuid` columns with a foreign key (`ON DELETE RESTRICT`) and an index; a
 //!   child DocType's table has `id`, `parent_id` (foreign key `ON DELETE CASCADE`, indexed) and
-//!   `idx`.
+//!   `idx`; a submittable DocType's table has `docstatus` and `amended_from`.
 //! - [`migrate`]: both of the above in order.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
@@ -22,7 +23,9 @@
 //!   (`forgebase_core::hooks`, registered in the [`Registry`]) run inside each call's
 //!   transaction in a fixed order, documented on each of the four functions; a hook error is
 //!   [`DbError::Hook`] and rolls the call back. `update` works on the whole stored document with
-//!   the changes merged in. No permissions and no renames yet.
+//!   the changes merged in. [`submit`], [`cancel`] and [`amend`] move a document of a `submittable`
+//!   DocType through draft, submitted and cancelled (M2.4), and a naming series takes its number
+//!   from `fb_series` inside the insert's transaction. No permissions and no renames yet.
 
 mod document;
 mod error;
@@ -33,7 +36,7 @@ mod sync;
 mod value;
 
 pub use deadpool_postgres::Pool;
-pub use document::{StoredDocument, delete, get, insert, update};
+pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
 pub use error::DbError;
 pub use ident::quote_ident;
 pub use migrate::{MIGRATIONS, Migration, migrate_framework};

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use tokio_postgres::error::SqlState;
 
-use forgebase_core::document::ValidationError;
+use forgebase_core::document::{DocStatus, ValidationError};
 use forgebase_core::ident::TABLE_PREFIX;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType};
 
@@ -153,13 +153,61 @@ pub enum DbError {
     /// An update was called without any change.
     #[error("update needs at least one changed field")]
     NoChanges,
+    /// The operation is not allowed in the document's docstatus. Submit needs a draft, cancel a
+    /// submitted document, amend a cancelled one; update works on a draft (and on a submitted one
+    /// for `allow_on_submit` fields, see [`DbError::FieldLocked`]) but not on a cancelled one;
+    /// delete works on a draft or a cancelled document but not on a submitted one.
+    #[error("cannot {operation} {doctype} `{name}`: it is {docstatus}")]
+    InvalidDocStatus {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+        /// The document's current docstatus.
+        docstatus: DocStatus,
+        /// The refused operation: `update`, `delete`, `submit`, `cancel` or `amend`.
+        operation: &'static str,
+    },
+    /// Submit, cancel or amend was called for a DocType that is not `submittable`.
+    #[error("cannot {operation}: DocType `{doctype}` is not submittable (`submittable = true`)")]
+    NotSubmittable {
+        /// DocType name.
+        doctype: String,
+        /// The refused operation: `submit`, `cancel` or `amend`.
+        operation: &'static str,
+    },
+    /// A change to a submitted document touches a field that is not `allow_on_submit` (or a
+    /// table): submitted documents are locked. Raised for the caller's changes and for changes
+    /// made by a hook.
+    #[error(
+        "{doctype} `{name}` is submitted: field `{field}` cannot be changed (only fields marked allow_on_submit can; tables are locked)"
+    )]
+    FieldLocked {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+        /// The locked field.
+        field: String,
+    },
+    /// The cancelled document was already amended: it has at most one amendment at a time.
+    #[error("{doctype} `{name}` was already amended by `{amended_by}`")]
+    AlreadyAmended {
+        /// DocType name.
+        doctype: String,
+        /// The cancelled document.
+        name: String,
+        /// The document that amends it.
+        amended_by: String,
+    },
     /// A lifecycle hook ([`forgebase_core::hooks::DocTypeHooks`]) rejected the operation. The
     /// whole operation was rolled back: nothing was persisted.
     #[error("{hook} hook of DocType `{doctype}` rejected the operation: {message}")]
     Hook {
         /// DocType name.
         doctype: String,
-        /// The hook that failed: `before_insert`, `validate` or `before_delete`.
+        /// The hook that failed: `before_insert`, `validate`, `before_delete`, `before_submit` or
+        /// `before_cancel`.
         hook: &'static str,
         /// The hook's message.
         message: String,

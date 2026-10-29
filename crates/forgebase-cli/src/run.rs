@@ -7,7 +7,7 @@ use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::{DocType, Registry};
 use forgebase_db::{DbError, StoredDocument, SyncOptions};
 
-use crate::args::{Command, DocCommand, DocTypesDir};
+use crate::args::{ActorArg, Command, DocCommand, DocTypesDir, VersionArg};
 use crate::doctypes::load_dir;
 use crate::error::CliError;
 use crate::json::{Input, document_to_json, parse_input};
@@ -67,6 +67,22 @@ enum Operation {
         expected_version: i64,
         actor: String,
     },
+    /// Submit, cancel or amend: a document operation without data.
+    Status {
+        kind: StatusKind,
+        registry: Registry,
+        doctype: String,
+        name: String,
+        expected_version: i64,
+        actor: String,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum StatusKind {
+    Submit,
+    Cancel,
+    Amend,
 }
 
 fn prepare(command: DocCommand) -> Result<Operation, CliError> {
@@ -117,6 +133,27 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
                 actor: actor.actor,
             }
         }
+        DocCommand::Submit {
+            doctype,
+            name,
+            version,
+            doctypes,
+            actor,
+        } => status(StatusKind::Submit, doctype, name, version, doctypes, actor)?,
+        DocCommand::Cancel {
+            doctype,
+            name,
+            version,
+            doctypes,
+            actor,
+        } => status(StatusKind::Cancel, doctype, name, version, doctypes, actor)?,
+        DocCommand::Amend {
+            doctype,
+            name,
+            version,
+            doctypes,
+            actor,
+        } => status(StatusKind::Amend, doctype, name, version, doctypes, actor)?,
         DocCommand::Delete {
             doctype,
             name,
@@ -133,6 +170,25 @@ fn prepare(command: DocCommand) -> Result<Operation, CliError> {
                 actor: actor.actor,
             }
         }
+    })
+}
+
+fn status(
+    kind: StatusKind,
+    doctype: String,
+    name: String,
+    version: VersionArg,
+    doctypes: DocTypesDir,
+    actor: ActorArg,
+) -> Result<Operation, CliError> {
+    let (registry, found) = find_doctype(&doctypes, &doctype)?;
+    Ok(Operation::Status {
+        kind,
+        registry,
+        doctype: found.name,
+        name,
+        expected_version: version.expected_version,
+        actor: actor.actor,
     })
 }
 
@@ -183,6 +239,27 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
                 &actor,
             )
             .await?
+        }
+        Operation::Status {
+            kind,
+            registry,
+            doctype,
+            name,
+            expected_version,
+            actor,
+        } => {
+            let args = (&registry, doctype.as_str(), name.as_str(), expected_version);
+            match kind {
+                StatusKind::Submit => {
+                    forgebase_db::submit(client, args.0, args.1, args.2, args.3, &actor).await?
+                }
+                StatusKind::Cancel => {
+                    forgebase_db::cancel(client, args.0, args.1, args.2, args.3, &actor).await?
+                }
+                StatusKind::Amend => {
+                    forgebase_db::amend(client, args.0, args.1, args.2, args.3, &actor).await?
+                }
+            }
         }
         Operation::Delete {
             registry,

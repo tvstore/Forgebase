@@ -5,7 +5,7 @@ mod common;
 use std::time::Duration;
 
 use common::{CUSTOMER, PERSON, SALES_ORDER, TestDb, registry};
-use forgebase_db::{Conflict, DbError, Step, SyncOptions, Warning, migrate, sync};
+use forgebase_db::{Conflict, DbError, MIGRATIONS, Step, SyncOptions, Warning, migrate, sync};
 
 #[tokio::test]
 async fn sync_creates_table_with_exact_column_types() {
@@ -471,7 +471,7 @@ async fn migrate_runs_migrations_then_sync() {
     let report = migrate(&db.pool, &registry, &SyncOptions::default())
         .await
         .unwrap();
-    assert_eq!(report.migrations.len(), 1);
+    assert_eq!(report.migrations.len(), MIGRATIONS.len());
     assert_eq!(report.sync.unwrap().steps.len(), 3);
     let report = migrate(&db.pool, &registry, &SyncOptions::default())
         .await
