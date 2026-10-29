@@ -1,4 +1,5 @@
-# Example DocType used by the README quick start. Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+# A DocType of the `sales` example app (examples/sales). Used by the README quick start.
+# Format: docs/blueprint/architecture.md section 3 ("DocType file format").
 name = "customer"
 label = "Customer"
 naming = { field = "email" }

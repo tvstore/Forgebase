@@ -1,6 +1,11 @@
-# Example DocType used by the README quick start. It has a child table, a naming series (SO-2026-00001, ...) and is submittable:
+# A DocType of the `sales` example app (examples/sales). Used by the README quick start. It has a child table, a naming series
+# (SO-2026-00001, ...) and is submittable:
 # draft -> submitted (locked, except `remarks`) -> cancelled -> amended into a new draft named SO-2026-00001-1.
+# Rules in Rust (src/lib.rs): `validate` computes the row amounts and `total`; `before_submit` refuses an order without items.
 # Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+#
+# Changes made when the example became an app (all additive): the field `total`; `items` is no longer required, so a draft can be saved
+# without items (the submit rule enforces them instead).
 name = "sales_order"
 label = "Sales Order"
 submittable = true
@@ -16,12 +21,19 @@ required = true
 name = "order_date"
 type = "date"
 
+# Computed by the `validate` hook: the sum of the row amounts. Whatever a client sends is overwritten.
+[[fields]]
+name = "total"
+type = "decimal"
+precision = 12
+scale = 2
+
 [[fields]]
 name = "items"
 label = "Items"
 type = "table"
 target = "sales_order_item"
-required = true
+# Not required: a draft may have no items yet. `before_submit` refuses to submit an order without any.
 
 [[fields]]
 name = "remarks"

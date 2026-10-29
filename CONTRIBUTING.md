@@ -23,6 +23,8 @@ cargo +1.97 check --workspace --all-targets --all-features --locked   # MSRV
 cargo deny --locked check                              # needs network for advisories
 ```
 
+The workspace includes the example apps in `examples/` (`sales`, `sales_extension`), so these commands also build, lint and test them. They may depend on the `forgebase` crate only, and a change to them must not need a change under `crates/`.
+
 The desk has its own checks (the `desk` job of CI). Run them in `desk/` when you change it:
 
 ```sh

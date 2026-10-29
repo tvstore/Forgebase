@@ -71,10 +71,12 @@ A hook set implements `forgebase::DocTypeHooks` for a DocType and is registered 
 
 ## 5. Extend another app
 
+Two complete, tested examples live in the Forgebase checkout: [`examples/sales`](../../examples/sales/README.md) (DocTypes, hooks, a data migration) and [`examples/sales_extension`](../../examples/sales_extension/README.md), which depends on `sales`, links to its `customer` and adds a hook to its `sales_order`. Read them next to this section; their tests are the model for yours.
+
 Make a second app, `tasks`, that links to the notes of `crm` and adds a rule to them.
 
 ```sh
-target/debug/forgebase new-app tasks --forgebase-path . --dir ~/apps
+target/debug/forgebase new-app tasks --forgebase-path . --dir ~/apps   # in the Forgebase checkout
 ```
 
 `tasks` starts with the same sample as `crm`, which it does not need. Remove its sample DocType, link `crm`, and then replace three files.

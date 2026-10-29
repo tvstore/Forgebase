@@ -1,4 +1,5 @@
-# Example DocType used by the README quick start; `customer` links to it. Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+# A DocType of the `sales` example app (examples/sales); `customer` links to it. The migration `default_customer_groups` creates the groups
+# Retail and Wholesale. Format: docs/blueprint/architecture.md section 3 ("DocType file format").
 name = "customer_group"
 label = "Customer Group"
 naming = { field = "title" }
