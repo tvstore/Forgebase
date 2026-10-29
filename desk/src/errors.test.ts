@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { mapDetail, mapDetails } from './errors';
+import { conflictMessage, isStaleCode, mapDetail, mapDetails } from './errors';
 import { errorKey } from './fields';
 import { field, meta } from './testing';
 
@@ -70,5 +70,24 @@ describe('error details to fields', () => {
       [errorKey('lines', 1, 'item')]: 'This field is required.',
     });
     expect(mapped.unmapped).toEqual(['unknown field `nope`']);
+  });
+});
+
+describe('conflictMessage', () => {
+  it('says the edits are kept only when the form has edits', () => {
+    expect(conflictMessage('saved', true)).toBe(
+      'Someone else changed this document after you opened it. Your edits are kept below and nothing was saved.',
+    );
+    expect(conflictMessage('submitted', false)).toBe(
+      'Someone else changed this document after you opened it. Nothing was submitted.',
+    );
+  });
+});
+
+describe('isStaleCode', () => {
+  it('is true for a conflict and a moved-on status only', () => {
+    expect(isStaleCode('conflict')).toBe(true);
+    expect(isStaleCode('invalid_docstatus')).toBe(true);
+    expect(isStaleCode('validation_failed')).toBe(false);
   });
 });

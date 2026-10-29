@@ -3,7 +3,7 @@
 // user without the submit right. It runs against a real server prepared by seed.sh and checks the
 // M4 exit criteria that need a browser: no secret in browser storage, and an action the user has
 // no right for is hidden (the API refusal itself is tested in Rust: forgebase-http/tests/resources.rs
-// and permissions.rs; one refused request is repeated here).
+// and crates/forgebase-db/tests/permissions.rs; one refused request is repeated here).
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';

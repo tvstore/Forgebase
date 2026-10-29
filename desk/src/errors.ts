@@ -67,3 +67,17 @@ export function mapDetails(details: string[], meta: DocTypeMeta): MappedErrors {
   }
   return { errors, unmapped };
 }
+
+/** The error codes that say the version held by the form is out of date. */
+export function isStaleCode(code: string): boolean {
+  return code === 'conflict' || code === 'invalid_docstatus';
+}
+
+/**
+ * The text of a `409 conflict`. `verb` completes "nothing was ..." (saved, submitted, ...); the
+ * form only says its edits are kept when it has some.
+ */
+export function conflictMessage(verb: string, dirty: boolean): string {
+  const base = 'Someone else changed this document after you opened it.';
+  return dirty ? `${base} Your edits are kept below and nothing was ${verb}.` : `${base} Nothing was ${verb}.`;
+}

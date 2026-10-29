@@ -5,7 +5,7 @@ import { ApiError, createDocument, deleteDocument, getDocument, transitionDocume
 import type { Transition } from '../api';
 import { docStatusLabel, docStatusOf, fieldReadOnly, hasEditableField, lifecycleActions } from '../access';
 import type { DocContext, LifecycleAction } from '../access';
-import { mapDetails } from '../errors';
+import { conflictMessage, isStaleCode, mapDetails } from '../errors';
 import { blankState, buildChanges, buildCreate, changedFields, errorKey, stateOf } from '../fields';
 import type { Errors, FormState, FormValue } from '../fields';
 import { formHref, listHref, navigate, setNavigationBlocker } from '../router';
@@ -33,8 +33,6 @@ type Asking =
 interface Failure {
   message: string;
   details: string[];
-  /** The document changed under the user: offer to load the current version. */
-  reload: boolean;
 }
 
 const TRANSITION_VERB: Record<Transition, string> = {
@@ -64,6 +62,9 @@ export function DocumentForm({ meta, initial, username }: Props) {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState<Asking>(null);
+  // The version in the form is known to be out of date (a conflict, or a status that moved on):
+  // Reload stays offered until the current version is loaded.
+  const [stale, setStale] = useState(false);
   // Counts the attempts that failed, so the focus moves each time, also to the same field.
   const [attempt, setAttempt] = useState(0);
 
@@ -138,6 +139,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
     setState(fresh);
     setErrors({});
     setFailure(null);
+    setStale(false);
   };
 
   /** `verb` completes "The document was not ..." (saved, submitted, ...). */
@@ -148,25 +150,19 @@ export function DocumentForm({ meta, initial, username }: Props) {
       if (e.status === 422 && e.code === 'validation_failed') {
         const mapped = mapDetails(e.details, meta);
         setErrors(mapped.errors);
-        setFailure({ message: `The document was not ${verb}.`, details: mapped.unmapped, reload: false });
+        setFailure({ message: `The document was not ${verb}.`, details: mapped.unmapped });
       } else if (e.code === 'conflict') {
         setErrors({});
-        setFailure({
-          message: 'Someone else changed this document after you opened it. Your edits are kept below and nothing was saved.',
-          details: [],
-          reload: true,
-        });
+        setStale(true);
+        setFailure({ message: conflictMessage(verb, dirty), details: [] });
       } else {
         setErrors({});
-        setFailure({
-          message: e.message,
-          details: e.details,
-          reload: e.code === 'invalid_docstatus',
-        });
+        if (isStaleCode(e.code)) setStale(true);
+        setFailure({ message: e.message, details: e.details });
       }
     } else {
       setErrors({});
-      setFailure({ message: 'Cannot reach the server. Try again.', details: [], reload: false });
+      setFailure({ message: 'Cannot reach the server. Try again.', details: [] });
     }
     setAttempt((n) => n + 1);
   };
@@ -193,7 +189,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
       : buildChanges(meta, saved, state, (f) => !readOnlyOf(f));
     if (!built.ok) {
       setErrors(built.errors);
-      setFailure({ message: 'Fix the fields marked below. The document was not saved.', details: [], reload: false });
+      setFailure({ message: 'Fix the fields marked below. The document was not saved.', details: [] });
       setAttempt((n) => n + 1);
       return;
     }
@@ -219,7 +215,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
     if (dirty) {
       setErrors({});
       setStatus('');
-      setFailure({ message: 'You have unsaved changes. Save them first.', details: [], reload: false });
+      setFailure({ message: 'You have unsaved changes. Save them first.', details: [] });
       setAttempt((n) => n + 1);
       return;
     }
@@ -257,6 +253,8 @@ export function DocumentForm({ meta, initial, username }: Props) {
     void run('reloaded', async () => {
       adopt(await getDocument(meta.name, name));
       setStatus('Loaded the current version.');
+      // The Reload button is gone: put the focus on the heading, as after a lifecycle action.
+      headingRef.current?.focus();
     });
   };
 
@@ -297,7 +295,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
               ))}
             </ul>
           ) : null}
-          {failure.reload ? (
+          {stale ? (
             <button
               type="button"
               onClick={() => (dirty ? setAsking({ kind: 'reload' }) : reload())}
