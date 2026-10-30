@@ -13,9 +13,10 @@
 //! final name, with a hard link, which fails when `FILE` exists: nothing is ever overwritten. A
 //! failure removes the `.partial` file; a killed process (SIGINT, SIGTERM) can leave only
 //! `FILE.partial`, never a partial `FILE`.
-
-//! **Versions.** The tools must have the server's major version (a newer `pg_dump` writes SQL
-//! that an older server rejects, for example `SET transaction_timeout`). A restore also needs
+//!
+//! **Versions.** The tools must have the server's major version (a newer `pg_dump` writes an
+//! archive that `pg_restore` of the server's version may not read, and a newer `pg_restore` sends
+//! SQL an older server rejects, for example `SET transaction_timeout`). A restore also needs
 //! the dump's `pg_dump` major version to be at most the server's (an upgrade is allowed).
 
 use std::ffi::OsString;

@@ -9,7 +9,7 @@ The examples use a binary called `myapp` (your apps compiled together, see [the 
 - **One binary** with its apps. There is no plugin loading: to change the apps you build and deploy a new binary.
 - **The built desk**, a directory (`desk/dist` after `npm run build`), if you want the web interface. `serve` reads it from `FORGEBASE_DESK_DIR`.
 - **PostgreSQL 16 or newer**, one database per site.
-- **The PostgreSQL client tools** (`pg_dump`, `pg_restore`) of **the same major version as the server** (a newer `pg_dump` can write SQL that the server rejects), on the machine that runs the backups. Forgebase does not bundle them. On Debian and Ubuntu the package is `postgresql-client-16` (or the one of your server's major version).
+- **The PostgreSQL client tools** (`pg_dump`, `pg_restore`) of **the same major version as the server** (newer tools can write archives or send SQL that the server's version cannot handle), on the machine that runs the backups. Forgebase does not bundle them. On Debian and Ubuntu the package is `postgresql-client-16` (or the one of your server's major version).
 - A reverse proxy for TLS (see [Running](#running)). Forgebase itself speaks plain HTTP, and its connection to PostgreSQL has no TLS yet, so keep that link on a local or private network.
 
 ## Configuration
@@ -150,6 +150,9 @@ Schema changes are additive and refused when they would lose data; the command l
 ```sh
 myapp --config /etc/forgebase/forgebase.toml site backup acme --out /var/backups/forgebase/acme-$(date +%Y%m%d).dump
 ```
+
+The backup directory must be on a filesystem that supports hard links (a finished dump is published with one; FAT/exFAT and some network mounts cannot), otherwise the backup fails at the end with an error and leaves no file. If `forgebase` is killed, the `pg_dump` it started may keep running until it finishes writing `FILE.partial`; `FILE` never appears.
+
 
 It runs `pg_dump --format=custom --no-owner --no-privileges` against the site's database and prints the file and its size. Things to know:
 

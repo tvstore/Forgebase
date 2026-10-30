@@ -220,7 +220,7 @@ pub enum SiteCommand {
     /// tools of the server's major version, on `PATH` or in `FORGEBASE_PG_BIN`; they are not part
     /// of Forgebase). The file is a custom-format dump of everything in the database, **password
     /// hashes, session and API token digests included**: it is created with mode 0600; keep it
-    /// safe. The dump is written to `FILE.partial` and renamed to FILE only when it is complete:
+    /// safe. The dump is written to `FILE.partial` and published as FILE (a hard link) only when it is complete:
     /// a failed backup leaves nothing, and an interrupted one (SIGINT, SIGTERM) can leave only
     /// `FILE.partial`, which can be removed. An existing file is never overwritten (exit 1; there
     /// is no `--force`). The database URL and password are passed to `pg_dump` in its
