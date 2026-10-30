@@ -6,8 +6,9 @@
 // It adds a few sample documents (customers, and orders that are a draft, submitted and
 // cancelled, so that every status badge shows), then takes the login page, home, list, form (draft and
 // submitted), the cancel dialog and the command bar at 1280, 800 and 375 px (and the list at 320 px), and asserts that
-// no page scrolls sideways at those phone widths. The PNGs are not
-// committed.
+// no page scrolls sideways at those phone widths. M8.2 adds the workflow screens (workflow-*: a draft, a request
+// waiting for approval with its actions, the confirmation, an approved one with its history, and the list with
+// the state badges) on the e2e-only DocType purchase_request. The PNGs are not committed.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -208,4 +209,93 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await expect(page.locator('.status-badge')).toHaveText('Submitted');
   await page.getByRole('button', { name: 'Menu' }).click();
   await snap(page, `${DIR}/form-menu-open-375.png`);
+});
+
+/** Purchase requests in every state of their workflow, made through the API as the manager. */
+async function seedRequests(page: Page): Promise<{ draft: string; pending: string; approved: string }> {
+  return page.evaluate(async () => {
+    const session = (await (await fetch('/api/v1/session', { headers: { 'X-Forgebase-CSRF': 'refresh' } })).json()) as {
+      data: { csrf_token: string };
+    };
+    type Doc = { name: string; version: number };
+    const send = async (method: string, path: string, body: unknown): Promise<Doc> => {
+      const response = await fetch(`/api/v1${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-Forgebase-CSRF': session.data.csrf_token },
+        body: JSON.stringify(body),
+      });
+      const json = (await response.json()) as { data?: Doc };
+      if (!response.ok || !json.data) throw new Error(`${method} ${path} failed`);
+      return json.data;
+    };
+    const create = (title: string, amount: string) => send('POST', '/resource/purchase_request', { title, amount });
+    const move = (doc: Doc, action: string) =>
+      send('POST', `/resource/purchase_request/${encodeURIComponent(doc.name)}/transition`, {
+        action,
+        version: doc.version,
+      });
+    const draft = await create('Standing desks for the new office', '2400.00');
+    const pending = await move(await create('Laptops for the support team', '5600.00'), 'Submit for Approval');
+    const approved = await move(
+      await move(await create('Annual software licences', '18250.00'), 'Submit for Approval'),
+      'Approve',
+    );
+    const rejected = await move(await create('Espresso machine', '899.00'), 'Submit for Approval');
+    await move(await move(rejected, 'Reject'), 'Submit for Approval'); // a longer history
+    const cancelled = await move(
+      await move(await create('Conference tickets', '3100.00'), 'Submit for Approval'),
+      'Approve',
+    );
+    await move(cancelled, 'Cancel Approval');
+    return { draft: draft.name, pending: pending.name, approved: approved.name };
+  });
+}
+
+test('screenshots of the workflow', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  const docs = await seedRequests(page);
+  const form = (name: string) => `/desk/#/form/purchase_request/${encodeURIComponent(name)}`;
+
+  for (const width of WIDTHS) {
+    await page.setViewportSize({ width, height: 800 });
+
+    await page.goto(form(docs.draft));
+    await expect(page.locator('.status-badge')).toHaveText('Draft');
+    await expect(page.getByRole('button', { name: 'Submit for Approval' })).toBeVisible();
+    await noSideScroll(page, `workflow draft at ${width}`);
+    await snap(page, `${DIR}/workflow-form-draft-${width}.png`);
+
+    await page.goto(form(docs.pending));
+    await expect(page.locator('.status-badge')).toHaveText('Pending Approval');
+    await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
+    await expect(page.getByRole('list', { name: 'Workflow history' })).toBeVisible();
+    await noSideScroll(page, `workflow pending at ${width}`);
+    await snap(page, `${DIR}/workflow-form-pending-${width}.png`);
+
+    await page.getByRole('button', { name: 'Approve' }).click();
+    await expect(page.getByRole('dialog', { name: 'Approve' })).toBeVisible();
+    await noSideScroll(page, `workflow confirmation at ${width}`);
+    await snap(page, `${DIR}/workflow-confirm-${width}.png`);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    await page.goto(form(docs.approved));
+    await expect(page.locator('.status-badge')).toHaveText('Approved');
+    await expect(page.getByRole('list', { name: 'Workflow history' }).getByRole('listitem')).toHaveCount(2);
+    await noSideScroll(page, `workflow approved at ${width}`);
+    await snap(page, `${DIR}/workflow-form-approved-${width}.png`);
+
+    await page.goto('/desk/#/list/purchase_request');
+    await expect(page.getByRole('row', { name: new RegExp(docs.approved) })).toBeVisible();
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await noSideScroll(page, `workflow list at ${width}`);
+    await snap(page, `${DIR}/workflow-list-${width}.png`);
+  }
+
+  // Unsaved changes: the actions are disabled, Save is the primary button.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(form(docs.pending));
+  await page.getByLabel('Title').fill('Laptops for the whole support team');
+  await expect(page.getByRole('button', { name: 'Approve' })).toBeDisabled();
+  await snap(page, `${DIR}/workflow-form-dirty-1280.png`);
 });

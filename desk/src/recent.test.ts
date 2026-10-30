@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { MAX_RECENT, clearRecent, getRecent, pushRecent, recordRecent } from './recent';
+import { MAX_RECENT, clearRecent, getRecent, pushRecent, recordRecent, subscribeRecent } from './recent';
 import type { RecentDocument } from './recent';
 
 const doc = (name: string, doctype = 'order'): RecentDocument => ({ doctype, name, title: `Title ${name}` });
@@ -53,5 +53,23 @@ describe('clearRecent', () => {
     expect(getRecent().length).toBeGreaterThan(0);
     clearRecent();
     expect(getRecent()).toEqual([]);
+  });
+});
+
+describe('subscribeRecent', () => {
+  it('tells a subscriber about a record and a clear, and gives a new array each time', () => {
+    clearRecent();
+    const listener = vi.fn();
+    const unsubscribe = subscribeRecent(listener);
+    const before = getRecent();
+    recordRecent(doc('S1'));
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(getRecent()).not.toBe(before);
+    clearRecent();
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    recordRecent(doc('S2'));
+    expect(listener).toHaveBeenCalledTimes(2);
+    clearRecent();
   });
 });

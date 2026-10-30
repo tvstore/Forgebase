@@ -1,8 +1,8 @@
-import { useId, useMemo, useRef, useState } from 'react';
+import { useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { findCommands, flatten, moveActive } from '../command';
 import { SearchIcon } from '../icons';
-import { getRecent } from '../recent';
+import { getRecent, subscribeRecent } from '../recent';
 import { navigate } from '../router';
 import type { DocTypeSummary } from '../types';
 import { Modal } from './Dialog';
@@ -25,7 +25,9 @@ export function CommandBar({ doctypes, onClose }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const baseId = useId();
   const listId = `${baseId}-list`;
-  const groups = useMemo(() => findCommands(input, doctypes, getRecent()), [input, doctypes]);
+  // Follows the list: a form that finishes loading just after the bar opened is listed too.
+  const recent = useSyncExternalStore(subscribeRecent, getRecent);
+  const groups = useMemo(() => findCommands(input, doctypes, recent), [input, doctypes, recent]);
   const commands = useMemo(() => flatten(groups), [groups]);
   const optionId = (index: number) => `${baseId}-option-${index}`;
   const current = commands[active];

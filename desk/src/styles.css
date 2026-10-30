@@ -1046,6 +1046,59 @@
     @apply block text-small font-normal text-muted;
   }
 
+  /* The Activity card: the workflow history as a vertical timeline, newest first. A navy dot on a
+     hairline that joins one entry to the next. The border (not a background) draws both, so that
+     forced colors keep them. */
+  .activity > * + * {
+    @apply mt-3;
+  }
+
+  .timeline {
+    @apply m-0 list-none p-0;
+  }
+
+  .timeline li {
+    @apply relative min-w-0 pb-4 pl-6;
+  }
+
+  .timeline li:last-child {
+    @apply pb-0;
+  }
+
+  .timeline li::before {
+    content: '';
+    @apply absolute top-3.5 bottom-[-0.125rem] left-[0.3125rem] w-0 border-l border-line-strong;
+  }
+
+  .timeline li:last-child::before {
+    @apply hidden;
+  }
+
+  .timeline-dot {
+    @apply absolute top-1.5 left-0 size-[0.6875rem] rounded-full border-2 border-primary bg-primary;
+  }
+
+  .timeline p {
+    @apply m-0 wrap-anywhere;
+  }
+
+  .timeline-text {
+    @apply font-medium text-ink;
+  }
+
+  .timeline-actor {
+    @apply font-semibold;
+  }
+
+  .timeline-move,
+  .timeline time {
+    @apply block text-small font-normal text-muted;
+  }
+
+  .workflow-error .btn {
+    @apply ml-1;
+  }
+
   /* ---------- Dialog ---------- */
 
   .dialog {

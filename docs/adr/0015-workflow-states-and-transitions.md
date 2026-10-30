@@ -1,6 +1,6 @@
 # 0015 Workflow: states and transitions in the DocType file
 
-- Status: Accepted (owner decisions 1 to 5 and 10 of the M8 plan, 2026-10-30); implementation details of M8.1 are separated below and are not owner decisions. Extends [ADR 0009](0009-lifecycle-pipeline-and-hooks.md) (a new hook point) and [ADR 0011](0011-permission-model-phase-1.md) (the transition-role rule), and updates the public surface of [ADR 0012](0012-app-model-and-public-api-boundary.md#public-surface-update-m81).
+- Status: Accepted (owner decisions 1 to 5 and 10 of the M8 plan, 2026-10-30); implementation details of M8.1 and M8.2 are separated below and are not owner decisions. Extends [ADR 0009](0009-lifecycle-pipeline-and-hooks.md) (a new hook point) and [ADR 0011](0011-permission-model-phase-1.md) (the transition-role rule), and updates the public surface of [ADR 0012](0012-app-model-and-public-api-boundary.md#public-surface-update-m81).
 - Date: 2026-10-30
 
 ## Context
@@ -90,6 +90,10 @@ These choices were made while implementing M8.1 and are reviewed with that chang
 
 **Public surface.** Only `TransitionInfo` is new at the crate root of `forgebase` (plus the new `Operation::Transition`, `HookContext::transition` and `DocTypeHooks::before_transition`). The workflow types are internal; apps write the workflow in the DocType file. The job API (`Documents`) has no `transition` yet: a job cannot take a transition, and its `submit` and `cancel` are refused on a workflow DocType.
 
+## Implementation details (M8.2, desk)
+
+These choices were made while implementing M8.2 and are reviewed with that change; they are not owner decisions, and the Decision section above is unchanged. The desk needs no backend change: it reads `workflow` from the metadata, `workflow_state` from the document, `GET .../transitions` and `GET .../history`. The badge (form header and list Status column) is the workflow state in the tone of its `style`, falling back to the docstatus badge for a document without a state and to the raw state name, neutral, for a state the workflow does not define. The plain Submit and Cancel buttons are hidden on a workflow DocType; the actions from `/transitions` replace them (first: primary, second: secondary, the rest in the More menu), are fetched again whenever the document's version changes or an action is refused, and are **disabled while the form has unsaved changes** (Save first), so a transition can never discard edits. Every action asks for a confirmation; a conflict offers Reload, other errors appear in the form's alert. The history is an "Activity" timeline in the info panel (newest first, 20 entries and "Show all"). The list filters and sorts by `workflow_state`. Details: [architecture, section 11](../blueprint/architecture.md#11-desk-reports-workflow).
+
 ## Alternatives considered
 
 - **Conditions as expressions in the TOML** (Frappe's workflow conditions are Python expressions in a DocType record): rejected by the owner (decision 4). They need an expression language, its parser, its security review and its error messages, and they would not be testable like code. A hook is Rust, typed and unit-testable.
@@ -105,4 +109,4 @@ These choices were made while implementing M8.1 and are reviewed with that chang
 - Conditions need a Rust hook, so a change of a condition is a code change (compile and deploy), which matches the compile-time app model.
 - The log is deleted with its document: it is a history for users, not an audit trail. An audit log is a separate decision.
 - Changing a workflow that has documents in it (renaming or removing a state) leaves those documents without transitions until an operator updates their state; `migrate` warns, and nothing is changed automatically.
-- The desk (badge, action buttons from `/transitions`, history from `/history`) is M8.2, and the guide section is M8.5.
+- The desk (badge, action buttons from `/transitions`, history from `/history`) is delivered by M8.2, and the guide section is M8.5.

@@ -34,6 +34,11 @@ export interface DocContext {
   owner: string | null;
   username: string;
   submittable: boolean;
+  /**
+   * The DocType has a workflow: the state changes only through its actions, so the plain Submit
+   * and Cancel are not offered (the server refuses them with `workflow_required`). Absent: false.
+   */
+  workflow?: boolean;
 }
 
 /**
@@ -83,16 +88,17 @@ export type LifecycleAction = 'submit' | 'cancel' | 'amend' | 'delete';
  * of a submittable DocType and the submit right. Cancel: a submitted document and the cancel
  * right. Amend: a cancelled document and the amend right. Delete: a draft or a cancelled
  * document (any document of a DocType that is not submittable) and the delete right. The rights
- * for submit, cancel and amend are already `none` for a DocType that is not submittable.
+ * for submit, cancel and amend are already `none` for a DocType that is not submittable. With a
+ * workflow, Submit and Cancel are never listed (the workflow's actions replace them).
  */
 export function lifecycleActions(ctx: DocContext): LifecycleAction[] {
   if (ctx.isNew) return [];
   const { rights, owner, username } = ctx;
   const actions: LifecycleAction[] = [];
-  if (ctx.submittable && ctx.docStatus === 0 && permits(rights.submit, owner, username)) {
+  if (ctx.submittable && !ctx.workflow && ctx.docStatus === 0 && permits(rights.submit, owner, username)) {
     actions.push('submit');
   }
-  if (ctx.submittable && ctx.docStatus === 1 && permits(rights.cancel, owner, username)) {
+  if (ctx.submittable && !ctx.workflow && ctx.docStatus === 1 && permits(rights.cancel, owner, username)) {
     actions.push('cancel');
   }
   if (ctx.submittable && ctx.docStatus === 2 && permits(rights.amend, owner, username)) {
