@@ -225,7 +225,7 @@ async fn blocking<T: Send + 'static>(
 /// `site backup`: the message to print. See [`backup`].
 pub(crate) async fn site_backup(site: &Site, file: &Path) -> Result<String, CliError> {
     check_new_file(file)?;
-    let url = site.database_url()?;
+    let url = site.tool_connection_url()?;
     let env = pg_environment(&url).map_err(|e| site_error(site, e))?;
     let info = inspect_database(&url)
         .await
@@ -249,7 +249,7 @@ pub(crate) async fn site_restore(site: &Site, file: &Path) -> Result<String, Cli
             file.display()
         )));
     }
-    let url = site.database_url()?;
+    let url = site.tool_connection_url()?;
     let env = pg_environment(&url).map_err(|e| site_error(site, e))?;
     let database = env
         .iter()
