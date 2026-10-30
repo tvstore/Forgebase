@@ -53,7 +53,7 @@ export function Form({ doctype, docName, username }: Props) {
   if (!addressable) {
     return (
       <div className="page">
-        <h1>{doctype}</h1>
+        <h1>Cannot open this document</h1>
         <p role="alert" className="alert">
           The document name {JSON.stringify(docName)} cannot be opened in the desk: a REST path cannot
           address a document named "." or "..".
@@ -67,7 +67,7 @@ export function Form({ doctype, docName, username }: Props) {
   if (load.status === 'loading') {
     return (
       <div className="page" aria-busy="true">
-        <h1>{docName ?? `New ${doctype}`}</h1>
+        <h1>Loading...</h1>
         <Skeleton lines={6} />
       </div>
     );
@@ -75,7 +75,7 @@ export function Form({ doctype, docName, username }: Props) {
   if (load.status === 'error') {
     return (
       <div className="page">
-        <h1>{docName ?? `New ${doctype}`}</h1>
+        <h1>Cannot open this page</h1>
         <p role="alert" className="alert">
           {load.message}
         </p>

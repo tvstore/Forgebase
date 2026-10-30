@@ -1,8 +1,9 @@
 // The smoke test of the desk (M4.2, extended in UX.2): login -> home -> list -> search -> create
 // (with a child row) -> save (toast) -> edit -> submit (badge) -> the More menu on the example
 // `sales_order` DocType (submittable, naming series, a child table, a Link to `customer`), then a
-// user without the submit right. The list and the form are also checked for horizontal scroll at
-// a phone width (375 px). It runs against a real server prepared by seed.sh and checks the
+// user without the submit right. Home, the list and the form (a draft and a submitted order) are
+// also checked for horizontal scroll at 375 and 320 px, so that a runner with a wider fallback font
+// than the developer's machine does not surprise us. It runs against a real server prepared by seed.sh and checks the
 // M4 exit criteria that need a browser: no secret in browser storage, and an action the user has
 // no right for is hidden (the API refusal itself is tested in Rust: forgebase-http/tests/resources.rs
 // and crates/forgebase-db/tests/permissions.rs; one refused request is repeated here).
@@ -27,13 +28,23 @@ async function logout(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Log in' })).toBeVisible();
 }
 
-/** The page does not scroll sideways (only a table may, inside its own container). */
-async function expectNoHorizontalScroll(page: Page): Promise<void> {
-  const widths = await page.evaluate(() => ({
-    scroll: document.documentElement.scrollWidth,
-    client: document.documentElement.clientWidth,
-  }));
-  expect(widths.scroll).toBeLessThanOrEqual(widths.client);
+const PHONE_WIDTHS = [375, 320];
+
+/**
+ * The open page does not scroll sideways at the width of a phone, and of a small one (only a table
+ * may, inside its own container). The viewport is put back afterwards.
+ */
+async function expectNoHorizontalScroll(page: Page, what: string): Promise<void> {
+  const before = page.viewportSize() ?? { width: 1280, height: 800 };
+  for (const width of PHONE_WIDTHS) {
+    await page.setViewportSize({ width, height: 800 });
+    const widths = await page.evaluate(() => ({
+      scroll: document.documentElement.scrollWidth,
+      client: document.documentElement.clientWidth,
+    }));
+    expect(widths.scroll, `${what} scrolls sideways at ${width} px`).toBeLessThanOrEqual(widths.client);
+  }
+  await page.setViewportSize(before);
 }
 
 /** Waits until the list has loaded (nothing in the page is busy any more). */
@@ -81,6 +92,8 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await login(page, 'e2e_manager');
   await expectNoSecretsInStorage(page);
   await expect(page.getByRole('navigation', { name: 'Document types' })).toBeVisible(); // the sidebar
+  await expect(page.getByRole('main').getByRole('link', { name: 'Sales Order', exact: true })).toBeVisible();
+  await expectNoHorizontalScroll(page, 'home');
   await page.getByRole('main').getByRole('link', { name: 'Sales Order', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Sales Order', level: 1 })).toBeVisible();
   await expectLoaded(page); // the list may hold orders of an earlier run
@@ -97,7 +110,7 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(search).toHaveValue('');
   await expect(page.getByRole('heading', { name: 'No documents match' })).toHaveCount(0);
   await expectLoaded(page);
-  await expectNoHorizontalScroll(page);
+  await expectNoHorizontalScroll(page, 'the list');
 
   // ---- create ---------------------------------------------------------------------------
   await fillNewOrder(page);
@@ -115,19 +128,22 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(page).toHaveURL(/#\/form\/sales_order\/SO-\d{4}-\d{5}$/);
   const name = decodeURIComponent(page.url().split('/').pop() ?? '');
   await expect(toast(page, 'Saved')).toBeVisible(); // success feedback
-  await expect(page.getByRole('heading', { name, level: 1 })).toBeFocused();
+  // The heading is the title field (the customer), with the document's name muted under it.
+  await expect(page.getByRole('heading', { name: CUSTOMER, level: 1 })).toBeFocused();
+  await expect(page.locator('.doc-title-name')).toHaveText(name);
   await expect(statusBadge(page)).toHaveText('Draft');
   await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(name);
   await expect(page.getByLabel('Customer')).toHaveValue(CUSTOMER);
   await expect(page.getByLabel('Rate, row 1')).toHaveValue('9.50');
   await expect(page.getByRole('button', { name: 'Submit' })).toBeVisible();
+  await expect(page.getByText('* required')).toBeVisible(); // a draft has fields to fill in
   // Delete is in the More menu (a draft may be deleted by a manager); Escape closes the menu.
   await page.getByRole('button', { name: 'More actions' }).click();
   await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Delete' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'More actions' })).toBeFocused();
-  await expectNoHorizontalScroll(page);
+  await expectNoHorizontalScroll(page, 'the draft form');
 
   // ---- edit: only the changed field is sent ---------------------------------------------
   await page.getByLabel('Remarks').fill('first remark');
@@ -172,6 +188,8 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(page.getByLabel('Remarks')).toBeEditable();
   await expect(page.getByLabel('Customer')).not.toBeEditable();
   await expect(page.getByRole('button', { name: 'Add row' })).toHaveCount(0);
+  await expect(page.getByText('* required')).toHaveCount(0); // every required field is a value now
+  await expect(page.locator('label', { hasText: 'Customer' })).not.toContainText('*');
   await expectNoSecretsInStorage(page);
 
   // The order is in the list, with its status.
@@ -182,11 +200,33 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(page).toHaveURL(new RegExp(`#/form/sales_order/${name}$`));
 
   // ---- a phone: no horizontal scroll on the list and the form ---------------------------
-  await page.setViewportSize({ width: 375, height: 800 });
-  await expectNoHorizontalScroll(page); // the form
+  await expectNoHorizontalScroll(page, 'the submitted form');
   await page.goto('/desk/#/list/sales_order');
   await expect(page.getByRole('row', { name: new RegExp(name) })).toBeVisible();
-  await expectNoHorizontalScroll(page); // the list
+  await expectNoHorizontalScroll(page, 'the list with orders');
+  // On a phone the status badge is not off-screen in the scrolling table: it sits under the title.
+  await page.setViewportSize({ width: 375, height: 800 });
+  const inline = page.getByRole('row', { name: new RegExp(name) }).locator('.status-inline');
+  await expect(inline).toBeVisible();
+  const box = await inline.boundingBox();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(375);
+
+  // The menu drawer: the focus goes to its first link, Escape closes it and returns to the Menu
+  // button, and a click outside (on the backdrop) closes it too.
+  const menu = page.getByRole('button', { name: 'Menu' });
+  const drawer = page.getByRole('navigation', { name: 'Document types' });
+  await menu.click();
+  await expect(menu).toHaveAttribute('aria-expanded', 'true');
+  await expect(drawer.getByRole('link', { name: 'Home' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await expect(menu).toBeFocused();
+  await menu.click();
+  await expect(drawer).toBeVisible();
+  await page.mouse.click(360, 500);
+  await expect(drawer).toBeHidden();
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(name)}`);
   await expect(statusBadge(page)).toHaveText('Submitted');

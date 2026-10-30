@@ -64,6 +64,18 @@ export function hasEditableField(ctx: DocContext, meta: DocTypeMeta): boolean {
   return meta.fields.some((f) => !fieldReadOnly(ctx, meta, f));
 }
 
+/**
+ * True when the form shows a "required" marker: some required field (or required column of a
+ * Table field) can be edited in the current state. A required field that is shown as a value
+ * (read-only, a submitted document) needs no marker and no legend.
+ */
+export function hasEditableRequired(ctx: DocContext, meta: DocTypeMeta): boolean {
+  return meta.fields.some((f) => {
+    if (fieldReadOnly(ctx, meta, f)) return false;
+    return f.type === 'table' ? (f.fields ?? []).some((c) => c.required && !c.read_only) || f.required : f.required;
+  });
+}
+
 export type LifecycleAction = 'submit' | 'cancel' | 'amend' | 'delete';
 
 /**

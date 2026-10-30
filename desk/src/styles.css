@@ -89,6 +89,7 @@ h1 {
   font-size: var(--fs-xl);
   font-weight: 650;
   letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
 }
 
 h2 {
@@ -218,6 +219,7 @@ select,
 textarea {
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   min-height: 2.5rem;
   padding: 0.4rem var(--s-3);
   background: var(--surface);
@@ -366,6 +368,7 @@ td input[readonly] {
 /* ---------- Cards ---------- */
 
 .card {
+  min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -377,8 +380,6 @@ td input[readonly] {
   margin-bottom: var(--s-3);
   font-size: var(--fs-sm);
   font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -456,6 +457,10 @@ td input[readonly] {
   border-bottom: 1px solid var(--border);
 }
 
+.topbar > * {
+  min-width: 0; /* a flex child may be narrower than its content: nothing pushes the page wider */
+}
+
 .brand {
   display: inline-flex;
   align-items: center;
@@ -472,12 +477,20 @@ td input[readonly] {
   display: block;
 }
 
+.brand span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The user menu is the flexible part of the bar: a long name is cut with an ellipsis. */
 .topbar .menu {
-  min-width: 0;
+  flex: 0 1 auto;
+  max-width: 12rem;
 }
 
 .user-button {
-  max-width: 12rem;
+  max-width: 100%;
 }
 
 .user-name {
@@ -531,8 +544,6 @@ td input[readonly] {
   margin: var(--s-5) var(--s-3) var(--s-1);
   font-size: 0.75rem;
   font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -572,6 +583,10 @@ td input[readonly] {
   outline: none;
 }
 
+.page {
+  min-width: 0;
+}
+
 .page > * + * {
   margin-top: var(--s-4);
 }
@@ -585,9 +600,19 @@ td input[readonly] {
   gap: var(--s-3);
 }
 
+.page-head > *,
+.doc-head > * {
+  min-width: 0;
+}
+
 .page-head h1,
 .doc-head h1 {
   margin: 0;
+}
+
+.breadcrumbs li {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .breadcrumbs ol {
@@ -635,6 +660,14 @@ td input[readonly] {
     display: block;
   }
 
+  /* Behind the drawer, below the top bar (the Menu button stays usable): a click closes it. */
+  .backdrop {
+    position: fixed;
+    inset: var(--topbar-h) 0 0;
+    z-index: 25;
+    background: rgb(16 24 40 / 35%);
+  }
+
   .content {
     padding: var(--s-4) var(--s-4) var(--s-6);
   }
@@ -643,8 +676,34 @@ td input[readonly] {
     font-size: var(--fs-base);
   }
 
-  .user-button {
+  .topbar .menu {
     max-width: 7.5rem;
+  }
+}
+
+/* On a phone the menu button is the three bars only; "Menu" stays as its accessible name. */
+@media (max-width: 479px) {
+  .nav-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .topbar {
+    gap: var(--s-2);
+    padding: 0 var(--s-3);
+  }
+}
+
+/* Smaller than that, the logo mark alone is the brand (the name stays for screen readers). */
+@media (max-width: 359px) {
+  .brand span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    clip-path: inset(50%);
   }
 }
 
@@ -895,6 +954,7 @@ th.num button.sort {
 
 .muted-name {
   display: block;
+  overflow-wrap: anywhere;
   font-size: var(--fs-sm);
   font-weight: 400;
   color: var(--muted);
@@ -902,6 +962,32 @@ th.num button.sort {
 
 .row-link {
   cursor: pointer;
+}
+
+/* The status of a row is its own column from 600 px; on a phone, where that column would be
+   off-screen, it sits under the title instead. */
+.status-inline {
+  display: none;
+  margin-top: var(--s-1);
+}
+
+.sort-sub {
+  display: block;
+  font-weight: 400;
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: left;
+}
+
+@media (max-width: 599px) {
+  .status-inline {
+    display: block;
+    width: fit-content;
+  }
+
+  .col-status {
+    display: none;
+  }
 }
 
 .row-link:hover > * {
@@ -944,12 +1030,16 @@ th.num button.sort {
   min-width: 0;
 }
 
-.doc-title h1 {
-  overflow-wrap: anywhere;
-}
-
 .doc-title h1:focus {
   outline: none;
+}
+
+.doc-title-name {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
 }
 
 .doc-actions {
@@ -999,6 +1089,7 @@ th.num button.sort {
 }
 
 .table-field {
+  min-width: 0; /* a fieldset is as wide as its content by default; the grid scrolls in its own box */
   margin: 0;
   padding: 0;
   border: 0;
@@ -1059,8 +1150,6 @@ th.num button.sort {
 .details h2 {
   margin-bottom: var(--s-3);
   font-size: var(--fs-sm);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -1069,6 +1158,10 @@ th.num button.sort {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
   gap: var(--s-3) var(--s-5);
   margin: 0;
+}
+
+.details dl > div {
+  min-width: 0;
 }
 
 .details dt {

@@ -136,7 +136,7 @@ export function List({ doctype, params }: Props) {
   if (metaState?.doctype === doctype && metaState.error) {
     return (
       <div className="page">
-        <h1>{doctype}</h1>
+        <h1>Cannot open this list</h1>
         <p role="alert" className="alert">
           {metaState.error}
         </p>
@@ -146,7 +146,7 @@ export function List({ doctype, params }: Props) {
   if (!meta) {
     return (
       <div className="page" aria-busy="true">
-        <h1>{doctype}</h1>
+        <h1>Loading...</h1>
         <Skeleton lines={5} />
       </div>
     );
@@ -251,7 +251,9 @@ export function List({ doctype, params }: Props) {
                     <th
                       key={column.key}
                       scope="col"
-                      className={isNumericColumn(column) ? 'num' : undefined}
+                      className={
+                        column.key === STATUS_KEY ? 'col-status' : isNumericColumn(column) ? 'num' : undefined
+                      }
                       aria-sort={sorted ? (state.sort.desc ? 'descending' : 'ascending') : undefined}
                     >
                       <button
@@ -260,6 +262,7 @@ export function List({ doctype, params }: Props) {
                         onClick={() => go({ ...state, sort: nextSort(state.sort, column.key), offset: 0 })}
                       >
                         {column.label}
+                        {column.sub ? <span className="sort-sub">{column.sub}</span> : null}
                         {sorted ? <span aria-hidden="true">{state.sort.desc ? ' ▼' : ' ▲'}</span> : null}
                       </button>
                     </th>
@@ -285,9 +288,14 @@ export function List({ doctype, params }: Props) {
                         <th key={NAME_KEY} scope="row">
                           <a href={href}>{title}</a>
                           {title !== name ? <span className="muted-name">{name}</span> : null}
+                          {meta.submittable ? (
+                            <Badge tone={statusBadge(row[STATUS_KEY]).tone} className="status-inline">
+                              {statusBadge(row[STATUS_KEY]).label}
+                            </Badge>
+                          ) : null}
                         </th>
                       ) : column.key === STATUS_KEY ? (
-                        <td key={STATUS_KEY}>
+                        <td key={STATUS_KEY} className="col-status">
                           <Badge tone={statusBadge(row[STATUS_KEY]).tone}>{statusBadge(row[STATUS_KEY]).label}</Badge>
                         </td>
                       ) : (

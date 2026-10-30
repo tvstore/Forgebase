@@ -17,6 +17,8 @@ export interface Column {
   key: string;
   label: string;
   type: FieldType;
+  /** A muted second line of the header: what the column sorts by when `label` is the title field. */
+  sub?: string;
 }
 
 export interface Sort {
@@ -37,10 +39,13 @@ export const STATUS_KEY = 'docstatus';
 /**
  * `name` first (the primary cell), then `list_fields` of the metadata (or, when it names none,
  * the first five fields that are not Table or Text), then the status of a submittable DocType and
- * `modified_at`. The title field is not repeated: the primary cell already shows it.
+ * `modified_at`. The title field is not repeated: the primary cell already shows it, and its
+ * header carries the title field's label (with "Name" muted under it, as in the cells).
  */
 export function listColumns(meta: DocTypeMeta): Column[] {
   const known = new Map(meta.fields.map((f) => [f.name, f]));
+  // The primary cell shows the title field: its header says so (the column still sorts by name).
+  const titleField = meta.title_field === null ? undefined : known.get(meta.title_field);
   const wanted =
     meta.list_fields === null
       ? meta.fields.filter((f) => f.type !== 'table' && f.type !== 'text').map((f) => f.name)
@@ -52,7 +57,9 @@ export function listColumns(meta: DocTypeMeta): Column[] {
     fields.push({ key: f.name, label: f.label, type: f.type });
   }
   return [
-    { key: NAME_KEY, label: 'Name', type: 'data' },
+    titleField === undefined
+      ? { key: NAME_KEY, label: 'Name', type: 'data' as const }
+      : { key: NAME_KEY, label: titleField.label, type: 'data' as const, sub: 'Name' },
     ...(meta.list_fields === null ? fields.slice(0, MAX_FIELD_COLUMNS) : fields),
     ...(meta.submittable ? [{ key: STATUS_KEY, label: 'Status', type: 'data' as const }] : []),
     { key: 'modified_at', label: 'Modified', type: 'datetime' },

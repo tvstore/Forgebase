@@ -28,6 +28,7 @@ export function Layout({ username, route, doctypes, onLogout, children }: Props)
   const [open, setOpen] = useState(false);
   const sidebarId = useId();
   const main = useRef<HTMLElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
 
   // A new page closes the drawer (state is adjusted while rendering, not in an effect).
   const pageKey = route.name === 'list' || route.name === 'new' || route.name === 'form' ? `${route.name}/${route.doctype}` : route.name;
@@ -37,14 +38,18 @@ export function Layout({ username, route, doctypes, onLogout, children }: Props)
     setOpen(false);
   }
 
+  // An open drawer takes the focus (its first link) and gives it back to the Menu button on Escape.
   useEffect(() => {
     if (!open) return;
+    document.getElementById(sidebarId)?.querySelector<HTMLElement>('a')?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key !== 'Escape') return;
+      setOpen(false);
+      toggle.current?.focus();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open]);
+  }, [open, sidebarId]);
 
   return (
     <div className="shell">
@@ -62,13 +67,14 @@ export function Layout({ username, route, doctypes, onLogout, children }: Props)
       <header className="topbar">
         <button
           type="button"
+          ref={toggle}
           className="btn btn-ghost nav-toggle"
           aria-expanded={open}
           aria-controls={sidebarId}
           onClick={() => setOpen((o) => !o)}
         >
           <span className="burger" aria-hidden="true" />
-          Menu
+          <span className="nav-label">Menu</span>
         </button>
         <a className="brand" href={homeHref()}>
           <Logo />
@@ -81,7 +87,8 @@ export function Layout({ username, route, doctypes, onLogout, children }: Props)
         </MenuButton>
       </header>
       <div className="body">
-        <Sidebar id={sidebarId} open={open} doctypes={doctypes} route={route} />
+        {open ? <div className="backdrop" aria-hidden="true" onClick={() => setOpen(false)} /> : null}
+        <Sidebar id={sidebarId} open={open} doctypes={doctypes} route={route} onNavigate={() => setOpen(false)} />
         <main id="content" ref={main} tabIndex={-1} className="content">
           <Breadcrumbs crumbs={breadcrumbs(route, doctypes)} />
           {children}

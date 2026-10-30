@@ -5,7 +5,8 @@
 //
 // It adds a few sample documents (customers, and orders that are a draft, submitted and
 // cancelled, so that every status badge shows), then takes the login page, home, list and form
-// at 1280, 800 and 375 px, and asserts that no page scrolls sideways at 375 px. The PNGs are not
+// at 1280, 800 and 375 px (and the list at 320 px, a submitted form at 375 px), and asserts that
+// no page scrolls sideways at those phone widths. The PNGs are not
 // committed.
 
 import { expect, test } from '@playwright/test';
@@ -160,7 +161,21 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await expect(page.locator('.toast', { hasText: 'Saved' })).toBeVisible();
   await page.screenshot({ path: `${DIR}/form-saved-toast-1280.png` });
 
+  // The smallest phone and a submitted form on a phone (the status badge sits under the title in the list).
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto('/desk/#/list/sales_order');
+  await expect(page.getByRole('row', { name: new RegExp(docs.submitted) })).toBeVisible();
+  await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  await expect(page.locator('.toast')).toHaveCount(0, { timeout: 8000 }); // an earlier "Saved" is gone
+  await noSideScroll(page, 'list at 320');
+  await page.screenshot({ path: `${DIR}/list-320.png` });
+
   await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
+  await expect(page.locator('.status-badge')).toHaveText('Submitted');
+  await noSideScroll(page, 'submitted form at 375');
+  await page.screenshot({ path: `${DIR}/form-submitted-375.png` });
+
   await page.getByRole('button', { name: 'Menu' }).click();
   await page.screenshot({ path: `${DIR}/form-menu-open-375.png` });
 });

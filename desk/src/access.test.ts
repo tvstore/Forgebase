@@ -4,6 +4,7 @@ import {
   docStatusOf,
   fieldReadOnly,
   hasEditableField,
+  hasEditableRequired,
   headerActions,
   isAddressable,
   lifecycleActions,
@@ -106,6 +107,34 @@ describe('read-only rules (docstatus x allow_on_submit x field kind x rights)', 
     expect(fieldReadOnly(ctx({ ...base, isNew: true, owner: null }), namedMeta, email)).toBe(false);
     expect(fieldReadOnly(ctx(base), namedMeta, email)).toBe(true);
     expect(fieldReadOnly(ctx(base), namedMeta, other)).toBe(false);
+  });
+});
+
+describe('the required marker', () => {
+  const required = meta(
+    [
+      field('customer', 'link', { required: true }),
+      field('remarks', 'text', { allow_on_submit: true }),
+      field('lines', 'table', { target: 'line', fields: [field('item', 'data', { required: true })] }),
+    ],
+    { submittable: true },
+  );
+
+  it('shows for a draft and a new document that have an editable required field', () => {
+    expect(hasEditableRequired(ctx({ isNew: true }), required)).toBe(true);
+    expect(hasEditableRequired(ctx({ docStatus: 0 }), required)).toBe(true);
+  });
+
+  it('is not needed once every required field is shown as a value', () => {
+    expect(hasEditableRequired(ctx({ docStatus: 1 }), required)).toBe(false); // submitted: only remarks is editable
+    expect(hasEditableRequired(ctx({ docStatus: 2 }), required)).toBe(false);
+    expect(hasEditableRequired(ctx({ rights: rights({ read: 'all' }) }), required)).toBe(false); // no write right
+  });
+
+  it('counts a required column of an editable table, and none when nothing is required', () => {
+    const tableOnly = meta([field('lines', 'table', { target: 'line', fields: [field('item', 'data', { required: true })] })]);
+    expect(hasEditableRequired(ctx({ submittable: false }), tableOnly)).toBe(true);
+    expect(hasEditableRequired(ctx(), meta([field('a', 'data')]))).toBe(false);
   });
 });
 

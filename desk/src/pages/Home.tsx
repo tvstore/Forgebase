@@ -39,7 +39,7 @@ export function Home({ doctypes }: { doctypes: DocTypes }) {
             {groupByApp(doctypes.list).map((group) => (
               <section key={group.app} className="card" aria-labelledby={`app-${group.app}`}>
                 <h2 id={`app-${group.app}`} className="card-title">
-                  {group.app}
+                  {group.label}
                 </h2>
                 <ul className="doctype-list">
                   {group.doctypes.map((d) => (

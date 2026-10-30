@@ -3,13 +3,13 @@ import type { FormEvent, ReactNode } from 'react';
 
 import { ApiError, createDocument, deleteDocument, getDocument, transitionDocument, updateDocument } from '../api';
 import type { Transition } from '../api';
-import { docStatusLabel, docStatusOf, fieldReadOnly, hasEditableField, headerActions } from '../access';
+import { docStatusLabel, docStatusOf, fieldReadOnly, hasEditableField, hasEditableRequired, headerActions } from '../access';
 import type { DocContext, LifecycleAction } from '../access';
 import { conflictMessage, isStaleCode, mapDetails } from '../errors';
 import { blankState, buildChanges, buildCreate, changedFields, errorKey, stateOf } from '../fields';
 import type { Errors, FormState, FormValue } from '../fields';
 import { formHref, listHref, navigate, setNavigationBlocker } from '../router';
-import { formatCell } from '../listing';
+import { formatCell, rowTitle } from '../listing';
 import { saveShortcut } from '../shortcut';
 import { statusBadge } from '../status';
 import type { DocTypeMeta, DocumentRow, FieldMeta } from '../types';
@@ -278,7 +278,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
   useEffect(() => {
     saveCallback.current = () => save();
   });
-  const shortcutState = { canSave, dirty, isNew };
+  const shortcutState = { canSave, dirty, isNew, dialogOpen: asking !== null };
   const shortcutRef = useRef(shortcutState);
   useEffect(() => {
     shortcutRef.current = shortcutState;
@@ -299,7 +299,9 @@ export function DocumentForm({ meta, initial, username }: Props) {
     setErrors((e) => (field in e ? Object.fromEntries(Object.entries(e).filter(([k]) => k !== field)) : e));
   };
 
-  const title = isNew ? `New ${meta.label}` : (name ?? meta.label);
+  // The heading is the title field's value (as in the list), the name muted under it.
+  const shown = doc === null ? null : rowTitle(doc, meta);
+  const title = shown === null ? `New ${meta.label}` : shown.title === '' ? meta.label : shown.title;
   const docName = name ?? 'this document';
 
   // Problems that no single control carries: shown in the alert next to the unmapped details.
@@ -308,9 +310,13 @@ export function DocumentForm({ meta, initial, username }: Props) {
     .map((f) => `${f.label}: ${errors[errorKey(f.name)]}`);
 
   const badge = statusBadge(doc?.docstatus);
+  const requiredShown = canSave && hasEditableRequired(ctx, meta);
 
   return (
     <div className="page">
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {busy ? 'Working...' : ''}
+      </p>
       <form ref={formRef} noValidate onSubmit={save}>
         <header className="doc-head">
           <div className="doc-title">
@@ -323,6 +329,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
               </Badge>
             ) : null}
             {isNew || dirty ? <Badge tone="warning">{isNew ? 'Not saved' : 'Unsaved changes'}</Badge> : null}
+            {shown !== null && shown.title !== shown.name ? <p className="doc-title-name">{shown.name}</p> : null}
           </div>
           <div className="doc-actions">
             {header.save ? (
@@ -450,7 +457,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
           </p>
         ) : (
           <section className="card form-card" aria-label={`${meta.label} fields`}>
-            {canSave ? <p className="hint required-hint">* required</p> : null}
+            {requiredShown ? <p className="hint required-hint">* required</p> : null}
             <div className="fields">
               {meta.fields.map((field) => {
                 const id = `${idBase}-${field.name}`;
@@ -461,7 +468,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
                     <fieldset key={field.name} className="field-wide table-field">
                       <legend>
                         {field.label}
-                        {field.required ? <span aria-hidden="true"> *</span> : null}
+                        {field.required && !readOnly ? <span aria-hidden="true"> *</span> : null}
                       </legend>
                       <TableGrid
                         field={field}
@@ -495,7 +502,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
                 const label = (
                   <label htmlFor={id}>
                     {field.label}
-                    {field.required ? <span aria-hidden="true"> *</span> : null}
+                    {field.required && !readOnly ? <span aria-hidden="true"> *</span> : null}
                   </label>
                 );
                 const classes = [

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { OTHER_APP, breadcrumbs, groupByApp } from './nav';
+import { OTHER_APP, appLabel, breadcrumbs, groupByApp } from './nav';
 import { parseHash } from './router';
 import { rights } from './testing';
 import type { DocTypeSummary } from './types';
@@ -23,6 +23,7 @@ describe('groupByApp', () => {
       d('e', 'Empty app', ''),
     ]);
     expect(groups.map((g) => g.app)).toEqual(['crm', 'sales', OTHER_APP]);
+    expect(groups.map((g) => g.label)).toEqual(['Crm', 'Sales', OTHER_APP]);
     expect(groups[1]?.doctypes.map((x) => x.name)).toEqual(['a', 'b']);
     expect(groups[2]?.doctypes.map((x) => x.name)).toEqual(['e', 'z']);
   });
@@ -32,12 +33,23 @@ describe('groupByApp', () => {
   });
 });
 
+describe('appLabel', () => {
+  it('humanizes the app name; no app is "Other"', () => {
+    expect(appLabel('local')).toBe('Local');
+    expect(appLabel('sales_extension')).toBe('Sales Extension');
+    expect(appLabel('my-app')).toBe('My App');
+    expect(appLabel('crm')).toBe('Crm');
+    expect(appLabel(null)).toBe(OTHER_APP);
+    expect(appLabel('')).toBe(OTHER_APP);
+  });
+});
+
 describe('breadcrumbs', () => {
   const list = [d('sales_order', 'Sales Order', 'sales'), d('thing', 'Thing', null)];
 
   it('is App / DocType / Document for a form, with links but the last', () => {
     expect(breadcrumbs(parseHash('#/form/sales_order/SO-1'), list)).toEqual([
-      { label: 'sales', href: '#/' },
+      { label: 'Sales', href: '#/' },
       { label: 'Sales Order', href: '#/list/sales_order' },
       { label: 'SO-1' },
     ]);
@@ -45,7 +57,7 @@ describe('breadcrumbs', () => {
 
   it('ends at the DocType for a list and at New for a new document', () => {
     expect(breadcrumbs(parseHash('#/list/sales_order'), list)).toEqual([
-      { label: 'sales', href: '#/' },
+      { label: 'Sales', href: '#/' },
       { label: 'Sales Order' },
     ]);
     expect(breadcrumbs(parseHash('#/new/thing'), list).map((c) => c.label)).toEqual([OTHER_APP, 'Thing', 'New']);

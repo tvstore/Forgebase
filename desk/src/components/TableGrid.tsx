@@ -66,7 +66,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                 {columns.map((c) => (
                   <th key={c.name} scope="col">
                     {c.label}
-                    {c.required ? <span aria-hidden="true"> *</span> : null}
+                    {c.required && !readOnly && !c.read_only ? <span aria-hidden="true"> *</span> : null}
                   </th>
                 ))}
                 {readOnly ? null : (

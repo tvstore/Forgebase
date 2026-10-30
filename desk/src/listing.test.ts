@@ -78,6 +78,13 @@ describe('listColumns', () => {
     expect(columns.find((c) => c.key === 'docstatus')?.label).toBe('Status');
   });
 
+  it('names the primary column after the title field, with "Name" muted under it', () => {
+    const columns = listColumns(meta([field('a', 'data')], false, { title_field: 'a' }));
+    expect(columns[0]).toMatchObject({ key: 'name', label: 'A', sub: 'Name' });
+    const plain = listColumns(meta([field('a', 'data')]));
+    expect(plain[0]).toEqual({ key: 'name', label: 'Name', type: 'data' });
+  });
+
   it('falls back to the default columns without the title field, and has no status when not submittable', () => {
     const columns = listColumns(meta([field('a', 'data'), field('b', 'int')], false, { title_field: 'a' }));
     expect(columns.map((c) => c.key)).toEqual(['name', 'b', 'modified_at']);
