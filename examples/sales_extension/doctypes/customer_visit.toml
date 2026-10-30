@@ -22,6 +22,15 @@ required = true
 name = "notes"
 type = "text"
 
+# The sales order this visit follows up, set by the job `sales_extension.plan_follow_up_visit`, which looks for it
+# before it plans a visit. A plain Data field and not a Link: the visit needs no foreign key, which would also stop
+# a cancelled order from being deleted. It is unique so that the database, not only the check, keeps two visits from
+# following up one order (empty values do not collide).
+[[fields]]
+name = "source_order"
+type = "data"
+unique = true
+
 [[permissions]]
 role = "Sales User"
 read = true

@@ -4,10 +4,12 @@
 
 use std::str::FromStr;
 
-use forgebase::testing::{HttpClient, TestDb, assert_doctypes_listed, json};
-use forgebase::{Decimal, DocTypeHooks, Document, Forgebase, HookContext, Operation, Value};
+use forgebase::testing::{HttpClient, TestDb, assert_doctypes_listed, json, run_jobs};
+use forgebase::{
+    Decimal, DocTypeHooks, Document, EnqueuedJobs, Forgebase, HookContext, Operation, Value,
+};
 
-use sales_extension::{MIN_ORDER_TOTAL, MinimumOrder, app};
+use sales_extension::{FollowUp, MIN_ORDER_TOTAL, MinimumOrder, app};
 
 /// The same apps, in the same order, as `main.rs`.
 fn binary() -> Forgebase {
@@ -76,6 +78,21 @@ fn a_missing_or_odd_total_counts_as_zero() {
     for total in [None, Some(Value::Null), Some(Value::Text("99".to_owned()))] {
         assert!(validate(&mut with_total(total)).is_err());
     }
+}
+
+#[test]
+fn a_submit_enqueues_the_follow_up_job() {
+    let jobs = EnqueuedJobs::new();
+    let ctx = HookContext::new("sales_order", "ann", Operation::Submit).with_jobs(&jobs);
+    let mut doc = Document {
+        name: Some("SO-2026-00001".to_owned()),
+        ..Document::default()
+    };
+    FollowUp.before_submit(&ctx, &mut doc).expect("hook");
+    let enqueued = jobs.take();
+    assert_eq!(enqueued.len(), 1);
+    assert_eq!(enqueued[0].name(), "sales_extension.plan_follow_up_visit");
+    assert_eq!(enqueued[0].payload(), &json!({"order": "SO-2026-00001"}));
 }
 
 // --- Against PostgreSQL, both apps composed -----------------------------------------------------
@@ -260,5 +277,147 @@ async fn a_user_without_a_sales_role_cannot_create_a_visit() {
         .await;
     assert_eq!(denied.status, 403, "{:?}", denied.body);
     assert_eq!(denied.error_code(), Some("permission_denied"));
+    env.db.cleanup().await;
+}
+
+// --- Jobs, both apps composed -------------------------------------------------------------------
+
+const ORDERS: &str = "/api/v1/resource/sales_order";
+
+/// A draft of 2 x 5.00 (the smallest total `MinimumOrder` accepts) with an optional
+/// `order_date`; returns its name.
+async fn draft(env: &Env, order_date: Option<&str>) -> String {
+    let mut body = json!({"customer": "ada@example.com",
+                          "items": [{"description": "Pen", "qty": 2, "rate": "5.00"}]});
+    if let Some(date) = order_date {
+        body["order_date"] = json!(date);
+    }
+    let created = env.user.post(ORDERS, body).await;
+    assert_eq!(created.status, 201, "{:?}", created.body);
+    created.data()["name"].as_str().expect("name").to_owned()
+}
+
+async fn submit(env: &Env, name: &str) -> forgebase::testing::Reply {
+    env.user
+        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
+        .await
+}
+
+async fn job_names(db: &TestDb) -> Vec<String> {
+    db.rows("SELECT name FROM fb_job ORDER BY name")
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_submitted_order_gets_a_follow_up_visit_and_a_log() {
+    let env = env().await;
+    let name = draft(&env, Some("2026-10-20")).await;
+    let submitted = submit(&env, &name).await;
+    assert_eq!(submitted.status, 200, "{:?}", submitted.body);
+    // One job of each app, both written by the submit.
+    assert_eq!(
+        job_names(&env.db).await,
+        [
+            "sales.log_order_event",
+            "sales_extension.plan_follow_up_visit"
+        ]
+    );
+
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.retried(), run.dead()), (2, 0, 0));
+
+    // The visit is a week after the order date and says which order it follows up.
+    let visits = env
+        .db
+        .rows("SELECT visited_on::text, notes, source_order, owner FROM doc_customer_visit")
+        .await;
+    assert_eq!(
+        visits,
+        [[
+            "2026-10-27",
+            format!("Follow-up of {name}").as_str(),
+            name.as_str(),
+            "job:sales_extension.plan_follow_up_visit"
+        ]]
+    );
+    let listed = env.user.get("/api/v1/resource/customer_visit").await;
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(listed.data()[0]["customer"], "ada@example.com");
+
+    // The job of `sales` ran as well: both apps' jobs are in the composed binary.
+    let logs = env
+        .db
+        .rows("SELECT name, owner FROM doc_sales_order_log")
+        .await;
+    assert_eq!(
+        logs,
+        [[
+            format!("{name}-submitted").as_str(),
+            "job:sales.log_order_event"
+        ]]
+    );
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_job_delivered_twice_plans_one_visit() {
+    let env = env().await;
+    let name = draft(&env, Some("2026-10-20")).await;
+    assert_eq!(submit(&env, &name).await.status, 200);
+    env.db
+        .exec(
+            "INSERT INTO fb_job (id, name, payload, status, enqueued_by)
+             SELECT gen_random_uuid(), name, payload, 'queued', 'test' FROM fb_job
+             WHERE name = 'sales_extension.plan_follow_up_visit'",
+        )
+        .await;
+
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.retried(), run.dead()), (3, 0, 0));
+    let visits = env
+        .db
+        .rows("SELECT count(*)::text FROM doc_customer_visit")
+        .await;
+    assert_eq!(visits, [["1"]]);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_order_without_a_date_gets_no_visit() {
+    let env = env().await;
+    let name = draft(&env, None).await;
+    assert_eq!(submit(&env, &name).await.status, 200);
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.dead()), (2, 0));
+    let visits = env
+        .db
+        .rows("SELECT count(*)::text FROM doc_customer_visit")
+        .await;
+    assert_eq!(visits, [["0"]]);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_refused_submit_leaves_no_job_of_either_app() {
+    let env = env().await;
+    // Every save needs a total of 10.00, so a small order cannot be saved. Make the stored
+    // order small behind the API's back (a row edited by hand, as after a bad import): the
+    // submit recomputes the total from the items, and `MinimumOrder` refuses it.
+    let name = draft(&env, Some("2026-10-20")).await;
+    env.db.exec("UPDATE doc_sales_order_item SET qty = 1").await;
+    let refused = submit(&env, &name).await;
+    assert_eq!(refused.status, 422, "{:?}", refused.body);
+    assert!(
+        refused
+            .error_message()
+            .expect("message")
+            .contains("a sales order must total at least 10.00"),
+        "{:?}",
+        refused.body
+    );
+    assert!(job_names(&env.db).await.is_empty());
     env.db.cleanup().await;
 }

@@ -314,7 +314,7 @@ forgebase job show <id>                             # every field as JSON, the p
 forgebase job retry <id>                            # a dead job goes back to the queue
 ```
 
-The first signal stops the worker from claiming and lets running jobs finish for 30 seconds (then they are given back, without counting an attempt); a second signal exits at once, and another worker recovers what was running when its lease expires. In an app's tests, `forgebase::testing::run_jobs(&binary, &db)` runs the jobs that are due.
+The first signal stops the worker from claiming and lets running jobs finish for 30 seconds (then they are given back, without counting an attempt); a second signal exits at once, and another worker recovers what was running when its lease expires. In an app's tests, `forgebase::testing::run_jobs(&binary, &db)` runs the jobs that are due. Two complete examples: `cargo run -p sales -- worker` runs the log and daily-summary jobs of [`examples/sales`](examples/sales/README.md) (and `cargo run -p sales_extension -- worker` those of both example apps), after `migrate`.
 
 #### Scheduled jobs
 

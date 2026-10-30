@@ -3,8 +3,13 @@
 
 use std::str::FromStr;
 
-use forgebase::testing::{HttpClient, TestDb, assert_doctypes_listed, json};
-use forgebase::{Decimal, DocTypeHooks, Document, Forgebase, HookContext, Operation, Row, Value};
+use forgebase::testing::{
+    HttpClient, TestDb, assert_doctypes_listed, json, run_jobs, run_schedules_at,
+};
+use forgebase::{
+    Decimal, DocTypeHooks, Document, EnqueuedJobs, Forgebase, HookContext, OffsetDateTime,
+    Operation, Row, Value,
+};
 
 use sales::{OrderRules, app};
 
@@ -154,9 +159,46 @@ fn submit_is_refused_when_the_total_is_not_positive() {
     let mut doc = order(vec![item(Value::Int(1), Value::Decimal(dec("1.00")))]);
     assert!(OrderRules.before_submit(&ctx, &mut doc).is_err());
 
+    // A positive total passes. The hook also enqueues a job, so it needs a collector and a name.
     doc.values
         .insert("total".to_owned(), Value::Decimal(dec("0.01")));
+    doc.name = Some("SO-2026-00001".to_owned());
+    let jobs = EnqueuedJobs::new();
+    let ctx = ctx.with_jobs(&jobs);
     OrderRules.before_submit(&ctx, &mut doc).expect("positive");
+}
+
+#[test]
+fn submit_and_cancel_enqueue_the_log_job() {
+    let jobs = EnqueuedJobs::new();
+    let mut doc = order(vec![item(Value::Int(1), Value::Decimal(dec("1.00")))]);
+    doc.name = Some("SO-2026-00001".to_owned());
+    validate(&mut doc);
+
+    let submit = HookContext::new("sales_order", "ann", Operation::Submit).with_jobs(&jobs);
+    OrderRules.before_submit(&submit, &mut doc).expect("submit");
+    let cancel = HookContext::new("sales_order", "max", Operation::Cancel).with_jobs(&jobs);
+    OrderRules.before_cancel(&cancel, &doc).expect("cancel");
+
+    let enqueued = jobs.take();
+    assert_eq!(enqueued.len(), 2);
+    for (job, event) in enqueued.iter().zip(["submitted", "cancelled"]) {
+        assert_eq!(job.name(), "sales.log_order_event");
+        assert_eq!(
+            job.payload(),
+            &json!({"order": "SO-2026-00001", "event": event})
+        );
+    }
+}
+
+#[test]
+fn a_refused_submit_enqueues_nothing() {
+    let jobs = EnqueuedJobs::new();
+    let ctx = HookContext::new("sales_order", "ann", Operation::Submit).with_jobs(&jobs);
+    let mut doc = order(vec![]);
+    doc.name = Some("SO-2026-00001".to_owned());
+    assert!(OrderRules.before_submit(&ctx, &mut doc).is_err());
+    assert!(jobs.take().is_empty());
 }
 
 // --- Against PostgreSQL -------------------------------------------------------------------------
@@ -387,5 +429,272 @@ async fn permissions_are_enforced() {
     assert_eq!(one.status, 403, "{:?}", one.body);
     let list = env.outsider.get(ORDERS).await;
     assert_eq!(list.status, 403, "{:?}", list.body);
+    env.db.cleanup().await;
+}
+
+// --- Jobs and the schedule ----------------------------------------------------------------------
+
+fn binary() -> Forgebase {
+    Forgebase::new().app(app())
+}
+
+/// Creates an order of `items` (and `order_date` when given) as the Sales User and returns its
+/// name. The first item is 3 x 10.50 and the second 2 x 0.25, so `two_items` totals 32.00.
+async fn draft(env: &Env, order_date: Option<&str>, items: forgebase::testing::Json) -> String {
+    let mut body = json!({"customer": "ada@example.com", "items": items});
+    if let Some(date) = order_date {
+        body["order_date"] = json!(date);
+    }
+    let created = env.user.post(ORDERS, body).await;
+    assert_eq!(created.status, 201, "{:?}", created.body);
+    created.data()["name"].as_str().expect("name").to_owned()
+}
+
+async fn submit(env: &Env, name: &str) {
+    let reply = env
+        .user
+        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
+        .await;
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+}
+
+/// Copies the job rows named `name` into new queued rows: the same job delivered twice.
+async fn duplicate_jobs(db: &TestDb, name: &str) {
+    db.exec(&format!(
+        "INSERT INTO fb_job (id, name, payload, status, enqueued_by)
+         SELECT gen_random_uuid(), name, payload, 'queued', 'test' FROM fb_job
+         WHERE name = '{name}'"
+    ))
+    .await;
+}
+
+async fn count(db: &TestDb, sql: &str) -> String {
+    db.rows(sql).await.remove(0).remove(0)
+}
+
+#[tokio::test]
+async fn a_submit_and_a_cancel_are_logged_by_a_job() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    submit(&env, &name).await;
+
+    // The outbox: the job exists, queued, as soon as the submit committed.
+    let queued = env
+        .db
+        .rows("SELECT name, status, enqueued_by FROM fb_job")
+        .await;
+    assert_eq!(queued, [["sales.log_order_event", "queued", "ann"]]);
+
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.retried(), run.dead()), (1, 0, 0));
+    let logs = env
+        .db
+        .rows("SELECT name, event, total::text, owner, modified_by FROM doc_sales_order_log")
+        .await;
+    assert_eq!(
+        logs,
+        [[
+            format!("{name}-submitted").as_str(),
+            "submitted",
+            "32.00",
+            "job:sales.log_order_event",
+            "job:sales.log_order_event"
+        ]]
+    );
+    // The log links to the order, and a Sales User can read it but not change it.
+    let read = env
+        .user
+        .get(&format!(
+            "/api/v1/resource/sales_order_log/{name}-submitted"
+        ))
+        .await;
+    assert_eq!(read.status, 200, "{:?}", read.body);
+    assert_eq!(read.data()["sales_order"], name.as_str());
+    let write = env
+        .user
+        .post(
+            "/api/v1/resource/sales_order_log",
+            json!({"key": "x", "sales_order": name}),
+        )
+        .await;
+    assert_eq!(write.status, 403, "{:?}", write.body);
+
+    let cancelled = env
+        .manager
+        .post(&format!("{ORDERS}/{name}/cancel"), json!({"version": 2}))
+        .await;
+    assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!(run.done(), 1);
+    let events = env
+        .db
+        .rows("SELECT event FROM doc_sales_order_log ORDER BY event")
+        .await;
+    assert_eq!(events, [["cancelled"], ["submitted"]]);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_job_delivered_twice_logs_once() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    submit(&env, &name).await;
+    // At-least-once delivery: the same job twice, as after a worker crash.
+    duplicate_jobs(&env.db, "sales.log_order_event").await;
+
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.retried(), run.dead()), (2, 0, 0));
+    assert_eq!(
+        count(&env.db, "SELECT count(*)::text FROM doc_sales_order_log").await,
+        "1"
+    );
+    let status = env
+        .db
+        .rows("SELECT status, count(*)::text FROM fb_job GROUP BY status")
+        .await;
+    assert_eq!(status, [["done", "2"]]);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_refused_submit_leaves_no_job() {
+    let env = env().await;
+    customer(&env.manager).await;
+    // The rule "an order needs items" refuses this submit.
+    let name = draft(&env, None, json!([])).await;
+    let refused = env
+        .user
+        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
+        .await;
+    assert_eq!(refused.status, 422, "{:?}", refused.body);
+    assert_eq!(
+        count(
+            &env.db,
+            "SELECT count(*)::text FROM fb_job WHERE name = 'sales.log_order_event'"
+        )
+        .await,
+        "0"
+    );
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_job_for_a_missing_order_is_dead_at_once() {
+    let env = env().await;
+    env.db
+        .exec(
+            "INSERT INTO fb_job (id, name, payload, status, enqueued_by)
+             VALUES (gen_random_uuid(), 'sales.log_order_event',
+                     '{\"order\": \"SO-0\", \"event\": \"submitted\"}', 'queued', 'test'),
+                    (gen_random_uuid(), 'sales.log_order_event', '{}', 'queued', 'test')",
+        )
+        .await;
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.retried(), run.dead()), (0, 0, 2));
+    let errors = env
+        .db
+        .rows("SELECT attempts::text, last_error FROM fb_job ORDER BY last_error")
+        .await;
+    assert_eq!(errors.len(), 2);
+    assert!(errors.iter().all(|row| row[0] == "1"), "{errors:?}");
+    assert!(
+        errors[0][1].starts_with("the payload must be"),
+        "{errors:?}"
+    );
+    assert_eq!(errors[1][1], "the sales order SO-0 does not exist");
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_daily_summary_counts_the_submitted_orders_of_the_day_before_the_tick() {
+    let env = env().await;
+    customer(&env.manager).await;
+
+    // `migrate` stored the schedule: due at the next 02:00 UTC. The summary is of the day
+    // before that tick. Both are read from the database, so the test does not depend on when
+    // it runs.
+    let due = env
+        .db
+        .rows(
+            "SELECT ((next_run_at AT TIME ZONE 'UTC')::date - 1)::text,
+                    extract(epoch FROM next_run_at)::bigint::text
+             FROM fb_schedule WHERE name = 'sales.daily_summary'",
+        )
+        .await;
+    let [day, tick] = &due[0][..] else {
+        panic!("{due:?}")
+    };
+    let tick = OffsetDateTime::from_unix_timestamp(tick.parse().expect("epoch")).expect("time");
+
+    // Two submitted orders on the day (32.00 and 5.00) are counted.
+    for items in [
+        two_items(),
+        json!([{"description": "Pen", "qty": 1, "rate": "5.00"}]),
+    ] {
+        let name = draft(&env, Some(day), items).await;
+        submit(&env, &name).await;
+    }
+    // Not counted: a draft of the day, a cancelled order of the day, a submitted order of
+    // another day.
+    draft(&env, Some(day), two_items()).await;
+    let cancelled = draft(&env, Some(day), two_items()).await;
+    submit(&env, &cancelled).await;
+    let reply = env
+        .manager
+        .post(
+            &format!("{ORDERS}/{cancelled}/cancel"),
+            json!({"version": 2}),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    let other = draft(&env, Some("2000-01-01"), two_items()).await;
+    submit(&env, &other).await;
+
+    // The tick: the schedule enqueues the job once, and a second call for the same time does
+    // not enqueue it again.
+    assert!(run_schedules_at(&binary(), &env.db, tick).await >= 1);
+    assert_eq!(run_schedules_at(&binary(), &env.db, tick).await, 0);
+    let queued = env
+        .db
+        .rows(
+            "SELECT count(*)::text, min(payload->>'scheduled_for') FROM fb_job
+             WHERE name = 'sales.daily_summary'",
+        )
+        .await;
+    assert_eq!(queued[0][0], "1");
+    assert!(queued[0][1].starts_with(&format!("{}T02:00:00", tick.date())));
+
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!(run.dead(), 0);
+    let summary = env
+        .db
+        .rows("SELECT name, day, orders::text, total::text, owner FROM doc_sales_daily_summary")
+        .await;
+    assert_eq!(
+        summary,
+        [[
+            day.as_str(),
+            day.as_str(),
+            "2",
+            "37.00",
+            "job:sales.daily_summary"
+        ]]
+    );
+
+    // The same tick delivered again (an operator enqueued it): the handler finds the summary
+    // and does nothing, and the job still ends `done`.
+    duplicate_jobs(&env.db, "sales.daily_summary").await;
+    let run = run_jobs(&binary(), &env.db).await;
+    assert_eq!((run.done(), run.dead()), (1, 0));
+    assert_eq!(
+        count(
+            &env.db,
+            "SELECT count(*)::text FROM doc_sales_daily_summary"
+        )
+        .await,
+        "1"
+    );
     env.db.cleanup().await;
 }
