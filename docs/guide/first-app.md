@@ -247,6 +247,72 @@ Migrations are **append-only**. The checksum of every applied migration is verif
 
 `forgebase migrate --dry-run` shows what would be applied and changes nothing. Two `migrate` runs at the same time wait for each other (`--lock-timeout-ms`). `fb_app` records each app and the version it declared at its last migrate.
 
+## 7. Background jobs and schedules
+
+Work that should not happen inside a request, or that must happen later or on a timer, is a **job**. The full design is [ADR 0013](../adr/0013-jobs-scheduler-and-transactional-outbox.md); the running examples are `sales` and `sales_extension` (section 5), and every snippet below is from them.
+
+**Register a job.** A job is a `JobHandler`, registered with `App::job`; it is known as `<app>.<name>`:
+
+```rust
+App::new("sales")
+    .job("log_order_event", LogOrderEvent) // the job is `sales.log_order_event`
+```
+
+```rust
+impl JobHandler for LogOrderEvent {
+    fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+        Box::pin(async move { /* use ctx */ Ok(()) })
+    }
+}
+```
+
+The handler returns a **boxed future** (`JobFuture`) because Forgebase has no async-trait dependency. Copy what you need out of `ctx.payload()` into owned values first: `ctx.documents()` borrows `ctx` mutably. The options (5 attempts, 30 s backoff doubling up to 1 h, 5 min timeout) are the defaults; `App::job_with` takes a `JobOptions`.
+
+**Enqueue from a hook, with the outbox.** A hook calls `ctx.enqueue(name, payload)`. The job is written in the **same transaction** as the document change, after all hooks have run, so it exists only if the operation commits: a refused submit leaves no job.
+
+```rust
+fn before_cancel(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), HookError> {
+    let order = doc.name.as_deref().ok_or_else(|| HookError::new("no name"))?;
+    ctx.enqueue("sales.log_order_event", json!({"order": order, "event": "cancelled"}))
+}
+```
+
+`json!` is `forgebase::serde_json::json`. Never put a secret in a payload: it is stored in clear text. In a test, a hook needs a collector, or `enqueue` fails: `HookContext::new(..).with_jobs(&jobs)`, then `jobs.take()` lists what was enqueued (`EnqueuedJobs`).
+
+**Be idempotent.** Delivery is **at least once**: a job can run twice (a worker crash, an operator's `job enqueue`). Everything the handler does to the database is atomic with the job's completion, but make the handler safe to repeat anyway, and any effect outside the database (an email) must be. Two ways from the examples: a row whose name is the idempotency key, looked up first (`get("sales_order_log", "<order>-<event>")`, which keeps the normal path quiet; for two runs at the same moment the unique name refuses the second insert, a failed insert runs in a savepoint so the transaction stays usable, and the handler looks again after it and returns `Ok` if the row now exists: a unique violation is a permanent `JobError`, so check for the row rather than for the error), and a field that remembers the source (`customer_visit.source_order`, looked up with a `list` filter). `ctx.id()` (the same for every attempt) and `ctx.attempt()` are there for effects that need a key or a log line.
+
+**Read and write documents.** `ctx.documents()` offers `get`, `list`, `insert`, `update`, `delete`, `submit`, `cancel` and `amend`. It runs as the **system context** (no permission rules) with the actor `job:<app>.<job>`, which becomes the `owner` and `modified_by` of what the job writes. Validation and hooks run as usual, each write is a savepoint, and everything commits or rolls back with the job. `list` returns one page of at most 500 documents and has no offset.
+
+**Errors.** A returned `JobError::new(..)` (and a database error) is retried with backoff, then the job is `dead` until `forgebase job retry`. `JobError::permanent(..)` skips the retries: use it for what retrying cannot fix, such as a payload that is wrong or an order that no longer exists. Errors of `ctx.documents()` already follow this rule, so `?` is usually enough.
+
+**Run on a schedule.** `App::schedule(job, Schedule)` enqueues one of the app's own jobs on a timer: every N minutes, every day or every week, **UTC only** (no cron, no time zones):
+
+```rust
+.job("daily_summary", DailySummary)
+.schedule("daily_summary", Schedule::daily_at(2, 0))
+```
+
+The job gets `{"scheduled_for": "<the tick, RFC 3339 UTC>"}`: the time that was due, not the time the worker noticed it, so use it as the idempotency key (`sales.daily_summary` summarizes the day before it and names the row by that day). A tick is enqueued once however many workers run. Ticks missed while no worker ran are **not caught up**: one job runs, then the next future time. `forgebase migrate` stores the schedules, so run it after you add, change or remove one (it deletes schedules the binary does not declare).
+
+**Run it.** Jobs need a worker; schedules need a worker and `migrate`:
+
+```sh
+cargo run -p sales -- migrate
+cargo run -p sales -- worker                  # until Ctrl-C or SIGTERM; --concurrency N
+cargo run -p sales -- job list --status dead  # job show <id>, job retry <id>, job enqueue <name> --payload '{..}'
+```
+
+**Test it.** With the `testing` feature: `run_jobs(&binary, &db).await` runs every due job with the worker's own code and returns how many ended `done`, `retried` or `dead`; jobs that hooks and other jobs enqueue run too. `run_schedules_at(&binary, &db, time).await` enqueues the schedules that are due at `time` (read `next_run_at` from `fb_schedule` with `TestDb::rows`, and use `OffsetDateTime::from_unix_timestamp`), and `run_jobs` then runs them. To test delivery twice, copy a job row with `TestDb::exec` (`INSERT INTO fb_job ... SELECT ... FROM fb_job`) and run again. A job that is retried is queued again after its backoff, so `run_jobs` does not run it again in the same call. The tests of `sales` and `sales_extension` show each of these.
+
+**Common errors.** A schedule for a job the app did not register is a startup error, reported with the other mistakes of the app before any command runs:
+
+```
+error: invalid app setup:
+  - app `sales`: schedule for job `daily_sumary`, which `sales` did not register (register it with App::job first; an app schedules only its own jobs)
+```
+
+An unknown job name in `ctx.enqueue` is found at run time, not at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
+
 ## The public API boundary
 
 Apps depend on the `forgebase` crate **only**. `forgebase-core`, `forgebase-db` and `forgebase-http` are internal: they change without notice, and an app that uses them will break. `forgebase` re-exports everything an app needs (the list is in [ADR 0012](../adr/0012-app-model-and-public-api-boundary.md#the-public-surface-crate-root-of-forgebase)): `App`, `Forgebase`, `doctypes!`, `migrations!`, `DocTypeHooks`, `HookContext`, `HookError`, `Operation`, `Document`, `Value` and the helpers of `forgebase::testing` (enable the cargo feature `testing` in `[dev-dependencies]` only, as the template does, so it is not in your binary). The version is 0.x: the API may still change between minor versions, and every change is in the [changelog](../../CHANGELOG.md). If you need something that is not exported, ask for it; do not work around it.

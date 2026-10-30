@@ -59,7 +59,7 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   // ---- login and list -------------------------------------------------------------------
   await login(page, 'e2e_manager');
   await expectNoSecretsInStorage(page);
-  await page.getByRole('link', { name: 'Sales Order' }).click();
+  await page.getByRole('link', { name: 'Sales Order', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Sales Order', level: 1 })).toBeVisible();
   await expect(page.getByRole('status')).toHaveText(''); // the list has loaded (it may hold orders of an earlier run)
 
@@ -121,7 +121,7 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
 
   // ---- a user without the submit right --------------------------------------------------
   await login(page, 'e2e_clerk');
-  await page.getByRole('link', { name: 'Sales Order' }).click();
+  await page.getByRole('link', { name: 'Sales Order', exact: true }).click();
   await page.getByRole('link', { name }).click();
   await expect(page.locator('.doc-status')).toHaveText('Status: Submitted');
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0); // no cancel right

@@ -82,6 +82,10 @@ These choices were made while implementing M6.2 and are reviewed with that chang
 
 **What a login failure row is worth.** A row matters while the username is locked (`locked_until > now()`) or its last failure is within the failure window (`last_failure_at >= now() - window`; the next failure would be counted with it). Every other row (including one with no failure time) starts again at one failure exactly as if it had no row, so deleting it changes nothing a login can see. The condition is next to the login code and uses the same constants. Each purge deletes in batches of 1000 with `FOR UPDATE SKIP LOCKED` (so it never waits for a login that holds a row), at most 100 batches per run; a larger backlog continues at the next run. A purge batch holds its row locks until the job's transaction commits, so a login or session validation that touches a row being purged may wait for that commit; the wait is bounded by the job's runtime and only stale rows are affected.
 
+## Implementation details (M6.3)
+
+The example apps use jobs, the outbox and a schedule with no framework change: `sales` enqueues a log job from `before_submit` and `before_cancel` and runs a daily summary on `Schedule::daily_at(2, 0)`, and `sales_extension` enqueues a job of its own on a `sales` DocType. The M6.3 diff touches no file under `crates/`. See [the first-app guide](../guide/first-app.md#7-background-jobs-and-schedules).
+
 ## Alternatives considered
 
 - **A leader-elected scheduler** (the architecture note of earlier drafts). A leader needs a dedicated connection, failover and a heartbeat; claiming each schedule row atomically needs none of them and fails safe (M6.2).

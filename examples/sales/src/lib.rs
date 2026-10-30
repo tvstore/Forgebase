@@ -1,9 +1,14 @@
 //! The `sales` example app: customers and sales orders, in the role of the ERPNext sales module.
 //!
-//! It shows what an app is made of (DocTypes, hooks, a data migration) using the public
-//! `forgebase` API only. `main.rs` puts it into a binary; `sales_extension` builds on it.
+//! It shows what an app is made of (DocTypes, hooks, a data migration, background jobs and a
+//! schedule) using the public `forgebase` API only. `main.rs` puts it into a binary;
+//! `sales_extension` builds on it.
 
-use forgebase::{App, Decimal, DocTypeHooks, Document, HookContext, HookError, Row, Value};
+use forgebase::serde_json::json;
+use forgebase::{
+    App, Date, Decimal, DocTypeHooks, Document, FilterOp, HookContext, HookError, JobContext,
+    JobError, JobFuture, JobHandler, ListQuery, Row, Schedule, Value,
+};
 
 /// The app. A plain function that returns data: nothing is registered anywhere else.
 pub fn app() -> App {
@@ -13,10 +18,18 @@ pub fn app() -> App {
         .doctypes(forgebase::doctypes![
             "doctypes/customer.toml",
             "doctypes/customer_group.toml",
+            "doctypes/sales_daily_summary.toml",
             "doctypes/sales_order.toml",
             "doctypes/sales_order_item.toml",
+            "doctypes/sales_order_log.toml",
         ])
         .hooks("sales_order", OrderRules)
+        // Background jobs are known as `<app>.<job>`: `sales.log_order_event` is enqueued by the
+        // hooks below, `sales.daily_summary` by the schedule. `forgebase worker` runs them.
+        .job("log_order_event", LogOrderEvent)
+        .job("daily_summary", DailySummary)
+        // Every day at 02:00 UTC. Run `migrate` after changing a schedule: it stores them.
+        .schedule("daily_summary", Schedule::daily_at(2, 0))
         // Data migrations (SQL, append-only): see the comments in the file.
         .migrations(forgebase::migrations![(
             1,
@@ -56,23 +69,50 @@ impl DocTypeHooks for OrderRules {
         Ok(())
     }
 
-    /// Refuses to submit an order without items or with a total that is not positive.
+    /// Refuses to submit an order without items or with a total that is not positive, then asks
+    /// for the job that logs the submit.
     ///
     /// `validate` runs before this hook (see the pipeline in `DocTypeHooks`), so `total` is
     /// current here.
-    fn before_submit(&self, _ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+    fn before_submit(&self, ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
         if doc.tables.get("items").is_none_or(Vec::is_empty) {
             return Err(HookError::new(
                 "a sales order needs at least one item to be submitted",
             ));
         }
         match doc.values.get("total") {
-            Some(Value::Decimal(total)) if *total > Decimal::ZERO => Ok(()),
-            _ => Err(HookError::new(
-                "the total of a sales order must be positive to be submitted",
-            )),
+            Some(Value::Decimal(total)) if *total > Decimal::ZERO => {}
+            _ => {
+                return Err(HookError::new(
+                    "the total of a sales order must be positive to be submitted",
+                ));
+            }
         }
+        enqueue_log(ctx, doc, "submitted")
     }
+
+    /// Asks for the job that logs the cancel.
+    fn before_cancel(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), HookError> {
+        enqueue_log(ctx, doc, "cancelled")
+    }
+}
+
+/// Enqueues `sales.log_order_event` for the order `doc`.
+///
+/// This is the transactional outbox: the framework writes the job in the same transaction as the
+/// submit or cancel, after all hooks have run. If the operation is refused (by a later hook, by
+/// validation or by a version conflict) nothing is committed and no job exists. A hook cannot
+/// write the log itself: hooks have no database access, and the log must not exist for an
+/// operation that failed.
+fn enqueue_log(ctx: &HookContext<'_>, doc: &Document, event: &str) -> Result<(), HookError> {
+    let order = doc
+        .name
+        .as_deref()
+        .ok_or_else(|| HookError::new("the sales order has no name"))?;
+    ctx.enqueue(
+        "sales.log_order_event",
+        json!({"order": order, "event": event}),
+    )
 }
 
 /// `qty * rate` rounded to 2 places, or `None` when either is missing or not a number.
@@ -105,4 +145,171 @@ fn round_half_away(value: Decimal) -> Option<Decimal> {
     } else {
         rounded
     })
+}
+
+/// Writes one `sales_order_log` row for a lifecycle event of an order (`submitted` or
+/// `cancelled`). The payload is `{"order": <name>, "event": <event>}`.
+///
+/// Delivery is at-least-once, so the handler must be safe to run twice: the log is keyed by
+/// `<order>-<event>`, and a row that already exists means an earlier run did the work.
+struct LogOrderEvent;
+
+impl JobHandler for LogOrderEvent {
+    // There is no async-trait crate: a handler returns a boxed future.
+    fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+        Box::pin(async move {
+            // Copy what is needed out of the payload: `ctx.documents()` borrows `ctx` mutably.
+            let (Some(order), Some(event)) = (
+                ctx.payload()["order"].as_str().map(str::to_owned),
+                ctx.payload()["event"].as_str().map(str::to_owned),
+            ) else {
+                // A bad payload stays bad: retrying cannot fix it, so the job goes straight to
+                // `dead` (an operator sees the message in `forgebase job list`).
+                return Err(JobError::permanent(
+                    "the payload must be {\"order\": <name>, \"event\": <event>}",
+                ));
+            };
+            let key = format!("{order}-{event}");
+            let mut documents = ctx.documents();
+
+            // Idempotency: the work was done by an earlier run of this job. This check keeps the
+            // normal path quiet; the unique key and the re-check after a failed insert (below)
+            // cover two deliveries at the same moment.
+            if documents.get("sales_order_log", &key).await?.is_some() {
+                return Ok(());
+            }
+            let Some(stored) = documents.get("sales_order", &order).await? else {
+                // The order is gone (only a draft can be deleted: a submitted or cancelled order that has a log cannot, because of the Link).
+                return Err(JobError::permanent(format!(
+                    "the sales order {order} does not exist"
+                )));
+            };
+
+            let mut log = Document::default();
+            log.values
+                .insert("key".to_owned(), Value::Text(key.clone()));
+            log.values
+                .insert("sales_order".to_owned(), Value::Text(order));
+            log.values.insert("event".to_owned(), Value::Text(event));
+            if let Some(total) = stored.document().values.get("total") {
+                log.values.insert("total".to_owned(), total.clone());
+            }
+            // Runs as the system context with the actor `job:sales.log_order_event`: that is the
+            // log's `owner` and `modified_by`. A refusal here (`?`) is a permanent `JobError`;
+            // a database error is retried.
+            if let Err(error) = documents.insert("sales_order_log", log).await {
+                // Two deliveries at the same moment: the other one committed the same key first
+                // and the unique name refused this insert (a unique violation is a permanent
+                // `JobError`, which cannot be told apart from other refusals). The failed insert
+                // ran in a savepoint, so the transaction is usable: if the log exists now, the
+                // work is done.
+                return match documents.get("sales_order_log", &key).await {
+                    Ok(Some(_)) => Ok(()),
+                    _ => Err(error),
+                };
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The page `Documents::list` returns at most.
+const PAGE: u32 = 500;
+/// The most orders one daily summary counts (one less than a page, so a full page means "more").
+/// An example's limit, see [`DailySummary`].
+const MAX_ORDERS_PER_DAY: usize = (PAGE - 1) as usize;
+
+/// Writes the `sales_daily_summary` of the **day before** the tick: how many orders were
+/// submitted with that `order_date`, and their total. The schedule (`daily_at(2, 0)`) gives it
+/// the payload `{"scheduled_for": "<the tick, RFC 3339 UTC>"}`.
+///
+/// Idempotent: the summary is named by its day, so a run that finds it does nothing. That also
+/// covers a tick enqueued twice by an operator (`forgebase job enqueue`). Two runs at the same
+/// moment: the unique name refuses the second insert, and the handler then finds the summary and
+/// succeeds.
+///
+/// The summary is a snapshot: an order submitted later with a past `order_date` is not counted.
+///
+/// **Limit of this example.** `Documents::list` returns one page of at most 500 documents and
+/// has no offset, so the example counts up to [`MAX_ORDERS_PER_DAY`] orders and fails
+/// permanently (it never writes a wrong figure) when there are more. A real app would sum in
+/// SQL (a data migration can create a view; the document API has no aggregate), or enqueue one
+/// job per page (sort by `name` and filter on the last name seen).
+struct DailySummary;
+
+impl JobHandler for DailySummary {
+    fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+        Box::pin(async move {
+            let day = ctx.payload()["scheduled_for"]
+                .as_str()
+                .and_then(day_before)
+                .ok_or_else(|| {
+                    JobError::permanent(
+                        "the payload must be {\"scheduled_for\": <an RFC 3339 time>}",
+                    )
+                })?;
+            let key = day.to_string();
+            let mut documents = ctx.documents();
+
+            if documents.get("sales_daily_summary", &key).await?.is_some() {
+                return Ok(());
+            }
+            // `docstatus` is a standard column of a submittable DocType, so the database does
+            // the filtering: only submitted orders (1), not drafts (0) or cancelled ones (2).
+            let query = ListQuery::new()
+                .filter("order_date", FilterOp::Eq, Value::Date(day))
+                .filter("docstatus", FilterOp::Eq, Value::Int(1))
+                .limit(PAGE);
+            let orders = documents.list("sales_order", &query).await?;
+            if orders.len() > MAX_ORDERS_PER_DAY {
+                return Err(JobError::permanent(format!(
+                    "more than {MAX_ORDERS_PER_DAY} orders on {key}: this example does not page"
+                )));
+            }
+
+            let mut total = Decimal::ZERO;
+            for order in &orders {
+                if let Some(Value::Decimal(amount)) = order.document().values.get("total") {
+                    total = total
+                        .checked_add(*amount)
+                        .ok_or_else(|| JobError::permanent("the day's total is too large"))?;
+                }
+            }
+            total.rescale(2);
+
+            let mut summary = Document::default();
+            summary
+                .values
+                .insert("day".to_owned(), Value::Text(key.clone()));
+            summary.values.insert(
+                "orders".to_owned(),
+                Value::Int(i64::try_from(orders.len()).unwrap_or(i64::MAX)),
+            );
+            summary
+                .values
+                .insert("total".to_owned(), Value::Decimal(total));
+            if let Err(error) = documents.insert("sales_daily_summary", summary).await {
+                // Another delivery committed this day first (the unique name refused the
+                // insert, in a savepoint): the summary exists, so the work is done.
+                return match documents.get("sales_daily_summary", &key).await {
+                    Ok(Some(_)) => Ok(()),
+                    _ => Err(error),
+                };
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The calendar day before the day of an RFC 3339 time such as `2026-10-31T02:00:00Z`.
+///
+/// Only the date part is used, and the schedule is UTC, so the text is a UTC day already.
+fn day_before(rfc3339: &str) -> Option<Date> {
+    let mut parts = rfc3339.get(..10)?.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u8 = parts.next()?.parse().ok()?;
+    let day: u8 = parts.next()?.parse().ok()?;
+    Date::from_calendar_date(year, month.try_into().ok()?, day)
+        .ok()?
+        .previous_day()
 }
