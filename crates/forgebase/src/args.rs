@@ -45,7 +45,7 @@ pub enum Command {
         #[arg(long, value_name = "MS", default_value_t = 5000)]
         lock_timeout_ms: u64,
     },
-    /// Insert, read, list, update, delete, submit, cancel and amend documents. These commands run
+    /// Insert, read, list, update, delete, submit, cancel, amend and (with a workflow) transition documents. These commands run
     /// as the trusted system context: no permission rules apply (see --actor).
     #[command(subcommand)]
     Doc(DocCommand),
@@ -116,6 +116,7 @@ impl Command {
                 | DocCommand::Update { doctypes, .. }
                 | DocCommand::Submit { doctypes, .. }
                 | DocCommand::Cancel { doctypes, .. }
+                | DocCommand::Transition { doctypes, .. }
                 | DocCommand::Amend { doctypes, .. }
                 | DocCommand::Delete { doctypes, .. },
             ) => Some(doctypes),
@@ -163,6 +164,7 @@ impl Command {
                     DocCommand::Update { .. } => "update",
                     DocCommand::Submit { .. } => "submit",
                     DocCommand::Cancel { .. } => "cancel",
+                    DocCommand::Transition { .. } => "transition",
                     DocCommand::Amend { .. } => "amend",
                     DocCommand::Delete { .. } => "delete",
                 },
@@ -438,6 +440,27 @@ pub enum DocCommand {
         #[command(flatten)]
         actor: ActorArg,
     },
+    /// Take a workflow transition of a document and print it as stored (M8.1, ADR 0015): ACTION
+    /// is the action of the transition from the document's current state, for example
+    /// `Approve`. For a DocType with a workflow only; on one, plain `submit` and `cancel` are
+    /// refused. Fails if the document's version is not the one given with --version. Like
+    /// every `doc` command it runs as the trusted system context: the roles of the transition
+    /// and the caller's rights are **not** checked (see --actor), but the `before_transition`
+    /// hooks and the validation run.
+    Transition {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+        /// The action, as written in the DocType's workflow (case-sensitive).
+        action: String,
+        #[command(flatten)]
+        version: VersionArg,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        #[command(flatten)]
+        actor: ActorArg,
+    },
     /// Amend a cancelled document: create a new draft named `<name>-<n>` with a copy of its
     /// values and rows, and print it. Takes no data; --version is the cancelled document's.
     Amend {
@@ -497,7 +520,7 @@ pub struct DataArg {
 #[derive(Debug, Args)]
 pub struct ActorArg {
     /// The name of the trusted system context these commands run as: recorded as owner /
-    /// modified_by on insert, update, submit, cancel and amend; given to hooks (on delete it is
+    /// modified_by on insert, update, submit, cancel, amend and transition (and in the workflow log); given to hooks (on delete it is
     /// only given to hooks, not stored). Not authenticated, and no permission rules apply to it.
     #[arg(long, value_name = "NAME", default_value = "cli")]
     pub actor: String,
