@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 
 use forgebase_core::document::Row;
 use forgebase_core::meta::{DocType, FieldType, Registry};
+use forgebase_core::report::ParamKind;
 use forgebase_core::value::Value;
 use forgebase_db::{Filter, FilterOp, Sort, StoredDocument};
 use rust_decimal::Decimal;
@@ -230,6 +231,30 @@ fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, Js
                 })
         }
     }
+}
+
+/// The value of a report parameter (M8.4): mapped like a field of the same kind (Data, Link and
+/// Select are strings, Decimal a string, Date `YYYY-MM-DD`); `null` is no value.
+pub(crate) fn param_value(name: &str, kind: &ParamKind, json: &Json) -> Result<Value, JsonError> {
+    let field_type = match kind {
+        ParamKind::Data => FieldType::Data {
+            max_length: forgebase_core::meta::DEFAULT_MAX_LENGTH,
+        },
+        ParamKind::Int => FieldType::Int,
+        ParamKind::Decimal => FieldType::Decimal {
+            precision: forgebase_core::meta::MAX_DECIMAL_PRECISION,
+            scale: 0,
+        },
+        ParamKind::Date => FieldType::Date,
+        ParamKind::Check => FieldType::Check,
+        ParamKind::Link { doctype } => FieldType::Link {
+            target: doctype.clone(),
+        },
+        ParamKind::Select { options } => FieldType::Select {
+            options: options.clone(),
+        },
+    };
+    to_value(name, &field_type, json)
 }
 
 fn kind(json: &Json) -> &'static str {

@@ -50,6 +50,8 @@
 //! | `PATCH /views/{doctype}/{id}` body `{"version", "label"?, "definition"?}` (M8.3) | 200 `{"data": view}`; another user's private view is 404 |
 //! | `DELETE /views/{doctype}/{id}?version=N` (M8.3) | 204 |
 //! | `GET /summary/{doctype}?group_by=FIELD&aggregates=sum:amount,...&filters=...` (M8.3) | 200 `{"data": {"groups": [{"key", "count", "values"}], "truncated"}}`, at most 500 groups, over the documents the caller may read |
+//! | `GET /report` (M8.4) | 200 `{"data": [{"name", "app", "label", "params": [{"name", "label", "kind", "required", "default", "doctype"?, "options"?}], "columns": [{"name", "label", "kind", "doctype"?}]}]}`: the query reports the caller may run (by role), by label; never the SQL |
+//! | `POST /report/{app}.{name}` body `{"params"?: {..}}` (M8.4; `?link_titles=1`) | 200 `{"data": {"columns", "rows": [[..]], "truncated"}}` (plus `link_titles`); 404 for a report that does not exist or that the caller may not run, 422 for the parameters (`details` per parameter), 504 `report_timeout` |
 //!
 //! Anything else is 404 (`/api/v1/method` is not implemented), a wrong method is 405.
 //!
@@ -64,6 +66,7 @@ mod desk;
 mod error;
 pub mod json;
 mod meta;
+mod reports;
 mod routes;
 mod views;
 
@@ -338,7 +341,9 @@ fn site_router(state: AppState) -> Router {
             "/api/v1/views/{doctype}/{id}",
             axum::routing::patch(views::update).delete(views::delete),
         )
-        .route("/api/v1/summary/{doctype}", get(views::summary));
+        .route("/api/v1/summary/{doctype}", get(views::summary))
+        .route("/api/v1/report", get(reports::list))
+        .route("/api/v1/report/{name}", post(reports::run));
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {
         router = router
