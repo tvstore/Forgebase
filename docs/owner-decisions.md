@@ -201,8 +201,9 @@ M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tail
 (M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The saved views and group-by summary row is recorded in
 [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) and [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed)
 (M8.3, [#35](https://github.com/agilma/Forgebase/pull/35)). The query reports row is recorded in
-[ADR 0016](adr/0016-query-reports-read-only-execution.md) (M8.4, [#37](https://github.com/agilma/Forgebase/pull/37)). The other M8 rows are still planned:
-until their pull requests land, this table is their only record.
+[ADR 0016](adr/0016-query-reports-read-only-execution.md) (M8.4, [#37](https://github.com/agilma/Forgebase/pull/37)). Decision 10 (the split into
+M8.1 to M8.5) is recorded in the [milestones](blueprint/milestones.md#m8-workflow-and-reports) and delivered by M8.5, which
+touches no file under `crates/`. **All M8 rows are recorded.**
 
 | Decision | Recorded in |
 |---|---|
@@ -212,6 +213,7 @@ until their pull requests land, this table is their only record.
 | Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | [ADR 0015](adr/0015-workflow-states-and-transitions.md) |
 | Saved views: private per user; shared views only by Administrator. Group-by summary. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow), [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) (M8.3) |
 | Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | [ADR 0016](adr/0016-query-reports-read-only-execution.md) |
+| Decision 10: M8 is split into M8.1 to M8.5; M8.5 (the example apps and the guide, and closing M8) touches no file under `crates/`: the example uses the public `forgebase` API only, so an app never needs a change in the framework (owner thinking 2). Delivered 2026-10-30: M8 is Done. | [milestones, M8](blueprint/milestones.md#m8-workflow-and-reports), [guide](guide/workflow-and-reports.md), [ADR 0015](adr/0015-workflow-states-and-transitions.md) |
 
 ### UX.4 desk polish (2026-10-30, "setuju semua rencana mu")
 
