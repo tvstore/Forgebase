@@ -4,16 +4,16 @@
 //! | Code | Status | Meaning |
 //! |---|---|---|
 //! | `unauthenticated` | 401 | no valid session or token, or a failed login (one message each) |
-//! | `permission_denied` | 403 | the caller lacks the right (for a transition: the role or the right; for an update: the `edit_roles` of the state) |
+//! | `permission_denied` | 403 | the caller lacks the right (for a transition: the role or the right; for an update: the `edit_roles` of the state; for a view: creating or changing a shared one without being an Administrator) |
 //! | `csrf_failed` | 403 | missing or wrong `X-Forgebase-CSRF` |
 //! | `not_found` | 404 | unknown route, DocType or document (also a document the caller cannot read) |
 //! | `method_not_allowed` | 405 | |
-//! | `conflict` | 409 | the document changed (`version`), or changed while being read |
+//! | `conflict` | 409 | the document changed (`version`), or changed while being read; a saved view with that label exists |
 //! | `invalid_docstatus`, `already_amended`, `field_locked` | 409 | the document's state forbids it |
 //! | `workflow_required`, `no_workflow`, `unknown_transition` | 409 | submit or cancel on a DocType with a workflow (use a transition); a transition, its list or history on a DocType without one; no such transition from the document's state |
 //! | `unique_violation`, `linked_document_exists` | 409 | |
 //! | `not_submittable` | 422 | submit, cancel or amend of a DocType that is not submittable |
-//! | `validation_failed` | 422 | the data breaks the DocType's rules; `details` lists every problem |
+//! | `validation_failed` | 422 | the data breaks the DocType's rules; `details` lists every problem; also a saved view's label, definition or limit |
 //! | `hook_rejected` | 422 | a lifecycle hook refused; the message is the hook's |
 //! | `bad_request` | 400 | malformed body or parameters |
 //! | `invalid_query` | 400 | a filter, sort, limit or offset cannot be used |
@@ -114,7 +114,7 @@ impl ApiError {
         )
     }
 
-    fn validation(details: Vec<String>) -> Self {
+    pub(crate) fn validation(details: Vec<String>) -> Self {
         let mut error = Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation_failed",
@@ -150,6 +150,9 @@ impl From<DbError> for ApiError {
                 Self::validation(errors.iter().map(ToString::to_string).collect())
             }
             DbError::Naming(message) => Self::validation(vec![message]),
+            DbError::InvalidView(message) => Self::validation(vec![message]),
+            DbError::ViewExists { .. } => Self::new(S::CONFLICT, "conflict", text),
+            DbError::ViewDenied(_) => Self::new(S::FORBIDDEN, "permission_denied", text),
             DbError::NotFound { .. } => Self::not_found(text),
             DbError::UnknownDocType { .. } | DbError::ChildDocType { .. } => {
                 Self::not_found("unknown doctype")
