@@ -151,13 +151,12 @@ Schema changes are additive and refused when they would lose data; the command l
 myapp --config /etc/forgebase/forgebase.toml site backup acme --out /var/backups/forgebase/acme-$(date +%Y%m%d).dump
 ```
 
-The backup directory must be on a filesystem that supports hard links (a finished dump is published with one; FAT/exFAT and some network mounts cannot), otherwise the backup fails at the end with an error and leaves no file. If `forgebase` is killed, the `pg_dump` it started may keep running until it finishes writing `FILE.partial`; `FILE` never appears.
-
-
 It runs `pg_dump --format=custom --no-owner --no-privileges` against the site's database and prints the file and its size. Things to know:
 
 - **What it contains:** everything in the site's database, including **password hashes, session records and API token digests**. Treat every backup file like the database itself: it is created with mode 0600; keep the directory private, encrypt it where it is stored off the machine (Forgebase does not encrypt it), and delete old copies.
 - It **never overwrites** a file: an existing path is an error (exit 1, "refusing to overwrite"; there is no `--force`). Use a new name each time. The dump is written to `FILE.partial` and given its final name only when it is complete, so a failed backup leaves nothing, and a backup that is killed (SIGINT, SIGTERM) can leave only `FILE.partial`, never a partial `FILE`. The next backup to that path says that an earlier backup was interrupted; remove the `.partial` file.
+
+  The backup directory must be on a filesystem that supports hard links (a finished dump is published with one; FAT/exFAT and some network mounts cannot), otherwise the backup fails at the end with an error and leaves no file. If `forgebase` is killed, the `pg_dump` it started may keep running until it finishes writing `FILE.partial`; `FILE` never appears.
 - The connection reaches `pg_dump` through `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, and `PGSSLMODE` when the URL sets one), never on the command line, where `ps` would show the password. Other `PG*` variables of your environment (`PGSERVICE`, `PGPASSFILE`, `PGOPTIONS`, ...) are not passed on. A URL option that these variables cannot express (more than one host, `options`, `application_name`, `connect_timeout`, ...) is an error that names the option.
 - `pg_dump` must have the same major version as the server; otherwise (older or newer) the command refuses and names both versions. It works while the site is running (a consistent snapshot).
 

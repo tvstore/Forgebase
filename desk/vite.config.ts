@@ -1,3 +1,4 @@
+import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
@@ -5,7 +6,7 @@ import { defineConfig } from 'vitest/config';
 // `npm run dev` proxies the API to a locally running `forgebase serve`.
 export default defineConfig({
   base: '/desk/',
-  plugins: [react()],
+  plugins: [tailwindcss(), react()],
   build: {
     outDir: 'dist',
     emptyOutDir: true,

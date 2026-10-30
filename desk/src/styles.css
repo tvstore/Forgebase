@@ -1,1265 +1,854 @@
-/* The desk stylesheet. One light theme: neutral greys, the Forgebase yellow as the only accent.
-   No web fonts and no external files (CSP). Colours are tokens in :root; contrast ratios (WCAG AA)
-   are recorded in docs/blueprint/architecture.md, section 11. */
-
-:root {
-  /* Colour: neutrals */
-  --bg: #f6f7f8;
-  --surface: #ffffff;
-  --gray-100: #eceef1;
-  --gray-200: #dfe2e6;
-  --border: #dfe2e6;
-  --border-strong: #8a919b; /* borders of controls: 3.18:1 on white */
-  --text: #1b1f24;
-  --text-soft: #3a414a;
-  --muted: #5b636d;
-
-  /* Colour: accent (dark text on it, 9.9:1; on the hover colour 7.7:1) */
-  --accent: #fbbf24;
-  --accent-hover: #f59e0b;
-  --accent-edge: #d97706; /* the outline of an accent button: 3.19:1 on white */
-  --accent-soft: #fdf0c4;
-  --on-accent: #1b1f24;
-  --link: #8a4a00;
-
-  /* Colour: states */
-  --danger: #b42318;
-  --danger-bg: #fef3f2;
-  --danger-badge: #912018;
-  --danger-badge-bg: #fee4e2;
-  --success: #05603a;
-  --success-bg: #e7f6ee;
-  --warning: #7a4a00;
-  --warning-bg: #fef0c7;
-  --neutral-bg: #e6e9ed;
-
-  /* Spacing scale */
-  --s-1: 0.25rem;
-  --s-2: 0.5rem;
-  --s-3: 0.75rem;
-  --s-4: 1rem;
-  --s-5: 1.5rem;
-  --s-6: 2rem;
-  --s-7: 3rem;
-
-  /* Radius and shadow */
-  --r-sm: 6px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%);
-  --shadow-md: 0 8px 24px rgb(16 24 40 / 14%);
-
-  /* Type */
-  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --fs-sm: 0.875rem;
-  --fs-base: 1rem;
-  --fs-lg: 1.125rem;
-  --fs-xl: 1.5rem;
-  --fs-2xl: 2rem;
-
-  --topbar-h: 3.5rem;
-  --sidebar-w: 15rem;
-
-  font-family: var(--font);
-  font-size: 100%;
-  color: var(--text);
-  background: var(--bg);
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-size: var(--fs-base);
-  line-height: 1.5;
-}
-
-h1,
-h2,
-h3 {
-  line-height: 1.25;
-  margin: 0;
-}
-
-h1 {
-  font-size: var(--fs-xl);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  overflow-wrap: anywhere;
-}
-
-h2 {
-  font-size: var(--fs-lg);
-  font-weight: 600;
-}
-
-p {
-  margin: 0 0 var(--s-3);
-}
-
-a {
-  color: var(--link);
-  text-underline-offset: 0.18em;
-}
-
-a:hover {
-  text-decoration-thickness: 2px;
-}
-
-:focus-visible {
-  outline: 3px solid var(--text);
-  outline-offset: 2px;
-  border-radius: var(--r-sm);
-}
-
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.muted,
-.hint,
-.subtitle {
-  color: var(--muted);
-}
-
-.hint {
-  font-size: var(--fs-sm);
-  margin: 0;
-}
-
-.subtitle {
-  margin: var(--s-1) 0 0;
-}
-
-/* ---------- Buttons ---------- */
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--s-1);
-  min-height: 2.5rem;
-  padding: 0.4rem var(--s-4);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-sm);
-  color: var(--text);
-  font-weight: 550;
-  line-height: 1.25;
-  text-decoration: none;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.btn:hover {
-  background: var(--gray-100);
-}
-
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent-edge);
-  color: var(--on-accent);
-}
-
-.btn-primary:hover {
-  background: var(--accent-hover);
-}
-
-.btn-danger {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #ffffff;
-}
-
-.btn-danger:hover {
-  background: #912018;
-}
-
-.btn-ghost {
-  background: transparent;
-  border-color: transparent;
-}
-
-.btn-small {
-  min-height: 2rem;
-  padding: 0.2rem var(--s-3);
-  font-size: var(--fs-sm);
-}
-
-.btn-block {
-  width: 100%;
-}
-
-.btn[aria-disabled='true'] {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-/* ---------- Inputs ---------- */
-
-input,
-select,
-textarea {
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  min-height: 2.5rem;
-  padding: 0.4rem var(--s-3);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-sm);
-}
-
-input[type='checkbox'] {
-  width: 1.25rem;
-  min-height: 1.25rem;
-  height: 1.25rem;
-  padding: 0;
-  accent-color: var(--accent-edge);
-}
-
-textarea {
-  resize: vertical;
-}
-
-input::placeholder,
-textarea::placeholder {
-  color: #6b727c;
-}
-
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 3px solid var(--text);
-  outline-offset: 0;
-  border-color: var(--text);
-}
-
-[aria-invalid='true'] {
-  border-color: var(--danger);
-  border-width: 2px;
-}
-
-label {
-  font-weight: 550;
-  font-size: var(--fs-sm);
-  color: var(--text-soft);
-}
-
-.field {
-  display: grid;
-  gap: var(--s-1);
-  align-content: start;
-  min-width: 0;
-}
-
-.field-error {
-  color: var(--danger);
-  font-size: var(--fs-sm);
-  font-weight: 550;
-  margin: 0;
-}
-
-/* A read-only field reads as a value, not as a greyed-out input. It is still labelled and,
-   for text controls, focusable. */
-.is-readonly input:not([type='checkbox']),
-.is-readonly textarea,
-td input[readonly] {
-  background: transparent;
-  border-color: transparent;
-  padding-left: 0;
-  font-weight: 500;
-  resize: none;
-}
-
-.is-readonly select,
-td select:disabled {
-  appearance: none;
-  background: transparent;
-  border-color: transparent;
-  padding-left: 0;
-  color: var(--text);
-  opacity: 1;
-  font-weight: 500;
-}
-
-.is-readonly textarea {
-  field-sizing: content;
-  min-height: 2.5rem;
-}
-
-.is-readonly input[type='checkbox'] {
-  opacity: 1;
-}
-
-td input[readonly] {
-  padding-left: 0.25rem;
-}
-
-/* ---------- Alerts, badges ---------- */
-
-.alert {
-  margin: 0;
-  padding: var(--s-3) var(--s-4);
-  background: var(--danger-bg);
-  border: 1px solid var(--danger);
-  border-left-width: 4px;
-  border-radius: var(--r-sm);
-  color: var(--danger);
-  font-weight: 550;
-}
-
-.alert p {
-  margin: 0 0 var(--s-1);
-}
-
-.alert ul {
-  margin: var(--s-1) 0 var(--s-2);
-  padding-left: var(--s-5);
-}
-
-.badge {
-  display: inline-block;
-  padding: 0.1rem var(--s-2);
-  border-radius: 999px;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.badge-neutral {
-  background: var(--neutral-bg);
-  color: var(--text-soft);
-}
-
-.badge-success {
-  background: var(--success-bg);
-  color: var(--success);
-}
-
-.badge-danger {
-  background: var(--danger-badge-bg);
-  color: var(--danger-badge);
-}
-
-.badge-warning {
-  background: var(--warning-bg);
-  color: var(--warning);
-}
-
-/* ---------- Cards ---------- */
-
-.card {
-  min-width: 0;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-sm);
-  padding: var(--s-5);
-}
-
-.card-title {
-  margin-bottom: var(--s-3);
-  font-size: var(--fs-sm);
-  font-weight: 650;
-  color: var(--muted);
-}
-
-/* ---------- Skeleton ---------- */
-
-.skeleton-group {
-  display: grid;
-  gap: var(--s-3);
-}
-
-.skeleton {
-  height: 1rem;
-  border-radius: var(--r-sm);
-  background: linear-gradient(90deg, var(--gray-100) 25%, var(--gray-200) 50%, var(--gray-100) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.4s linear infinite;
-}
-
-.skeleton-0 {
-  width: 100%;
-}
-
-.skeleton-1 {
-  width: 80%;
-}
-
-.skeleton-2 {
-  width: 60%;
-}
-
-@keyframes shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
+/* The desk stylesheet: Tailwind CSS v4, compiled at build time (ADR 0017) into one static file.
+   Corporate theme: navy (the logo banner's background) as the only accent, slate neutrals, no
+   yellow (it lives only inside the logo mark). System fonts, no external files (CSP). The tokens
+   are in @theme below; the contrast ratios (WCAG AA) are in docs/blueprint/architecture.md, §11.
+
+   Structure: the existing semantic class names are kept and defined in @layer components with
+   @apply and the theme tokens, so the TSX keeps its class names (only `Badge` and `TableGrid` changed slightly) and behaviour stays the same. New desk
+   work (M8) may use utility classes directly where that reads better. */
+
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  /* Primary: navy */
+  --color-primary: #1b2a5c;
+  --color-primary-hover: #142048;
+  --color-primary-50: #eef1f9;
+  --color-primary-100: #dde3f2;
+
+  /* Neutrals */
+  --color-page: #f5f6f8;
+  --color-surface: #ffffff;
+  --color-line: #e2e5ea; /* quiet borders: cards, tables, dividers */
+  --color-edge: #7b8494; /* borders of controls (3:1 on white is required) */
+  --color-ink: #111827;
+  --color-ink-soft: #374151;
+  --color-muted: #536074;
+  --color-hover: #eef0f4;
+
+  /* States */
+  --color-danger: #b42318;
+  --color-danger-hover: #8f1b12;
+  --color-danger-bg: #fdf0ef;
+  --color-badge-neutral: #e8ebf0;
+  --color-badge-neutral-ink: #374151;
+  --color-badge-success: #e1f3e8;
+  --color-badge-success-ink: #14532d;
+  --color-badge-warning: #fcefd3;
+  --color-badge-warning-ink: #7a4a05;
+  --color-badge-danger: #fce4e4;
+  --color-badge-danger-ink: #8f1b12;
+  --color-badge-info: #e2edfb;
+  --color-badge-info-ink: #1e3a8a;
+
+  --radius-control: 0.5rem;
+  --radius-card: 0.5rem;
+  --shadow-pop: 0 8px 24px rgb(17 24 39 / 14%);
+
+  --breakpoint-xs: 30rem; /* 480 px */
+
+  --animate-shimmer: shimmer 1.4s linear infinite;
+  @keyframes shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color: var(--color-ink);
+    background: var(--color-page);
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-page);
+    font-size: 1rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1 {
+    @apply text-2xl leading-tight font-semibold tracking-tight wrap-anywhere text-primary;
+  }
+
+  h2 {
+    @apply text-lg leading-tight font-semibold;
+  }
+
+  p {
+    margin: 0 0 0.75rem;
+  }
+
+  a {
+    @apply text-primary underline underline-offset-[0.18em] hover:decoration-2;
+  }
+
+  /* One focus ring everywhere: navy, offset 2 px; white on navy surfaces (the top bar). */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply min-h-10 w-full max-w-full min-w-0 rounded-control border border-edge bg-surface px-3 py-1.5;
+  }
+
+  input[type='checkbox'] {
+    @apply size-5 min-h-5 p-0 accent-primary;
+  }
+
+  textarea {
+    resize: vertical;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #6b7280;
+  }
+
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply border-primary outline-2 outline-offset-0;
+  }
+
+  [aria-invalid='true'] {
+    @apply border-2 border-danger;
+  }
+
+  label {
+    @apply text-sm font-medium text-ink-soft;
+  }
+
+  table {
+    @apply w-full border-collapse;
+  }
+
+  th,
+  td {
+    @apply border-b border-line px-4 py-2.5 text-left align-middle text-sm;
+  }
+
+  caption {
+    text-align: left;
+  }
+
+  dl,
+  dd {
+    margin: 0;
+  }
+
+  fieldset {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+
+  dialog {
+    color: inherit;
+  }
+}
+
+@layer components {
+  .visually-hidden {
+    @apply sr-only;
+  }
+
+  .muted,
+  .hint,
+  .subtitle {
+    @apply text-muted;
+  }
+
+  .hint {
+    @apply m-0 text-sm;
+  }
+
+  .subtitle {
+    @apply mt-1 mb-0;
+  }
+
+  /* ---------- Buttons ---------- */
+
+  .btn {
+    @apply inline-flex min-h-10 items-center justify-center gap-1 rounded-control border border-edge bg-surface px-4 py-1.5 text-sm leading-tight font-medium whitespace-nowrap text-ink no-underline transition-colors hover:bg-hover hover:no-underline;
+  }
+
+  .btn-primary {
+    @apply border-primary bg-primary text-white hover:bg-primary-hover;
+  }
+
+  .btn-danger {
+    @apply border-danger bg-danger text-white hover:border-danger-hover hover:bg-danger-hover;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent;
+  }
+
+  .btn-small {
+    @apply min-h-8 px-3 py-1 text-sm;
+  }
+
+  .btn-block {
+    @apply w-full;
+  }
+
+  .btn[aria-disabled='true'] {
+    @apply cursor-not-allowed opacity-60;
+  }
+
+  /* ---------- Fields ---------- */
+
+  .field {
+    @apply grid min-w-0 content-start gap-1;
+  }
+
+  .field-error {
+    @apply m-0 text-sm font-medium text-danger;
+  }
+
+  /* A read-only field reads as a value, not as a greyed-out input. It is still labelled and,
+     for text controls, focusable. */
+  .is-readonly input:not([type='checkbox']),
+  .is-readonly textarea,
+  td input[readonly] {
+    @apply border-transparent bg-transparent pl-0 font-medium;
+    resize: none;
+  }
+
+  .is-readonly select,
+  td select:disabled {
+    @apply appearance-none border-transparent bg-transparent pl-0 font-medium text-ink opacity-100;
+  }
+
+  .is-readonly textarea {
+    field-sizing: content;
+    min-height: 2.5rem;
+  }
+
+  .is-readonly input[type='checkbox'] {
+    opacity: 1;
+  }
+
+  /* ---------- Alerts, badges ---------- */
+
+  .alert {
+    @apply m-0 rounded-control border border-l-4 border-danger bg-danger-bg px-4 py-3 font-medium text-danger-hover;
+  }
+
+  .alert p {
+    @apply mb-1;
+  }
+
+  .alert ul {
+    @apply mt-1 mb-2 pl-6;
+    list-style: disc;
+  }
+
+  .badge {
+    @apply inline-block rounded-full px-2.5 py-0.5 text-xs leading-normal font-semibold whitespace-nowrap;
+  }
+
+  .badge-neutral {
+    @apply bg-badge-neutral text-badge-neutral-ink;
+  }
+
+  .badge-success {
+    @apply bg-badge-success text-badge-success-ink;
+  }
+
+  .badge-warning {
+    @apply bg-badge-warning text-badge-warning-ink;
+  }
+
+  .badge-danger {
+    @apply bg-badge-danger text-badge-danger-ink;
+  }
+
+  .badge-info {
+    @apply bg-badge-info text-badge-info-ink;
+  }
+
+  /* ---------- Cards ---------- */
+
+  .card {
+    @apply min-w-0 rounded-card border border-line bg-surface p-6;
+  }
+
+  .card-title {
+    @apply mb-3 text-xs font-semibold tracking-wide text-muted uppercase;
+  }
+
+  /* ---------- Skeleton ---------- */
+
+  .skeleton-group {
+    @apply grid gap-3;
+  }
+
   .skeleton {
-    animation: none;
-    background: var(--gray-100);
-  }
-}
-
-/* ---------- Shell: top bar, sidebar, content ---------- */
-
-.skip-link {
-  position: absolute;
-  left: var(--s-2);
-  top: -4rem;
-  z-index: 50;
-  padding: var(--s-2) var(--s-4);
-  background: var(--accent);
-  color: var(--on-accent);
-  border-radius: var(--r-sm);
-  font-weight: 600;
-}
-
-.skip-link:focus {
-  top: var(--s-2);
-}
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: var(--s-3);
-  height: var(--topbar-h);
-  padding: 0 var(--s-4);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-}
-
-.topbar > * {
-  min-width: 0; /* a flex child may be narrower than its content: nothing pushes the page wider */
-}
-
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-2);
-  margin-right: auto;
-  color: var(--text);
-  font-weight: 700;
-  font-size: var(--fs-lg);
-  text-decoration: none;
-}
-
-.logo {
-  flex: none;
-  display: block;
-}
-
-.brand span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The user menu is the flexible part of the bar: a long name is cut with an ellipsis. */
-.topbar .menu {
-  flex: 0 1 auto;
-  max-width: 12rem;
-}
-
-.user-button {
-  max-width: 100%;
-}
-
-.user-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.caret {
-  width: 0;
-  height: 0;
-  margin-left: var(--s-1);
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid currentcolor;
-}
-
-.burger {
-  width: 1rem;
-  height: 2px;
-  background: currentcolor;
-  box-shadow:
-    0 -5px 0 currentcolor,
-    0 5px 0 currentcolor;
-}
-
-.nav-toggle {
-  display: none;
-  gap: var(--s-2);
-  padding-inline: var(--s-3);
-}
-
-.body {
-  display: flex;
-  align-items: flex-start;
-}
-
-.sidebar {
-  position: sticky;
-  top: var(--topbar-h);
-  flex: none;
-  width: var(--sidebar-w);
-  height: calc(100vh - var(--topbar-h));
-  overflow-y: auto;
-  padding: var(--s-4) var(--s-3);
-  background: var(--bg);
-  border-right: 1px solid var(--border);
-}
-
-.side-heading {
-  margin: var(--s-5) var(--s-3) var(--s-1);
-  font-size: 0.75rem;
-  font-weight: 650;
-  color: var(--muted);
-}
-
-.side-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.side-link {
-  display: block;
-  padding: var(--s-2) var(--s-3);
-  border-radius: var(--r-sm);
-  color: var(--text-soft);
-  text-decoration: none;
-}
-
-.side-link:hover {
-  background: var(--gray-100);
-}
-
-.side-link[aria-current] {
-  background: var(--accent-soft);
-  color: var(--text);
-  font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--accent-hover);
-}
-
-.content {
-  flex: 1;
-  min-width: 0;
-  max-width: 76rem;
-  padding: var(--s-5) var(--s-6) var(--s-7);
-}
-
-.content:focus {
-  outline: none;
-}
-
-.page {
-  min-width: 0;
-}
-
-.page > * + * {
-  margin-top: var(--s-4);
-}
-
-.page-head,
-.doc-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--s-3);
-}
-
-.page-head > *,
-.doc-head > * {
-  min-width: 0;
-}
-
-.page-head h1,
-.doc-head h1 {
-  margin: 0;
-}
-
-.breadcrumbs li {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.breadcrumbs ol {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-1);
-  list-style: none;
-  margin: 0 0 var(--s-3);
-  padding: 0;
-  font-size: var(--fs-sm);
-  color: var(--muted);
-}
-
-.breadcrumbs li + li::before {
-  content: '/';
-  margin-right: var(--s-1);
-}
-
-.breadcrumbs a {
-  color: var(--muted);
-}
-
-.breadcrumbs [aria-current] {
-  color: var(--text);
-  font-weight: 550;
-}
-
-@media (max-width: 899px) {
-  .nav-toggle {
-    display: inline-flex;
+    @apply h-4 animate-shimmer rounded-sm motion-reduce:animate-none;
+    background: linear-gradient(90deg, var(--color-hover) 25%, var(--color-line) 50%, var(--color-hover) 75%);
+    background-size: 200% 100%;
   }
 
-  .sidebar {
-    display: none;
-    position: fixed;
-    top: var(--topbar-h);
-    left: 0;
-    z-index: 30;
-    width: min(18rem, 86vw);
-    box-shadow: var(--shadow-md);
-    background: var(--surface);
+  .skeleton-0 {
+    width: 100%;
   }
 
-  .sidebar.open {
-    display: block;
+  .skeleton-1 {
+    width: 80%;
   }
 
-  /* Behind the drawer, below the top bar (the Menu button stays usable): a click closes it. */
-  .backdrop {
-    position: fixed;
-    inset: var(--topbar-h) 0 0;
-    z-index: 25;
-    background: rgb(16 24 40 / 35%);
+  .skeleton-2 {
+    width: 60%;
   }
 
-  .content {
-    padding: var(--s-4) var(--s-4) var(--s-6);
-  }
+  /* ---------- Shell: top bar, sidebar, content ---------- */
 
-  .brand {
-    font-size: var(--fs-base);
-  }
-
-  .topbar .menu {
-    max-width: 7.5rem;
-  }
-}
-
-/* On a phone the menu button is the three bars only; "Menu" stays as its accessible name. */
-@media (max-width: 479px) {
-  .nav-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
+  .skip-link {
+    @apply absolute top-[-4rem] left-2 z-50 rounded-control bg-primary px-4 py-2 font-medium text-white focus:top-2 focus-visible:outline-white;
   }
 
   .topbar {
-    gap: var(--s-2);
-    padding: 0 var(--s-3);
+    @apply sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-primary-hover bg-primary px-4 text-white;
   }
-}
 
-/* Smaller than that, the logo mark alone is the brand (the name stays for screen readers). */
-@media (max-width: 359px) {
+  .topbar > * {
+    @apply min-w-0; /* a flex child may be narrower than its content: nothing pushes the page wider */
+  }
+
+  .topbar :focus-visible {
+    @apply outline-white;
+  }
+
+  .topbar .btn-ghost {
+    @apply text-white hover:bg-white/15;
+  }
+
+  .brand {
+    @apply mr-auto inline-flex items-center gap-2 text-lg font-semibold tracking-tight text-white no-underline hover:no-underline;
+  }
+
+  .logo {
+    @apply block flex-none;
+  }
+
   .brand span {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    clip-path: inset(50%);
+    @apply truncate;
   }
-}
 
-/* ---------- Menus (More, user) ---------- */
+  /* The user menu is the flexible part of the bar: a long name is cut with an ellipsis. */
+  .topbar .menu {
+    @apply max-w-48 flex-initial;
+  }
 
-.menu {
-  position: relative;
-}
+  .user-button {
+    @apply max-w-full;
+  }
 
-.menu-list {
-  position: absolute;
-  top: calc(100% + var(--s-1));
-  z-index: 40;
-  display: grid;
-  min-width: 11rem;
-  padding: var(--s-1);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-md);
-}
+  .user-name {
+    @apply min-w-0 truncate;
+  }
 
-.menu-end {
-  right: 0;
-}
+  .caret {
+    @apply ml-1 h-0 w-0 border-x-4 border-t-5 border-x-transparent;
+    border-top-color: currentcolor;
+  }
 
-.menu-start {
-  left: 0;
-}
+  .burger {
+    @apply h-0.5 w-4 bg-current;
+    box-shadow:
+      0 -5px 0 currentcolor,
+      0 5px 0 currentcolor;
+  }
 
-.menu-item {
-  padding: var(--s-2) var(--s-3);
-  background: none;
-  border: 0;
-  border-radius: var(--r-sm);
-  text-align: left;
-  cursor: pointer;
-}
+  .nav-toggle {
+    @apply hidden gap-2 px-3;
+  }
 
-.menu-item:hover {
-  background: var(--gray-100);
-}
+  .body {
+    @apply flex items-start;
+  }
 
-.menu-item[aria-disabled='true'] {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
+  .sidebar {
+    @apply sticky top-14 h-[calc(100vh-3.5rem)] w-60 flex-none overflow-y-auto border-r border-line bg-surface px-3 py-4;
+  }
 
-.menu-danger {
-  color: var(--danger);
-}
+  .side-heading {
+    @apply mx-3 mt-6 mb-1 text-xs font-semibold tracking-wide text-muted uppercase;
+  }
 
-/* ---------- Login, splash ---------- */
+  .side-list {
+    @apply m-0 list-none p-0;
+  }
 
-.login,
-.splash {
-  display: grid;
-  /* One column that may shrink below its content, so a large text size cannot widen the page. */
-  grid-template-columns: minmax(0, 1fr);
-  place-items: center;
-  align-content: center;
-  gap: var(--s-3);
-  min-height: 100vh;
-  padding: var(--s-5) var(--s-4);
-}
+  .side-link {
+    @apply block rounded-control px-3 py-2 text-sm text-ink-soft no-underline hover:bg-hover hover:no-underline;
+  }
 
-.login-card {
-  width: 100%;
-  max-width: 24rem;
-  padding: var(--s-6);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-md);
-}
+  .side-link[aria-current] {
+    @apply bg-primary-50 font-semibold text-primary;
+    box-shadow: inset 3px 0 0 var(--color-primary);
+  }
 
-.login-brand {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  justify-items: center;
-  overflow-wrap: anywhere;
-  gap: var(--s-1);
-  margin-bottom: var(--s-5);
-  text-align: center;
-}
+  .content {
+    @apply min-w-0 max-w-304 flex-1 px-8 pt-6 pb-12 focus:outline-none;
+  }
 
-.login-brand h1 {
-  margin-top: var(--s-2);
-  font-size: var(--fs-xl);
-}
+  .page {
+    @apply min-w-0;
+  }
 
-.login-brand .subtitle {
-  margin: 0;
-}
+  .page > * + * {
+    @apply mt-4;
+  }
 
-.login form {
-  display: grid;
-  gap: var(--s-4);
-}
+  .page-head,
+  .doc-head {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
 
-.login .btn {
-  margin-top: var(--s-1);
-}
+  .page-head > *,
+  .doc-head > * {
+    @apply min-w-0;
+  }
 
-/* ---------- Home ---------- */
+  .page-head h1,
+  .doc-head h1 {
+    @apply m-0;
+  }
 
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
-  gap: var(--s-4);
-}
+  .breadcrumbs ol {
+    @apply m-0 mb-3 flex list-none flex-wrap gap-1 p-0 text-sm text-muted;
+  }
 
-.doctype-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
+  .breadcrumbs li {
+    @apply min-w-0 wrap-anywhere;
+  }
 
-.doctype-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-3);
-  padding: var(--s-2) 0;
-  border-top: 1px solid var(--border);
-}
+  .breadcrumbs li + li::before {
+    content: '/';
+    margin-right: 0.25rem;
+  }
 
-.doctype-link {
-  flex: 1;
-  min-width: 0;
-  color: var(--text);
-  font-weight: 550;
-  text-decoration: none;
-  padding: var(--s-1) 0;
-}
+  .breadcrumbs a {
+    @apply text-muted;
+  }
 
-.doctype-link:hover {
-  text-decoration: underline;
-}
+  .breadcrumbs [aria-current] {
+    @apply font-medium text-ink;
+  }
 
-/* ---------- List ---------- */
+  @media (max-width: 899px) {
+    .nav-toggle {
+      @apply inline-flex;
+    }
 
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-2);
-}
+    .sidebar {
+      @apply fixed top-14 left-0 z-30 hidden h-[calc(100vh-3.5rem)] w-[min(18rem,86vw)] shadow-(--shadow-pop);
+    }
 
-.search {
-  flex: 1 1 14rem;
-  max-width: 24rem;
-}
+    .sidebar.open {
+      @apply block;
+    }
 
-.filters fieldset {
-  min-width: 0;
-  margin: 0;
-  padding: var(--s-3) var(--s-4) var(--s-4);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-}
+    /* Behind the drawer, below the top bar (the Menu button stays usable): a click closes it. */
+    .backdrop {
+      @apply fixed inset-x-0 top-14 bottom-0 z-25 bg-ink/40;
+    }
 
-.filters legend {
-  padding: 0 var(--s-1);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--muted);
-}
+    .content {
+      @apply px-4 pt-4 pb-8;
+    }
 
-.filter-row {
-  display: grid;
-  grid-template-columns: minmax(9rem, 1fr) minmax(7rem, 9rem) minmax(9rem, 1.4fr) auto;
-  gap: var(--s-2);
-  margin-bottom: var(--s-2);
-}
+    .brand {
+      @apply text-base;
+    }
 
-.filter-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-3);
-}
+    .topbar .menu {
+      @apply max-w-30;
+    }
+  }
 
-.table-wrap {
-  position: relative; /* contains the visually-hidden header text, which would otherwise widen the page */
-  overflow-x: auto;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-sm);
-}
+  /* On a phone the menu button is the three bars only; "Menu" stays as its accessible name. */
+  @media (max-width: 479px) {
+    .nav-label {
+      @apply sr-only;
+    }
 
-.table-wrap.is-loading {
-  opacity: 0.55;
-}
+    .topbar {
+      @apply gap-2 px-3;
+    }
+  }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
+  /* Smaller than that, the logo mark alone is the brand (the name stays for screen readers). */
+  @media (max-width: 359px) {
+    .brand span {
+      @apply sr-only;
+    }
+  }
 
-th,
-td {
-  padding: var(--s-3) var(--s-4);
-  text-align: left;
-  vertical-align: middle;
-  border-bottom: 1px solid var(--border);
-}
+  /* ---------- Menus (More, user) ---------- */
 
-tbody tr:last-child > * {
-  border-bottom: 0;
-}
+  .menu {
+    @apply relative;
+  }
 
-thead th {
-  background: var(--bg);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-soft);
-  white-space: nowrap;
-}
+  .menu-list {
+    @apply absolute top-[calc(100%+0.25rem)] z-40 grid min-w-44 rounded-card border border-line bg-surface p-1 text-ink shadow-(--shadow-pop);
+  }
 
-th.num,
-td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
+  .menu-end {
+    @apply right-0;
+  }
 
-th button.sort {
-  padding: 0;
-  background: none;
-  border: 0;
-  color: inherit;
-  font-weight: inherit;
-  cursor: pointer;
-}
+  .menu-start {
+    @apply left-0;
+  }
 
-th.num button.sort {
-  text-align: right;
-}
+  .menu-item {
+    @apply rounded-control border-0 bg-transparent px-3 py-2 text-left text-sm text-ink hover:bg-hover;
+  }
 
-.list-table tbody th {
-  font-weight: 600;
-}
+  .menu-item[aria-disabled='true'] {
+    @apply cursor-not-allowed opacity-60;
+  }
 
-.list-table td {
-  white-space: nowrap;
-}
+  .menu-danger {
+    @apply text-danger;
+  }
 
-.list-table tbody th a {
-  color: var(--text);
-}
+  /* ---------- Login, splash ---------- */
 
-.muted-name {
-  display: block;
-  overflow-wrap: anywhere;
-  font-size: var(--fs-sm);
-  font-weight: 400;
-  color: var(--muted);
-}
+  .login,
+  .splash {
+    /* One column that may shrink below its content, so a large text size cannot widen the page. */
+    @apply grid min-h-screen grid-cols-[minmax(0,1fr)] place-items-center content-center gap-3 px-4 py-6;
+  }
 
-.row-link {
-  cursor: pointer;
-}
+  .login-card {
+    @apply w-full max-w-96 rounded-card border border-line bg-surface p-8 shadow-(--shadow-pop);
+    border-top: 4px solid var(--color-primary);
+  }
 
-/* The status of a row is its own column from 600 px; on a phone, where that column would be
-   off-screen, it sits under the title instead. */
-.status-inline {
-  display: none;
-  margin-top: var(--s-1);
-}
+  .login-brand {
+    @apply mb-6 grid grid-cols-[minmax(0,1fr)] justify-items-center gap-1 text-center wrap-anywhere;
+  }
 
-.sort-sub {
-  display: block;
-  font-weight: 400;
-  font-size: 0.75rem;
-  color: var(--muted);
-  text-align: left;
-}
+  .login-brand h1 {
+    @apply mt-2;
+  }
 
-@media (max-width: 599px) {
+  .login-brand .subtitle {
+    @apply m-0;
+  }
+
+  .login form {
+    @apply grid gap-4;
+  }
+
+  .login .btn {
+    @apply mt-1;
+  }
+
+  /* ---------- Home ---------- */
+
+  .card-grid {
+    @apply grid grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-4;
+  }
+
+  .doctype-list {
+    @apply m-0 list-none p-0;
+  }
+
+  .doctype-list li {
+    @apply flex items-center justify-between gap-3 border-t border-line py-2;
+  }
+
+  .doctype-link {
+    @apply min-w-0 flex-1 py-1 font-medium text-ink no-underline hover:text-primary hover:underline;
+  }
+
+  /* ---------- List ---------- */
+
+  .toolbar {
+    @apply flex flex-wrap gap-2;
+  }
+
+  .search {
+    @apply max-w-96 min-w-56 flex-[1_1_14rem];
+  }
+
+  .filters fieldset {
+    @apply min-w-0 rounded-card border border-line bg-surface px-4 pt-3 pb-4;
+  }
+
+  .filters legend {
+    @apply px-1 text-sm font-semibold text-muted;
+  }
+
+  .filter-row {
+    @apply mb-2 grid gap-2 grid-cols-[minmax(0,1fr)] sm:grid-cols-[minmax(9rem,1fr)_minmax(7rem,9rem)_minmax(9rem,1.4fr)_auto];
+  }
+
+  .filter-actions {
+    @apply flex flex-wrap items-center gap-3;
+  }
+
+  .table-wrap {
+    /* relative: contains the visually-hidden header text, which would otherwise widen the page */
+    @apply relative overflow-x-auto rounded-card border border-line bg-surface;
+  }
+
+  .table-wrap.is-loading {
+    @apply opacity-55;
+  }
+
+  tbody tr:last-child > * {
+    @apply border-b-0;
+  }
+
+  thead th {
+    @apply bg-page text-xs font-semibold tracking-wide whitespace-nowrap text-muted uppercase;
+  }
+
+  th.num,
+  td.num {
+    @apply text-right tabular-nums;
+  }
+
+  th button.sort {
+    @apply border-0 bg-transparent p-0 font-[inherit] tracking-[inherit] text-inherit uppercase;
+  }
+
+  th.num button.sort {
+    @apply text-right;
+  }
+
+  .list-table tbody th {
+    @apply font-medium;
+  }
+
+  .list-table td {
+    @apply whitespace-nowrap;
+  }
+
+  .list-table tbody th a {
+    @apply text-ink hover:text-primary;
+  }
+
+  .muted-name {
+    @apply block text-xs font-normal wrap-anywhere text-muted;
+  }
+
+  .row-link {
+    @apply cursor-pointer;
+  }
+
+  .row-link:hover > * {
+    @apply bg-primary-50;
+  }
+
+  /* The status of a row is its own column from 600 px; on a phone, where that column would be
+     off-screen, it sits under the title instead. */
   .status-inline {
-    display: block;
-    width: fit-content;
+    @apply mt-1 hidden;
   }
 
-  .col-status {
-    display: none;
+  .sort-sub {
+    @apply block text-left text-xs font-normal tracking-normal normal-case;
   }
-}
 
-.row-link:hover > * {
-  background: var(--bg);
-}
+  @media (max-width: 599px) {
+    .status-inline {
+      @apply block w-fit;
+    }
 
-.paging {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-2) var(--s-3);
-  margin-top: var(--s-4);
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
+    .col-status {
+      @apply hidden;
+    }
+  }
 
-.empty {
-  display: grid;
-  justify-items: center;
-  gap: var(--s-2);
-  padding: var(--s-7) var(--s-4);
-  background: var(--surface);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--r-md);
-  text-align: center;
-}
+  .paging {
+    @apply mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-muted;
+  }
 
-.empty p {
-  max-width: 28rem;
-  margin: 0 0 var(--s-2);
-  color: var(--muted);
-}
+  .empty {
+    @apply grid justify-items-center gap-2 rounded-card border border-dashed border-edge bg-surface px-4 py-12 text-center;
+  }
 
-/* ---------- Form ---------- */
+  .empty p {
+    @apply mb-2 max-w-md text-muted;
+  }
 
-.doc-title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s-3);
-  min-width: 0;
-}
+  /* ---------- Form ---------- */
 
-.doc-title h1:focus {
-  outline: none;
-}
+  .doc-title {
+    @apply flex min-w-0 flex-wrap items-center gap-3;
+  }
 
-.doc-title-name {
-  flex: 1 1 100%;
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-  overflow-wrap: anywhere;
-}
+  .doc-title h1:focus {
+    @apply outline-none;
+  }
 
-.doc-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-2);
-}
+  .doc-title-name {
+    @apply m-0 basis-full text-sm wrap-anywhere text-muted;
+  }
 
-.page form > * + * {
-  margin-top: var(--s-4);
-}
+  .doc-actions {
+    @apply flex flex-wrap items-center gap-2;
+  }
 
-.required-hint {
-  margin-bottom: var(--s-4);
-}
+  .page form > * + * {
+    @apply mt-4;
+  }
 
-.fields {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--s-4) var(--s-5);
-}
+  .required-hint {
+    @apply mb-4;
+  }
 
-.field-wide {
-  min-width: 0;
-}
-
-.field-check {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s-2);
-}
-
-.field-check .field-error {
-  flex-basis: 100%;
-}
-
-@media (min-width: 800px) {
   .fields {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    @apply grid grid-cols-[minmax(0,1fr)] gap-x-6 gap-y-4 min-[800px]:grid-cols-2;
   }
 
   .field-wide {
-    grid-column: 1 / -1;
+    @apply min-w-0 min-[800px]:col-span-full;
   }
-}
 
-.table-field {
-  min-width: 0; /* a fieldset is as wide as its content by default; the grid scrolls in its own box */
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.table-field legend {
-  padding: 0;
-  margin-bottom: var(--s-2);
-  font-size: var(--fs-sm);
-  font-weight: 550;
-  color: var(--text-soft);
-}
-
-.table-field .table-wrap {
-  margin-bottom: var(--s-3);
-  box-shadow: none;
-}
-
-.grid-table th,
-.grid-table td {
-  padding: var(--s-2) var(--s-2);
-}
-
-.grid-table thead th:first-child,
-.grid-table tbody th {
-  width: 3rem;
-  text-align: center;
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.grid-table td {
-  min-width: 7rem;
-  vertical-align: top;
-}
-
-.grid-table .remove-cell {
-  width: 1%;
-  min-width: 0;
-  white-space: nowrap;
-}
-
-.grid-table input,
-.grid-table select {
-  min-height: 2.25rem;
-}
-
-@media (max-width: 599px) {
-  .grid-table {
-    min-width: 36rem;
+  .field-check {
+    @apply flex flex-wrap items-center gap-2;
   }
-}
 
-.details {
-  padding: var(--s-4) var(--s-5);
-}
-
-.details h2 {
-  margin-bottom: var(--s-3);
-  font-size: var(--fs-sm);
-  color: var(--muted);
-}
-
-.details dl {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
-  gap: var(--s-3) var(--s-5);
-  margin: 0;
-}
-
-.details dl > div {
-  min-width: 0;
-}
-
-.details dt {
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-
-.details dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-/* ---------- Dialog ---------- */
-
-.dialog {
-  width: min(28rem, calc(100vw - 2rem));
-  padding: var(--s-5);
-  background: var(--surface);
-  color: var(--text);
-  border: 0;
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-md);
-}
-
-.dialog::backdrop {
-  background: rgb(16 24 40 / 45%);
-}
-
-.dialog-body {
-  margin-top: var(--s-2);
-  color: var(--text-soft);
-}
-
-.dialog-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--s-2);
-  margin-top: var(--s-5);
-}
-
-/* ---------- Toasts ---------- */
-
-.toasts {
-  position: fixed;
-  right: var(--s-4);
-  bottom: var(--s-4);
-  z-index: 60;
-  display: grid;
-  gap: var(--s-2);
-  max-width: calc(100vw - 2rem);
-  pointer-events: none;
-}
-
-.toast {
-  display: flex;
-  align-items: center;
-  gap: var(--s-3);
-  padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4);
-  background: var(--text);
-  color: #ffffff;
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-md);
-  pointer-events: auto;
-}
-
-.toast-close {
-  width: 2rem;
-  height: 2rem;
-  background: none;
-  border: 0;
-  border-radius: var(--r-sm);
-  color: #d0d5db;
-  font-size: 1.25rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.toast-close:hover {
-  background: rgb(255 255 255 / 14%);
-  color: #ffffff;
-}
-
-.toast :focus-visible {
-  outline-color: var(--accent);
-}
-
-@media (max-width: 599px) {
-  .filter-row {
-    grid-template-columns: minmax(0, 1fr);
+  .field-check .field-error {
+    @apply basis-full;
   }
+
+  .table-field {
+    @apply min-w-0; /* a fieldset is as wide as its content by default; the grid scrolls in its own box */
+  }
+
+  .table-field legend {
+    @apply mb-2 p-0 text-sm font-medium text-ink-soft;
+  }
+
+  .table-field .table-wrap {
+    @apply mb-3;
+  }
+
+  .grid-table th,
+  .grid-table td {
+    @apply p-2;
+  }
+
+  .grid-table thead th:first-child,
+  .grid-table tbody th {
+    @apply w-12 text-center font-medium text-muted;
+  }
+
+  .grid-table td {
+    @apply min-w-28 align-top;
+  }
+
+  .grid-table td.num input {
+    @apply text-right tabular-nums;
+  }
+
+  .grid-table td.num input[readonly] {
+    @apply pr-0;
+  }
+
+  .grid-table .remove-cell {
+    @apply w-[1%] min-w-0 whitespace-nowrap;
+  }
+
+  .grid-table input,
+  .grid-table select {
+    @apply min-h-9;
+  }
+
+  @media (max-width: 599px) {
+    .grid-table {
+      @apply min-w-xl;
+    }
+  }
+
+  .details {
+    @apply px-6 py-4;
+  }
+
+  .details h2 {
+    @apply mb-3 text-xs font-semibold tracking-wide text-muted uppercase;
+  }
+
+  .details dl {
+    @apply grid grid-cols-[repeat(auto-fill,minmax(min(100%,13rem),1fr))] gap-x-6 gap-y-3;
+  }
+
+  .details dl > div {
+    @apply min-w-0;
+  }
+
+  .details dt {
+    @apply text-sm text-muted;
+  }
+
+  .details dd {
+    @apply wrap-anywhere;
+  }
+
+  /* ---------- Dialog ---------- */
+
+  .dialog {
+    /* m-auto! beats the `form > * + *` spacing rule: a modal dialog is centred by its auto margins */
+    @apply m-auto! w-[min(28rem,calc(100vw-2rem))] rounded-card border-0 bg-surface p-6 text-ink shadow-(--shadow-pop);
+  }
+
+  .dialog::backdrop {
+    background: rgb(17 24 39 / 50%);
+  }
+
+  .dialog h2 {
+    @apply text-primary;
+  }
+
+  .dialog-body {
+    @apply mt-2 text-ink-soft;
+  }
+
+  .dialog-actions {
+    @apply mt-6 flex flex-wrap justify-end gap-2;
+  }
+
+  /* ---------- Toasts ---------- */
 
   .toasts {
-    left: var(--s-4);
+    @apply pointer-events-none fixed right-4 bottom-4 z-60 grid max-w-[calc(100vw-2rem)] gap-2 max-[599px]:left-4;
+  }
+
+  .toast {
+    @apply pointer-events-auto flex items-center gap-3 rounded-card bg-primary py-2 pr-2 pl-4 text-sm text-white shadow-(--shadow-pop);
+  }
+
+  .toast-close {
+    @apply size-8 rounded-sm border-0 bg-transparent text-xl leading-none text-white/85 hover:bg-white/15 hover:text-white;
+  }
+
+  .toast :focus-visible {
+    @apply outline-white;
   }
 }

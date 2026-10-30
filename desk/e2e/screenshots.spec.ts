@@ -4,8 +4,8 @@
 //   SCREENSHOTS=1 SCREENSHOT_DIR=/some/dir npx playwright test screenshots
 //
 // It adds a few sample documents (customers, and orders that are a draft, submitted and
-// cancelled, so that every status badge shows), then takes the login page, home, list and form
-// at 1280, 800 and 375 px (and the list at 320 px, a submitted form at 375 px), and asserts that
+// cancelled, so that every status badge shows), then takes the login page, home, list, form (draft and
+// submitted) and the cancel dialog at 1280, 800 and 375 px (and the list at 320 px), and asserts that
 // no page scrolls sideways at those phone widths. The PNGs are not
 // committed.
 
@@ -119,6 +119,20 @@ test('screenshots of login, home, list and form', async ({ page }) => {
     await expect(page.getByLabel('Description, row 1')).toBeVisible();
     await noSideScroll(page, `form at ${width}`);
     await page.screenshot({ path: `${DIR}/form-${width}.png` });
+
+    await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
+    await expect(page.locator('.status-badge')).toHaveText('Submitted');
+    await noSideScroll(page, `submitted form at ${width}`);
+    await page.screenshot({ path: `${DIR}/form-submitted-${width}.png` });
+
+    // The dialog (Cancel is a destructive question): on a phone it must fit the screen.
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await noSideScroll(page, `dialog at ${width}`);
+    await page.screenshot({ path: `${DIR}/dialog-${width}.png` });
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
   }
 
   // ---- more states at 1280 ------------------------------------------------------------
@@ -140,10 +154,6 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await expect(page.locator('.status-badge')).toHaveText('Submitted');
   await page.getByRole('button', { name: 'More actions' }).click();
   await page.screenshot({ path: `${DIR}/form-submitted-menu-1280.png` });
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(page.getByRole('dialog')).toBeVisible();
-  await page.screenshot({ path: `${DIR}/form-dialog-1280.png` });
-  await page.keyboard.press('Escape');
 
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.cancelled)}`);
   await expect(page.locator('.status-badge')).toHaveText('Cancelled');
@@ -173,9 +183,6 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 800 });
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
   await expect(page.locator('.status-badge')).toHaveText('Submitted');
-  await noSideScroll(page, 'submitted form at 375');
-  await page.screenshot({ path: `${DIR}/form-submitted-375.png` });
-
   await page.getByRole('button', { name: 'Menu' }).click();
   await page.screenshot({ path: `${DIR}/form-menu-open-375.png` });
 });

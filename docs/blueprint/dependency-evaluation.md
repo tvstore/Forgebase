@@ -335,6 +335,25 @@ One development dependency is added for the smoke test of owner decision 5 (one 
 
 The earlier remark that "UI library, router, data-fetching and form libraries are deferred" is answered by the decisions above.
 
+#### Admission note for UX.3 (2026-10-30): Tailwind CSS
+
+Owner decision T1 ([ADR 0017](../adr/0017-desk-styling-tailwind.md)): the desk is styled with Tailwind CSS v4 at build time. Two direct development dependencies, exact-pinned; licenses are the `license` field of the lockfile (`Verified (local measurement)`, npm 10.9.4, Node 22.22.0); 4.3.3 was verified on npm by the orchestrator on 2026-10-30.
+
+| Package | Version | License | Use |
+|---|---|---|---|
+| `tailwindcss` | 4.3.3 | MIT | the compiler (utilities, `@theme`, `@apply`), dev only |
+| `@tailwindcss/vite` | 4.3.3 | MIT | the Vite plugin that runs it, dev only |
+| `@tailwindcss/node`, `@tailwindcss/oxide` | 4.3.3 | MIT | pulled in; `oxide` is the Rust scanner and parser (a native binary) |
+| `@tailwindcss/oxide-<platform>` (12 packages: android, darwin x2, freebsd, linux x5, wasm32-wasi, win32 x2) | 4.3.3 | MIT | optional: npm installs the one for the machine (`linux-x64-gnu` on CI) |
+| `lightningcss` 1.32.0 and its 11 platform packages (nested under `@tailwindcss/node`) | 1.32.0 | MPL-2.0 | optional platform binaries as before; dev only |
+| `enhanced-resolve`, `tapable`, `graceful-fs`, `jiti`, `magic-string` | 5.26.0, 2.3.3, 4.2.11, 2.7.0, 0.30.21 | MIT, ISC (`graceful-fs`) | pulled in; dev only |
+
+**Package count (`Verified (local measurement)`, lockfile diff).** The lockfile grows from 200 to **233** packages (**+33**, no existing package changed version): 2 direct, 31 transitive. All 33 are development only (none is shipped; the shipped set is still `react`, `react-dom` and `scheduler`). On Linux x64, `npm ci` installs 191 packages. By license the new ones are MIT 20 and ISC 1, plus **MPL-2.0 12**: `lightningcss` 1.32.0 and its 11 platform packages. Vite already carries `lightningcss` 1.33.0 (the MPL-2.0 dev tool of the M4.1 admission); Tailwind's own range needs a copy of its own, so there are now two versions side by side (24 MPL-2.0 entries in total, all optional or dev). MPL-2.0 stays allowed for development tooling only, exactly as decided in M4.1; nothing of it is in the built desk. `npm run licenses` passes with the allow-list unchanged, and `npm audit --audit-level=high` finds nothing.
+
+**Install scripts.** `@tailwindcss/oxide` is a native module delivered as optional platform packages; no Tailwind package has `hasInstallScript` in the lockfile (the only one is `fsevents`, as before): the binary comes from the platform package, not from a script, and `npm ci` with `ignore-scripts=true` (`desk/.npmrc`) builds and runs the desk correctly (verified: `npm ci && npm run build` and the Playwright smoke test). No change to `.npmrc` or to CI is needed. Cost to keep in mind: a platform without a published `@tailwindcss/oxide` binary cannot build the desk (the WebAssembly fallback `oxide-wasm32-wasi` exists).
+
+**Maintenance.** Tailwind Labs, MIT, active releases; a build tool with no runtime in the browser. **Why not plain CSS:** owner decision T1 (a shared scale and vocabulary for the M8 desk work); the cost is the toolchain above. The CSP is unchanged (verified on the built files: no inline script or style, no `@import`, no `url(...)`).
+
 ### Admission note for M5.1 (2026-10-29): no new package
 
 M5.1 adds **no external package** and no new version to `Cargo.lock`. The crate `forgebase-cli` is renamed `forgebase` and gets a library target; `axum` and `tower` (already direct dependencies of `forgebase-http`, same version and features) become **optional normal dependencies** of `forgebase`, enabled only by its cargo feature `testing` (the in-process HTTP client of `forgebase::testing` needs `axum::Router` and `tower::ServiceExt::oneshot`, as the `forgebase-http` tests do). The `testing` feature is off by default, so the stock binary and an app's release build do not carry the helpers; an app enables it in its `[dev-dependencies]`. The crate depends on itself as a dev-dependency with that feature, so that its own integration tests (which use the helpers) run in a plain `cargo test`. `tokio` also gets the `rt-multi-thread` runtime built by hand in the library (`Forgebase::run`) instead of `#[tokio::main]`; the features are the ones it already had. The public API re-exports `rust_decimal::Decimal` and `time::{Date, OffsetDateTime}` (the payloads of `Value`) from the versions already in the tree. Licenses: unchanged.

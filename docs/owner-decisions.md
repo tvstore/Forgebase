@@ -53,8 +53,7 @@ that you did. An owner-level decision ([AGENTS.md §10.4](../AGENTS.md#104-devia
 7. **The UI must suit business users.** It must be simple, clean, elegant, corporate and user friendly:
    *"UI nya simple and clean, lalu UX yg user friendly"*; *"clean, simpel, elegan dan cocok untuk
    corporate"*. From UX.3 on, navy #1B2A5C (the logo background) is the brand colour of the UI and yellow stays only in the logo
-   (owner decision 2026-10-30, below). Until UX.3 is merged, the desk and architecture §11 still use the yellow accent
-   of UX-5.
+   (owner decision 2026-10-30, below; recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md)).
 8. **Communication: results only.** Use Indonesian with the owner and English in code and docs. In the
    information session, report only finished results (merged pull requests, milestones Done) and decisions
    that are needed. Never send "waiting" or "no new results" messages. The history must read cleanly.
@@ -180,7 +179,7 @@ where its details live.
 | UX-2: `read_only`, `title_field` and `list_fields` in metadata. | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
 | UX-3: sidebar grouped by app, plus breadcrumbs. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
 | UX-4: still no UI component library. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
-| ~~UX-5: the Forgebase yellow as the accent~~ (superseded by T2, the UX.3 navy decision of 2026-10-30, below). | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) (still shows UX-5 until UX.3) |
+| ~~UX-5: the Forgebase yellow as the accent~~ (superseded by T2, the UX.3 navy decision of 2026-10-30, below). | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) (UX-5 marked superseded there by UX.3) |
 
 ### M7 Site management (2026-10-30, "setuju semua")
 
@@ -193,17 +192,19 @@ where its details live.
 | One worker per site. | [ADR 0014](adr/0014-multi-site-database-per-site.md) |
 | Backup and restore with `pg_dump` and `pg_restore`. | [ADR 0014](adr/0014-multi-site-database-per-site.md) |
 
-### UX.3 Tailwind and corporate palette, and M8 Workflow and reports (2026-10-30, "oke setuju semua dengan plan mu"; information session, not yet recorded in the repository)
+### UX.3 Tailwind and corporate palette, and M8 Workflow and reports (2026-10-30, "oke setuju semua dengan plan mu"; information session)
 
 These decisions were approved in the information session. Their ADRs and milestone entries are written by the UX.3 and
-M8 pull requests; until then this table is the only record, and the current records (architecture §11, milestones)
-describe the state before these decisions.
+M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.3,
+[#31](https://github.com/agilma/Forgebase/pull/31)); T4 (UX.3 before M8.1) is recorded in ADR 0017 and the
+[milestones](blueprint/milestones.md). The M8 rows are still planned: until their pull requests land, this table is
+their only record.
 
 | Decision | Recorded in |
 |---|---|
-| T1: **Tailwind CSS v4** as a build-time styling tool. Still no component kits. *"UI pakai tailwind agar tampilan ui clean, simpel, elegan dan cocok untuk corporate"* | planned: the UX.3 ADR |
-| T2: **Navy #1B2A5C** (the logo background) is the primary UI colour (supersedes UX-5). Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | planned: the UX.3 ADR |
-| T3: system font stack. | planned: the UX.3 ADR |
+| T1: **Tailwind CSS v4** as a build-time styling tool. Still no component kits. *"UI pakai tailwind agar tampilan ui clean, simpel, elegan dan cocok untuk corporate"* | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
+| T2: **Navy #1B2A5C** (the logo background) is the primary UI colour (supersedes UX-5). Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
+| T3: system font stack. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | planned: the M8.1 ADR |
 | Saved views: private per user; shared views only by Administrator. Group-by summary. | planned: the M8.3 pull request |
 | Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | planned: the M8.4 ADR |
