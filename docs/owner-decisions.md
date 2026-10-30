@@ -205,7 +205,41 @@ requests land, this table is their only record.
 |---|---|
 | T1: **Tailwind CSS v4** as a build-time styling tool. Still no component kits. *"UI pakai tailwind agar tampilan ui clean, simpel, elegan dan cocok untuk corporate"* | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | T2: **Navy #1B2A5C** (the logo background) is the primary UI colour (supersedes UX-5). Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
-| T3: system font stack. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
+| ~~T3: system font stack.~~ (superseded by U2, below: Inter is self-hosted; the system stack stays as the fallback.) | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | [ADR 0015](adr/0015-workflow-states-and-transitions.md) |
 | Saved views: private per user; shared views only by Administrator. Group-by summary. | planned: the M8.3 pull request |
 | Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | planned: the M8.4 ADR |
+
+### UX.4 desk polish (2026-10-30, "setuju semua rencana mu")
+
+The owner asked for a smoother, more elegant desk: *"apa bisa ui dibuat lebih smoothy agar terkesan elegan high kualitas, seperti frappe? tapi tetap pakai warna dasar yang sama"*, and approved the plan (and the M9 plan, below) in the information session with *"setuju semua rencana mu"*. The base colours do not change (navy `#1B2A5C`, yellow only in the logo: T2 holds). Frappe is a visual and behavioural reference only: no Frappe code or asset is copied. The decisions are recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (section "UX.4") and in [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) and [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed); the pull request is the one that implements them.
+
+| Decision | Recorded in |
+|---|---|
+| U1: UX.4 runs between M8.1 and M8.2, so that every M8 desk screen is built in the polished style. | [ADR 0017](adr/0017-desk-styling-tailwind.md), [milestones](blueprint/milestones.md) |
+| U2: **Inter, self-hosted**, from `@fontsource-variable/inter` (OFL-1.1, Latin subset); the OFL-1.1 licence is allowed **for fonts only**. Supersedes T3 (the system stack stays as the fallback). | [ADR 0017](adr/0017-desk-styling-tailwind.md), [dependency evaluation §12](blueprint/dependency-evaluation.md#12-frontend) |
+| U3: a curated set of **Lucide SVG icons copied into the repository** (ISC, with the licence notice; not a dependency), plus an optional `icon` key on DocTypes (validated against one list). | [ADR 0017](adr/0017-desk-styling-tailwind.md), [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
+| U4: the look and the motion of the mockup: tokens, filled inputs, pill badges, 12 px cards, 150 to 200 ms CSS motion that `prefers-reduced-motion` turns off. | [ADR 0017](adr/0017-desk-styling-tailwind.md), [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
+| U5: a **command bar** on Ctrl/Cmd+K: navigation only, on the client, no new API, no storage. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
+| U6: form in cards plus a right-hand info panel (the workflow history joins it in M8.2). | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
+| U7: **link titles**: a permission-aware addition to the list and read routes (`?link_titles=1`); a target the caller cannot read gives no title. | [architecture §7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed), [security model](blueprint/security-model.md#the-http-layer-implemented-in-m33) |
+
+Order of the work, as the information session set it: M8.1 (done), then UX.4, then M8.2 to M8.5, then M9.1 to M9.5.
+
+### M9 Integration (2026-10-30, "setuju semua rencana mu"; information session)
+
+The owner approved the M9 plan in the information session (the same *"setuju semua rencana mu"* as UX.4). **M9 starts after M8 is Done**; this section is the only record of its decisions until the M9 pull requests land (the plan itself is in the information session). They build on M3 (auth, API tokens, permissions), M5 (apps, the public API), M6 (jobs and the outbox), M7 (sites) and M8. The owner's thinking applies: a small explicit public API, deny by default, no runtime code, extension through apps only, and a significant dependency is an owner decision (decisions 6 and 9 are that approval). Not in M9: GraphQL, RPC by dotted path, guest endpoints, inbound webhook receivers, OAuth or SSO, a webhook UI in the desk, Excel, CSV import of child tables, sync between sites. M10 needs a new plan.
+
+| Decision | Recorded in |
+|---|---|
+| 1: app method endpoints `<app>.<method>`, `POST /api/v1/method/...` with JSON in and out; roles are required or the method says `any_user()`; no guest methods. | planned: the M9.1 pull request (ADR 0018) |
+| 2: methods run as the caller; the documents handle enforces the caller's permissions; one transaction per call. | planned: the M9.1 pull request (ADR 0018) |
+| 3: webhooks are configured per site at runtime (a table and the `forgebase webhook` commands). | planned: the M9.2 pull request (ADR 0019) |
+| 4: webhook delivery through the outbox, signed with HMAC-SHA256, at least once. | planned: the M9.2 pull request (ADR 0019) |
+| 5: an SSRF guard (https only, no loopback, private, link-local or metadata addresses unless allowed per webhook, a timeout, no redirects, secrets never printed). | planned: the M9.2 pull request (ADR 0019) |
+| 6: the HTTP client is `hyper-util` plus `hyper-rustls` (ring) and `rustls-native-certs`: **the owner approved these dependencies and their licences**. | planned: the M9.2 pull request (dependency evaluation) |
+| 7: new rights `export` and `import` (ADR 0011 extended). | planned: the M9.3 pull request |
+| 8: import is all-or-nothing, with a dry run, per-row errors, insert or an explicit upsert, CSV and JSON. | planned: the M9.3 pull request |
+| 9: the `csv` crate reads CSV: **the owner approved this dependency**. | planned: the M9.3 pull request (dependency evaluation) |
+| 10: fixtures are inserted if missing, updated only when the fixture's record changed, and never deleted (the answer to the open question 11 of the feature matrix). | planned: the M9.4 pull request (ADR 0012 surface update) |
+| 11: M9 is split into M9.1 to M9.5, and M9.5 (the example apps) touches no file under `crates/`. | planned: [milestones](blueprint/milestones.md) |
