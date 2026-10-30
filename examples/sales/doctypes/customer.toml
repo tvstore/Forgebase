@@ -1,5 +1,6 @@
 # A DocType of the `sales` example app (examples/sales). Used by the README quick start.
 # Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+# Labels are the humanized field names ("Full Name", "Loyalty Points", ...) unless a field sets `label`.
 name = "customer"
 label = "Customer"
 naming = { field = "email" }
@@ -55,8 +56,6 @@ options = ["standard", "silver", "gold"]
 name = "customer_group"
 type = "link"
 target = "customer_group"
-
-# Labels are the humanized field names ("Full Name", "Loyalty Points", ...) unless a field sets `label`.
 
 # Who may do what (ADR 0011). The `forgebase doc` commands run as the trusted system context and ignore these rules;
 # they apply to real users (HTTP API, M3.3). A DocType without rules is closed to everyone except `Administrator`.

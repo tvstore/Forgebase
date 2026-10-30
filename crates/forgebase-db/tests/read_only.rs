@@ -246,6 +246,40 @@ async fn update_refuses_a_changed_value_and_a_row_value_but_accepts_the_stored_v
 }
 
 #[tokio::test]
+async fn update_refuses_null_for_a_stored_read_only_value() {
+    let reg = computing();
+    let db = setup(&reg).await;
+    let mut client = db.pool.get().await.unwrap();
+    let c = &mut **client;
+    let stored = insert(c, &reg, "sheet", sheet(None, vec![line(1, None)]), &ann())
+        .await
+        .unwrap();
+    assert_eq!(stored.values["total"], Value::Int(10));
+    let changes = Changes {
+        values: BTreeMap::from([("total".to_owned(), Value::Null)]),
+        tables: BTreeMap::new(),
+    };
+    let errors = refused(
+        update(
+            c,
+            &reg,
+            "sheet",
+            &stored.name,
+            stored.version,
+            &changes,
+            &ann(),
+        )
+        .await,
+    );
+    assert_eq!(errors, [read_only("total")]);
+    let read = get(c, &reg, "sheet", &stored.name, &ann())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((read.version, &read.values["total"]), (1, &Value::Int(10)));
+}
+
+#[tokio::test]
 async fn amend_copies_read_only_values_without_refusing_them() {
     let reg = computing();
     let db = setup(&reg).await;

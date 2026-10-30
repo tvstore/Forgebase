@@ -845,4 +845,25 @@ async fn a_caller_cannot_set_a_read_only_field_422_validation_failed() {
     );
     let reply = env.send(patch(json!({"title": "u", "total": null}))).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+
+    // A hook-computed value cannot be cleared with null; sending it back is fine.
+    let reply = env
+        .send(
+            post("/api/v1/resource/ledger")
+                .session(&keeper)
+                .json(json!({"title": "computed"})),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text);
+    assert_eq!(reply.data()["total"], json!(7));
+    let name = reply.data()["name"].as_str().expect("name").to_owned();
+    let patch = |data: Json| {
+        req(Method::PATCH, &uri("ledger", &name))
+            .session(&keeper)
+            .json(json!({"version": 1, "data": data}))
+    };
+    let reply = env.send(patch(json!({"total": null}))).await;
+    assert_eq!(details(&reply), ["field `total` is read-only"]);
+    let reply = env.send(patch(json!({"total": 7}))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
 }

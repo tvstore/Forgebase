@@ -131,6 +131,7 @@ A DocType file can also say how the desk should show it (UX.1). A field without 
 
 ```toml
 name = "sales_order"
+label = "Sales Order"
 title_field = "customer"
 list_fields = ["customer", "order_date", "total"]
 

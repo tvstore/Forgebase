@@ -10,7 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
+use forgebase_core::document::Document;
+use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::value::Value;
 use forgebase_db::auth;
 use forgebase_db::{Pool, SyncOptions, connect, migrate_framework, quote_ident, sync};
 use forgebase_http::{AppConfig, AppState, router};
@@ -242,6 +245,18 @@ write = true
 create = true
 "#;
 
+/// Sets the read-only `total` of a `ledger` titled "computed" to 7, like an app's hook.
+struct LedgerTotal;
+
+impl DocTypeHooks for LedgerTotal {
+    fn validate(&self, _ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+        if doc.values.get("title") == Some(&Value::Text("computed".into())) {
+            doc.values.insert("total".into(), Value::Int(7));
+        }
+        Ok(())
+    }
+}
+
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
     for text in [
@@ -261,6 +276,9 @@ pub fn registry() -> Registry {
             .add(DocType::from_toml_str(text).expect("valid DocType"))
             .expect("valid registry");
     }
+    registry
+        .add_hooks("ledger", Arc::new(LedgerTotal))
+        .expect("hooks");
     registry
 }
 

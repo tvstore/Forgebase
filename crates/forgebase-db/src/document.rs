@@ -381,8 +381,8 @@ async fn get_in(
 ///    is [`DbError::PermissionDenied`] and a `version` other than `expected_version` is
 ///    [`DbError::Conflict`], in this order and all before any hook runs;
 /// 2. the caller's `changes` are checked for `read_only` fields ([`ValidationError::ReadOnly`]):
-///    a top-level value that differs from the stored one is refused (sending the stored value
-///    back is allowed), and so is any row in `changes.tables` with a non-null value for a
+///    a top-level value that differs from the stored one is refused (null included when a value
+///    is stored; sending the stored value back is allowed), and so is any row in `changes.tables` with a non-null value for a
 ///    read_only field of the child DocType. A client that replaces a table must therefore leave
 ///    the computed columns out of its rows. Hooks may still set read_only fields;
 /// 3. the changes are merged into it: the stored values overlaid with `changes.values`, and
@@ -561,8 +561,10 @@ async fn update_in(
 /// [`ValidationError::InRow`] for a row). Runs on what the caller supplied, before the hooks, so
 /// a hook may still set such a field.
 ///
-/// A top-level value is refused when it is not null and, for an update (`stored` is the current
-/// document), differs from the stored value: sending the stored value back is allowed. A row of
+/// A top-level value is refused when, for an insert (`stored` is `None`), it is not null (null
+/// means not given), or, for an update (`stored` is the current document), it differs from the
+/// stored value, a missing stored value counting as null: sending the stored value back (null
+/// when it is null) is allowed, null over a stored value is not. A row of
 /// a table is refused when it has a non-null value for a read_only field of the child DocType,
 /// so a client that replaces a table leaves those columns out.
 fn check_read_only(
@@ -573,10 +575,15 @@ fn check_read_only(
 ) -> Result<(), DbError> {
     let mut errors = Vec::new();
     for field in doctype.column_fields().filter(|f| f.read_only) {
-        let Some(value) = values.get(&field.name).filter(|v| **v != Value::Null) else {
+        let Some(value) = values.get(&field.name) else {
             continue;
         };
-        if stored.is_some_and(|s| s.values.get(&field.name) == Some(value)) {
+        let unchanged = match stored {
+            // Update: a missing stored value is null, and null clears a computed value.
+            Some(s) => s.values.get(&field.name).unwrap_or(&Value::Null) == value,
+            None => *value == Value::Null,
+        };
+        if unchanged {
             continue;
         }
         errors.push(ValidationError::ReadOnly {
