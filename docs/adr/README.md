@@ -44,3 +44,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0012](0012-app-model-and-public-api-boundary.md) | App model and public API boundary | Accepted |
 | [0013](0013-jobs-scheduler-and-transactional-outbox.md) | Jobs, scheduler and transactional outbox | Accepted |
 | [0014](0014-multi-site-database-per-site.md) | Multi-site: database per site | Accepted |
+| [0017](0017-desk-styling-tailwind.md) | Desk styling: Tailwind CSS, theme tokens, no component kits | Accepted (supersedes UX-5) |

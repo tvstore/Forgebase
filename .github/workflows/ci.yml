@@ -51,7 +51,8 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
       # The backup tests run the real pg_dump and pg_restore, whose major version must equal the
-      # server's (16): a newer pg_dump writes SQL that the server rejects (newer runner images
+      # server's (16): a newer pg_dump writes an archive that the server's pg_restore may not read,
+      # and a newer pg_restore sends SQL that an older server rejects (newer runner images
       # ship 18). postgresql-client-16 installs to /usr/lib/postgresql/16/bin next to other
       # versions (the Ubuntu 24.04 archive has it; a no-op when it is installed already).
       # FORGEBASE_PG_BIN points there for the rest of the job. The step prints the versions and
