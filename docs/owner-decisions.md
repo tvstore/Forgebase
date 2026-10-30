@@ -198,8 +198,10 @@ These decisions were approved in the information session. Their ADRs and milesto
 M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.3,
 [#31](https://github.com/agilma/Forgebase/pull/31)); T4 (UX.3 before M8.1) is recorded in ADR 0017 and the
 [milestones](blueprint/milestones.md). The workflow row is recorded in [ADR 0015](adr/0015-workflow-states-and-transitions.md)
-(M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The other M8 rows are still planned: until their pull
-requests land, this table is their only record.
+(M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The saved views and group-by summary row is recorded in
+[architecture §11](blueprint/architecture.md#11-desk-reports-workflow) and [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed)
+(M8.3, this pull request). The other M8 rows are still planned: until their pull requests land, this table is their
+only record.
 
 | Decision | Recorded in |
 |---|---|
@@ -207,7 +209,7 @@ requests land, this table is their only record.
 | T2: **Navy #1B2A5C** (the logo background) is the primary UI colour (supersedes UX-5). Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | ~~T3: system font stack.~~ (superseded by U2, below: Inter is self-hosted; the system stack stays as the fallback.) | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | [ADR 0015](adr/0015-workflow-states-and-transitions.md) |
-| Saved views: private per user; shared views only by Administrator. Group-by summary. | planned: the M8.3 pull request |
+| Saved views: private per user; shared views only by Administrator. Group-by summary. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow), [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) (M8.3) |
 | Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | planned: the M8.4 ADR |
 
 ### UX.4 desk polish (2026-10-30, "setuju semua rencana mu")
@@ -225,6 +227,12 @@ The owner asked for a smoother, more elegant desk: *"apa bisa ui dibuat lebih sm
 | U7: **link titles**: a permission-aware addition to the list and read routes (`?link_titles=1`); a target the caller cannot read gives no title. | [architecture §7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed), [security model](blueprint/security-model.md#the-http-layer-implemented-in-m33) |
 
 Order of the work, as the information session set it: M8.1 (done), then UX.4, then M8.2 to M8.5, then M9.1 to M9.5.
+
+**Licence notices with the build (2026-10-30, information session).** The owner approved the recommendation with *"setujui rekomendasi putusanmu"*: ship Inter's OFL-1.1 text and the Lucide ISC notice with the built desk (`dist/THIRD-PARTY-LICENSES.txt`), included in the M8.3 pull request, with a test that keeps the copy current. The same approval covers a cosmetic fix (a list's primary column header shows one label, the title field's label) and confirms that the native date input format stays as it is (no custom date picker).
+
+| Decision | Recorded in |
+|---|---|
+| Ship `THIRD-PARTY-LICENSES.txt` (Inter OFL-1.1, Lucide) in `desk/dist/`; refreshed on a font or icon upgrade. | [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.4, "Licence notices"), [maintenance policy](blueprint/maintenance-policy.md), [dependency evaluation §12](blueprint/dependency-evaluation.md#12-frontend) |
 
 ### M9 Integration (2026-10-30, "setuju semua rencana mu"; information session)
 

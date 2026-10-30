@@ -69,6 +69,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "workflow_log",
         sql: include_str!("../migrations/0008_workflow_log.sql"),
     },
+    Migration {
+        version: 9,
+        name: "saved_views",
+        sql: include_str!("../migrations/0009_saved_views.sql"),
+    },
 ];
 
 /// Applies the pending framework migrations and returns them.

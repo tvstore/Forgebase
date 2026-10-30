@@ -26,6 +26,7 @@ async fn migrates_empty_database_and_is_idempotent() {
             vec!["6".to_owned(), "schedules".into(), "64".into()],
             vec!["7".to_owned(), "finished_jobs_index".into(), "64".into()],
             vec!["8".to_owned(), "workflow_log".into(), "64".into()],
+            vec!["9".to_owned(), "saved_views".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -41,7 +42,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["8".to_owned()]]
+        vec![vec!["9".to_owned()]]
     );
 }
 
@@ -92,7 +93,7 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![2, 3, 4, 5, 6, 7, 8]
+        vec![2, 3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY version")
@@ -105,7 +106,8 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
             vec!["5".into()],
             vec!["6".into()],
             vec!["7".into()],
-            vec!["8".into()]
+            vec!["8".into()],
+            vec!["9".into()]
         ]
     );
     assert_eq!(
@@ -122,7 +124,7 @@ async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![3, 4, 5, 6, 7, 8]
+        vec![3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(applied[0].name, "auth");
     for table in [
@@ -290,5 +292,41 @@ async fn migration_8_creates_the_workflow_log() {
             "CREATE INDEX fb_workflow_log_document ON public.fb_workflow_log USING btree (doctype, name, id)"
                 .to_owned()
         ]]
+    );
+}
+
+#[tokio::test]
+async fn migration_9_creates_the_saved_views() {
+    let db = TestDb::migrated().await;
+    assert_eq!(
+        db.columns("fb_saved_view").await,
+        vec![
+            ("id".to_owned(), "uuid/NO".to_owned()),
+            ("doctype".to_owned(), "text/NO".to_owned()),
+            ("label".to_owned(), "text/NO".to_owned()),
+            ("owner_id".to_owned(), "uuid/YES".to_owned()),
+            ("definition".to_owned(), "jsonb/NO".to_owned()),
+            (
+                "created_at".to_owned(),
+                "timestamp with time zone/NO".to_owned()
+            ),
+            (
+                "modified_at".to_owned(),
+                "timestamp with time zone/NO".to_owned()
+            ),
+            ("version".to_owned(), "bigint/NO".to_owned()),
+        ]
+    );
+    assert_eq!(
+        db.rows(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'fb_saved_view' \
+             AND indexdef LIKE 'CREATE UNIQUE INDEX%' AND indexname <> 'fb_saved_view_pkey' \
+             ORDER BY indexname COLLATE \"C\""
+        )
+        .await,
+        vec![
+            vec!["fb_saved_view_private_label".to_owned()],
+            vec!["fb_saved_view_shared_label".to_owned()]
+        ]
     );
 }

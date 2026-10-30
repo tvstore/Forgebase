@@ -156,10 +156,7 @@ pub async fn list(
     query: &ListQuery,
 ) -> Result<Vec<StoredDocument>, DbError> {
     let doctype = document_doctype(registry, doctype)?;
-    let owner = match access_to(doctype, caller, Right::Read)? {
-        Access::OwnerOnly => Some(caller.name()),
-        _ => None,
-    };
+    let owner = read_owner(doctype, caller)?;
     let (sql, binds) = build(doctype, owner, query)?;
     let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
     let params: Vec<&(dyn ToSql + Sync)> =
@@ -172,6 +169,27 @@ pub async fn list(
         .collect()
 }
 
+/// The read scope of a caller: `Some(name)` limits a statement to the documents that user owns
+/// (`if_owner`), `None` reads every document, and no read right at all is
+/// [`DbError::PermissionDenied`]. [`list`] and the group-by summary both take their scope from
+/// here, so the two can never disagree.
+pub(crate) fn read_owner<'a>(
+    doctype: &DocType,
+    caller: &'a Caller,
+) -> Result<Option<&'a str>, DbError> {
+    Ok(match access_to(doctype, caller, Right::Read)? {
+        Access::OwnerOnly => Some(caller.name()),
+        _ => None,
+    })
+}
+
+/// Checks that `query` can be run on `doctype` (fields, operators, operand kinds, limit and
+/// offset) without running it. Saved views use it, so a view is validated by the very code
+/// that later runs it.
+pub(crate) fn validate(doctype: &DocType, query: &ListQuery) -> Result<(), DbError> {
+    build(doctype, None, query).map(|_| ())
+}
+
 /// The type of a field the list query can filter or sort by (a column field or a standard
 /// column), or `None` for any other name, a Table field included. Lets callers map input values
 /// to the right [`Value`] kind.
@@ -180,18 +198,18 @@ pub fn column_type(doctype: &DocType, field: &str) -> Option<FieldType> {
 }
 
 /// A filterable column: its qualified SQL expression and its type.
-struct Column {
+pub(crate) struct Column {
     /// `"doc_x"."field"`, quoted.
-    expr: String,
-    field_type: FieldType,
+    pub(crate) expr: String,
+    pub(crate) field_type: FieldType,
 }
 
-fn invalid(message: String) -> DbError {
+pub(crate) fn invalid(message: String) -> DbError {
     DbError::InvalidQuery(message)
 }
 
 /// Looks `field` up in the metadata. Only names found here ever reach the SQL, quoted.
-fn column(doctype: &DocType, field: &str) -> Result<Column, DbError> {
+pub(crate) fn column(doctype: &DocType, field: &str) -> Result<Column, DbError> {
     let table = quote_ident(&table_name(&doctype.name));
     let standard = match field {
         "name" | "owner" | "modified_by" => Some(FieldType::Text),
@@ -225,13 +243,34 @@ fn column(doctype: &DocType, field: &str) -> Result<Column, DbError> {
 
 /// Collects the bound values and hands out numbered placeholders with a cast.
 #[derive(Default)]
-struct Binds(Vec<Value>);
+pub(crate) struct Binds(pub(crate) Vec<Value>);
 
 impl Binds {
-    fn add(&mut self, value: Value, cast: &str) -> String {
+    pub(crate) fn add(&mut self, value: Value, cast: &str) -> String {
         self.0.push(value);
         format!("${}::{cast}", self.0.len())
     }
+}
+
+/// The `WHERE` conditions of a read: the owner scope first (bound, so it cannot be injected),
+/// then one per filter. The list and the group-by summary build theirs here.
+pub(crate) fn conditions(
+    doctype: &DocType,
+    owner: Option<&str>,
+    filters: &[Filter],
+    binds: &mut Binds,
+) -> Result<Vec<String>, DbError> {
+    let table = quote_ident(&table_name(&doctype.name));
+    let mut conditions = Vec::new();
+    if let Some(owner) = owner {
+        let placeholder = binds.add(Value::Text(owner.to_owned()), "text");
+        conditions.push(format!("{table}.\"owner\" = {placeholder}"));
+    }
+    for filter in filters {
+        let col = column(doctype, &filter.field)?;
+        conditions.push(condition(binds, &filter.field, &col, &filter.op)?);
+    }
+    Ok(conditions)
 }
 
 /// Builds the statement and its bound values. `owner` limits it to one owner's documents.
@@ -255,15 +294,7 @@ fn build(
 
     let table = quote_ident(&table_name(&doctype.name));
     let mut binds = Binds::default();
-    let mut conditions = Vec::new();
-    if let Some(owner) = owner {
-        let placeholder = binds.add(Value::Text(owner.to_owned()), "text");
-        conditions.push(format!("{table}.\"owner\" = {placeholder}"));
-    }
-    for filter in &query.filters {
-        let col = column(doctype, &filter.field)?;
-        conditions.push(condition(&mut binds, &filter.field, &col, &filter.op)?);
-    }
+    let conditions = conditions(doctype, owner, &query.filters, &mut binds)?;
 
     let mut order = Vec::new();
     for sort in &query.sort {

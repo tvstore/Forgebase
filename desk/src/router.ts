@@ -70,6 +70,12 @@ export function listHref(doctype: string, params?: URLSearchParams): string {
 export function navigate(href: string, replace = false): void {
   if (replace) window.location.replace(href);
   else window.location.hash = href;
+  // The browser reports the change in a `hashchange` event of a later task. Follow it now, in the
+  // same task: a controlled input (the Columns menu's checkbox) that is clicked would otherwise
+  // be put back to its old state when the click handler ends, and show the change a moment later
+  // (or never to a script that looks right after the click). The later event finds the address
+  // already shown and does nothing.
+  onHashChange();
 }
 
 // The hash the app shows. It follows `hashchange`, except while a form with unsaved changes has

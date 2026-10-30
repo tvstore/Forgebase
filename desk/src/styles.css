@@ -655,6 +655,7 @@
 
   .menu-list {
     @apply absolute top-[calc(100%+0.25rem)] z-40 grid min-w-44 animate-menu-in rounded-card border border-line bg-surface p-1 text-ink shadow-(--shadow-pop);
+    @apply max-h-[min(24rem,70vh)] max-w-[min(20rem,calc(100vw-2rem))] overflow-y-auto;
   }
 
   .menu-end {
@@ -675,6 +676,39 @@
 
   .menu-danger {
     @apply text-danger;
+  }
+
+  /* Menus with groups (Views) and checkboxes (Columns). */
+  .menu-heading {
+    @apply m-0 px-3 pt-2 pb-1 text-[0.6875rem] font-semibold tracking-wider text-muted uppercase;
+  }
+
+  .menu-note {
+    @apply m-0 px-3 py-2 text-small text-muted;
+  }
+
+  .menu-sep {
+    @apply my-1 h-px bg-line;
+  }
+
+  .menu-choice {
+    @apply flex items-center justify-between gap-3;
+  }
+
+  .menu-choice-label {
+    @apply min-w-0 wrap-anywhere;
+  }
+
+  .menu-choice[aria-current='true'] {
+    @apply bg-primary-50 font-semibold text-primary;
+  }
+
+  .menu-check {
+    @apply flex cursor-pointer items-center gap-2.5;
+  }
+
+  .menu-check:has(input[aria-disabled='true']) {
+    @apply cursor-not-allowed opacity-60;
   }
 
   /* ---------- Login, splash ---------- */
@@ -744,11 +778,13 @@
 
   /* The whole list is one card: toolbar, filter controls and table. */
   .list-card {
-    @apply min-w-0 overflow-hidden rounded-card border border-line bg-surface shadow-(--shadow-card);
+    /* Not overflow-hidden: the Views and Columns menus of the toolbar may reach below a short card.
+       The first and last bars round their own corners instead. */
+    @apply min-w-0 rounded-card border border-line bg-surface shadow-(--shadow-card);
   }
 
   .toolbar {
-    @apply flex flex-wrap items-center gap-2 border-b border-line px-3.5 py-3;
+    @apply flex flex-wrap items-center gap-2 rounded-t-card border-b border-line px-3.5 py-3;
   }
 
   .search-wrap {
@@ -785,6 +821,92 @@
 
   .list-count {
     @apply ml-auto text-small whitespace-nowrap text-muted;
+  }
+
+  .toolbar-actions {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  /* The saved view next to the page title: "Sales Order · Open orders". */
+  .view-label {
+    @apply min-w-0 text-ui font-medium wrap-anywhere text-muted;
+  }
+
+  /* ---------- Group-by summary ---------- */
+
+  .summary {
+    @apply border-b border-line bg-page px-3.5 py-3;
+  }
+
+  .summary-head {
+    @apply mb-2 flex items-center justify-between gap-2;
+  }
+
+  .summary-head h2 {
+    @apply m-0 text-ui font-semibold text-ink;
+  }
+
+  .summary-controls {
+    @apply mb-3 grid grid-cols-[minmax(0,1fr)] items-start gap-3 sm:grid-cols-[minmax(10rem,16rem)_minmax(0,1fr)];
+  }
+
+  .summary-values {
+    @apply grid min-w-0 gap-2;
+  }
+
+  .summary-values legend {
+    @apply mb-1.5 p-0 text-small font-medium text-ink-soft;
+  }
+
+  /* On a phone the field select has a row of its own (it is not truncated); the calculation and the remove button share the next. */
+  .summary-value {
+    @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,8.5rem)_auto];
+  }
+
+  .summary-value > select:first-child {
+    @apply col-span-2 sm:col-span-1;
+  }
+
+  .summary-values .pill {
+    @apply w-fit;
+  }
+
+  .summary .table-wrap {
+    @apply rounded-control border border-line bg-surface;
+  }
+
+  .summary-table th,
+  .summary-table td {
+    @apply py-2;
+  }
+
+  /* A long heading ("Average of Amount") wraps instead of widening the table on a phone. */
+  .summary-table thead th {
+    @apply whitespace-normal;
+  }
+
+  .summary-table tbody th {
+    @apply font-normal;
+  }
+
+  .summary-group {
+    @apply min-h-0 border-0 bg-transparent p-0 text-left text-ui font-semibold text-ink underline-offset-[0.18em] hover:text-primary hover:underline;
+  }
+
+  .summary-note {
+    @apply mt-2;
+  }
+
+  .stale-view p {
+    @apply mb-1;
+  }
+
+  .stale-view .hint {
+    @apply font-normal text-danger-hover;
+  }
+
+  .stale-actions {
+    @apply mt-2 flex flex-wrap gap-2;
   }
 
   .filters {
@@ -875,10 +997,6 @@
     @apply mt-1 hidden;
   }
 
-  .sort-sub {
-    @apply block text-left text-xs font-normal;
-  }
-
   @media (max-width: 599px) {
     .status-inline {
       @apply flex w-fit;
@@ -890,7 +1008,7 @@
   }
 
   .paging {
-    @apply flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line px-3.5 py-2.5 text-small text-muted;
+    @apply flex flex-wrap items-center gap-x-3 gap-y-2 rounded-b-card border-t border-line px-3.5 py-2.5 text-small text-muted;
   }
 
   .empty {
@@ -1126,6 +1244,10 @@
 
   .dialog-body {
     @apply mt-2 text-ink-soft;
+  }
+
+  .dialog-body > * + * {
+    @apply mt-3;
   }
 
   .dialog-actions {

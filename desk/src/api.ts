@@ -7,7 +7,9 @@
 import { isAddressable } from './access';
 import { parseLinkTitles } from './linkTitles';
 import type { LinkTitles } from './linkTitles';
+import type { SummaryResult } from './summary';
 import type { DocTypeMeta, DocTypeSummary, DocumentRow, SessionInfo } from './types';
+import type { SavedView, ViewDefinition } from './views';
 
 const CSRF_HEADER = 'X-Forgebase-CSRF';
 
@@ -307,4 +309,56 @@ export interface HistoryEntry {
 export async function getHistory(doctype: string, name: string): Promise<HistoryEntry[]> {
   const answer = await request<{ history?: HistoryEntry[] }>('GET', `${documentPath(doctype, name)}/history`);
   return answer?.history ?? [];
+}
+
+/** The views the user sees for a DocType: the shared ones first, then their own (M8.3). */
+export function listViews(doctype: string): Promise<SavedView[]> {
+  return request<SavedView[]>('GET', `/api/v1/views/${encodeURIComponent(doctype)}`);
+}
+
+/** Saves a view. `shared` needs the Administrator role (the server refuses it otherwise). */
+export function createView(
+  doctype: string,
+  label: string,
+  definition: ViewDefinition,
+  shared: boolean,
+): Promise<SavedView> {
+  return request<SavedView>('POST', `/api/v1/views/${encodeURIComponent(doctype)}`, {
+    body: { label, definition, shared },
+  });
+}
+
+/** Changes the definition of a view; `version` is the one the user saw. */
+export function updateView(
+  doctype: string,
+  id: string,
+  version: number,
+  definition: ViewDefinition,
+): Promise<SavedView> {
+  return request<SavedView>('PATCH', `/api/v1/views/${encodeURIComponent(doctype)}/${encodeURIComponent(id)}`, {
+    body: { version, definition },
+  });
+}
+
+export function deleteView(doctype: string, id: string, version: number): Promise<void> {
+  return request<void>(
+    'DELETE',
+    `/api/v1/views/${encodeURIComponent(doctype)}/${encodeURIComponent(id)}?version=${version}`,
+  );
+}
+
+export interface SummaryParams {
+  groupBy: string;
+  /** `sum:amount,avg:qty`, see summary.ts. */
+  aggregates: string;
+  /** The `filters` JSON text, as for the list. */
+  filters?: string;
+}
+
+/** The documents the user may read, grouped by a field (M8.3). */
+export function getSummary(doctype: string, params: SummaryParams): Promise<SummaryResult> {
+  const query = new URLSearchParams({ group_by: params.groupBy });
+  if (params.aggregates) query.set('aggregates', params.aggregates);
+  if (params.filters) query.set('filters', params.filters);
+  return request<SummaryResult>('GET', `/api/v1/summary/${encodeURIComponent(doctype)}?${query.toString()}`);
 }

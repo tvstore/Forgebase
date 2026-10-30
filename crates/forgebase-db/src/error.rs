@@ -337,6 +337,24 @@ pub enum DbError {
         /// The state the document is in.
         state: String,
     },
+    /// A saved view cannot be written: the label or the definition is not valid, or a limit
+    /// is reached (M8.3). The message says what to change.
+    #[error("invalid saved view: {0}")]
+    InvalidView(String),
+    /// A view with this label already exists (a private one of the same user, or a shared one),
+    /// for the DocType.
+    #[error("a view named {label:?} already exists for DocType `{doctype}`")]
+    ViewExists {
+        /// DocType name.
+        doctype: String,
+        /// The label.
+        label: String,
+    },
+    /// The caller may not do this with a saved view that they can see: create or change a
+    /// shared view without being an Administrator. Never returned for another user's private
+    /// view (that one is [`DbError::NotFound`]).
+    #[error("permission denied: {0}")]
+    ViewDenied(&'static str),
     /// A job cannot be enqueued, or a job command is wrong: the job name is not one of the
     /// binary's jobs, the payload is too large or has a NUL character, an id is not a UUID. For
     /// a hook that enqueues it fails the whole operation, and nothing is written. It is a

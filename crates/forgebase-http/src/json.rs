@@ -251,7 +251,7 @@ pub(crate) fn utc_rfc3339(t: &OffsetDateTime) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-fn from_value(name: &str, value: &Value) -> Result<Json, JsonError> {
+pub(crate) fn from_value(name: &str, value: &Value) -> Result<Json, JsonError> {
     let output = |problem: String| JsonError::Output {
         field: name.to_owned(),
         problem,

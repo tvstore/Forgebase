@@ -30,11 +30,11 @@ const COOKIE_MAX_AGE_SECS: u32 = 7 * 24 * 3600;
 pub(crate) type Reply = Result<Response, ApiError>;
 
 /// The raw query string as ordered pairs, so that a repeated parameter is still visible.
-type RawQuery = Result<Query<Vec<(String, String)>>, QueryRejection>;
+pub(crate) type RawQuery = Result<Query<Vec<(String, String)>>, QueryRejection>;
 
 /// A JSON request body. Unlike axum's own rejections, a failure is an [`ApiError`] (the
 /// envelope): 413 over the body limit, 415 for another content type, 400 for bad JSON.
-pub struct ApiJson(Json);
+pub struct ApiJson(pub(crate) Json);
 
 impl FromRequest<AppState> for ApiJson {
     type Rejection = ApiError;
@@ -62,7 +62,7 @@ pub(crate) fn doctype<'a>(state: &'a AppState, name: &str) -> Result<&'a DocType
 /// `rights`, before the body or the query is mapped. Mapping errors name fields, so they must
 /// not reach a caller who may not use the DocType at all. This asks the one evaluator of
 /// `forgebase-core` and decides nothing itself; `forgebase-db` still enforces every right.
-fn require(
+pub(crate) fn require(
     doctype: &DocType,
     caller: &Caller,
     rights: &[Right],
@@ -82,7 +82,7 @@ fn require(
 }
 
 /// A problem with the `filters` or `sort` parameter (not with a body).
-fn query_error(error: JsonError) -> ApiError {
+pub(crate) fn query_error(error: JsonError) -> ApiError {
     match error {
         JsonError::Syntax(_) => ApiError::invalid_query("invalid filter: not valid JSON"),
         other => other.into(),
@@ -104,7 +104,7 @@ fn cookie(state: &AppState, value: &str, max_age: u32) -> Result<HeaderValue, Ap
 }
 
 /// A JSON object with no keys other than `allowed`.
-fn object(json: Json, allowed: &[&str]) -> Result<Map<String, Json>, ApiError> {
+pub(crate) fn object(json: Json, allowed: &[&str]) -> Result<Map<String, Json>, ApiError> {
     let Json::Object(map) = json else {
         return Err(ApiError::bad_request("the body must be a JSON object"));
     };
@@ -114,13 +114,13 @@ fn object(json: Json, allowed: &[&str]) -> Result<Map<String, Json>, ApiError> {
     Ok(map)
 }
 
-fn version(map: &Map<String, Json>) -> Result<i64, ApiError> {
+pub(crate) fn version(map: &Map<String, Json>) -> Result<i64, ApiError> {
     map.get("version")
         .and_then(Json::as_i64)
         .ok_or_else(|| ApiError::bad_request("`version` must be an integer"))
 }
 
-fn version_param(query: &BTreeMap<String, String>) -> Result<i64, ApiError> {
+pub(crate) fn version_param(query: &BTreeMap<String, String>) -> Result<i64, ApiError> {
     query
         .get("version")
         .and_then(|v| v.parse().ok())
@@ -161,7 +161,7 @@ async fn with_link_titles(
 
 /// The query parameters as a map, `invalid_query` for a parameter that is not in `allowed` or
 /// that is repeated (`?limit=1&limit=500` must not depend on which one a parser keeps).
-fn params(
+pub(crate) fn params(
     pairs: Vec<(String, String)>,
     allowed: &[&str],
 ) -> Result<BTreeMap<String, String>, ApiError> {

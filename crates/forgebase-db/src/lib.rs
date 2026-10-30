@@ -3,7 +3,7 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2 and M8.1):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1 and M8.3):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -23,6 +23,10 @@
 //! - [`transition`], [`available_transitions`] and [`history`] (M8.1, ADR 0015): the workflow of a
 //!   DocType, run in the update, submit and cancel pipelines; the transition log is the table of
 //!   migration 0008, and `migrate` gives existing documents their state.
+//! - [`list_views`], [`create_view`], [`update_view`] and [`delete_view`] (M8.3): saved list views,
+//!   private per user or shared (Administrator only), on the table of migration 0009; and
+//!   [`summary`], the group-by summary of a list, which takes its read scope and filters from
+//!   the list code (`views` and `summary` module documentation).
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
 //!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own
@@ -66,8 +70,10 @@ mod list;
 mod migrate;
 mod plan;
 pub mod schedule;
+mod summary;
 mod sync;
 mod value;
+mod views;
 mod workflow;
 
 pub use app_migrations::{
@@ -86,8 +92,14 @@ pub use list::{
 };
 pub use migrate::{MIGRATIONS, Migration, migrate_framework};
 pub use plan::{Conflict, Step, Warning};
+pub use summary::{AggregateFn, Group, MAX_AGGREGATES, MAX_GROUPS, Summary, SummaryQuery, summary};
 pub use sync::{SyncOptions, SyncReport, sync};
 pub use tokio_postgres::{Client, GenericClient, SimpleQueryMessage, Transaction};
+pub use uuid::Uuid;
+pub use views::{
+    MAX_DEFINITION_BYTES, MAX_LABEL_CHARS, MAX_PRIVATE_VIEWS, MAX_SHARED_VIEWS, MAX_VIEW_COLUMNS,
+    View, ViewChanges, ViewDefinition, create_view, delete_view, list_views, update_view,
+};
 pub use workflow::{
     AvailableTransitions, HistoryEntry, MAX_HISTORY, available_transitions, history, transition,
 };

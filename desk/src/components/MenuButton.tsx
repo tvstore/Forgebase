@@ -11,7 +11,9 @@ interface Props {
   /** Which edge of the button the menu lines up with. */
   align?: 'start' | 'end';
   className?: string;
-  /** Buttons (or links); a click on any of them closes the menu. */
+  /** Keeps the menu open when something in it is clicked (a menu of checkboxes). */
+  keepOpen?: boolean;
+  /** Buttons (or links); a click on any of them closes the menu (unless `keepOpen`). */
   children: ReactNode;
 }
 
@@ -20,7 +22,7 @@ interface Props {
  * click or Tab outside close it (Escape gives the focus back to the button), and so does a click
  * on one of the actions. Every action is a normal button, reachable with Tab.
  */
-export function MenuButton({ label, ariaLabel, align = 'end', className, children }: Props) {
+export function MenuButton({ label, ariaLabel, align = 'end', className, keepOpen = false, children }: Props) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -70,6 +72,7 @@ export function MenuButton({ label, ariaLabel, align = 'end', className, childre
           id={menuId}
           className={`menu-list menu-${align}`}
           onClick={() => {
+            if (keepOpen) return;
             // The focus goes back to the button first, so that a dialog opened by the action
             // returns it there (the action's own button is gone with the menu).
             trigger.current?.focus();

@@ -45,6 +45,11 @@
 //! | `POST /resource/{doctype}/{name}/transition` body `{"action", "version"}` (M8.1) | 200 `{"data": doc}`; DocTypes with a workflow only |
 //! | `GET /resource/{doctype}/{name}/transitions` (M8.1) | 200 `{"data": {"state", "transitions": [{"action", "to"}]}}`: what the caller may take now (role and right); hooks are not run |
 //! | `GET /resource/{doctype}/{name}/history` (M8.1) | 200 `{"data": {"history": [{"action", "from", "to", "actor", "at"}]}}`, oldest first, the newest 500 at most |
+//! | `GET /views/{doctype}` (M8.3) | 200 `{"data": [{"id", "label", "shared", "owner", "definition", "version", "modified_at"}]}`: the caller's own private views and the shared ones, shared first |
+//! | `POST /views/{doctype}` body `{"label", "definition", "shared"?}` (M8.3) | 201 `{"data": view}`; `shared` needs the Administrator role |
+//! | `PATCH /views/{doctype}/{id}` body `{"version", "label"?, "definition"?}` (M8.3) | 200 `{"data": view}`; another user's private view is 404 |
+//! | `DELETE /views/{doctype}/{id}?version=N` (M8.3) | 204 |
+//! | `GET /summary/{doctype}?group_by=FIELD&aggregates=sum:amount,...&filters=...` (M8.3) | 200 `{"data": {"groups": [{"key", "count", "values"}], "truncated"}}`, at most 500 groups, over the documents the caller may read |
 //!
 //! Anything else is 404 (`/api/v1/method` is not implemented), a wrong method is 405.
 //!
@@ -60,6 +65,7 @@ mod error;
 pub mod json;
 mod meta;
 mod routes;
+mod views;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -323,7 +329,16 @@ fn site_router(state: AppState) -> Router {
         .route(
             "/api/v1/resource/{doctype}/{name}/history",
             get(routes::history),
-        );
+        )
+        .route(
+            "/api/v1/views/{doctype}",
+            get(views::list).post(views::create),
+        )
+        .route(
+            "/api/v1/views/{doctype}/{id}",
+            axum::routing::patch(views::update).delete(views::delete),
+        )
+        .route("/api/v1/summary/{doctype}", get(views::summary));
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {
         router = router
