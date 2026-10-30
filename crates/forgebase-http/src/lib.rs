@@ -360,7 +360,7 @@ async fn dispatch(State(sites): State<Arc<Sites>>, request: Request) -> Response
     response
 }
 
-/// True for a host (as [`host_part`] leaves it) that is a plausible name or address: letters,
+/// True for a host (as `host_part` leaves it) that is a plausible name or address: letters,
 /// digits, `-`, `.` and `_`, or a bracketed IPv6 address. Anything else is a malformed `Host`.
 /// The config file uses the same rule for the hosts of a site, so a host that could never match
 /// a request is refused when the file is loaded.

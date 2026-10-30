@@ -92,9 +92,9 @@ Routes, statuses and the error envelope: [architecture, section 7](architecture.
 - List filters are a typed AST (M3.2, `forgebase_db::ListQuery`), never string-concatenated: field names are looked up in the metadata and quoted, every value is a bound parameter with a cast from the field type, `like` takes a bound pattern, and the owner condition of an `if_owner` read is a bound parameter too. Tests (`tests/list.rs`) try hostile field names, sort keys, DocType names and values.
 - Reports (later) run with a read-only DB role.
 
-## Multi-site isolation (M7.1 and M7.2, Accepted, ADR 0014)
+## Multi-site isolation (M7.1, Accepted, ADR 0014)
 
-Decision record: [ADR 0014](../adr/0014-multi-site-database-per-site.md). Design and decisions: [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014). Security properties:
+Decision record: [ADR 0014](../adr/0014-multi-site-database-per-site.md). Design and decisions: [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014). Security properties (M7.1, and M7.2 where marked):
 
 - **Separate databases.** Each site has its own database and pool; there are no cross-site queries and no global pool or URL. Every database command resolves one site first (`--site`, required when the config file has several) and uses only that site's pool. A row-level tenant column was rejected because one permission bug would leak data.
 - **Sessions and tokens are per site.** They live in the site's own database, so a session cookie or API token of site A is refused (`401`) on site B, even for a user with the same name (tested). The session cookie is host-scoped (no `Domain` attribute).
