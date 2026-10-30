@@ -925,7 +925,7 @@ mod tests {
         .await;
         stop.send(()).expect("open");
         assert!(running.await.expect("worker"), "no slot panicked");
-        // Two slots ticked, and the due time was enqueued once. (The next tick, a minute
+        // One slot ticked per poll interval, and the due time was enqueued once. (The next tick, a minute
         // boundary later, may or may not have come in the meantime: it has another due time.)
         assert_eq!(
             one(
