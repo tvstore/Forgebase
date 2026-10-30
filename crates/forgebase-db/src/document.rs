@@ -16,7 +16,11 @@
 //! The app's lifecycle hooks ([`forgebase_core::hooks::DocTypeHooks`], registered in the
 //! [`Registry`]) run inside the same transaction at fixed points: the order of every operation
 //! is listed in the documentation of [`insert`], [`update`] and [`delete`]. A hook error rolls
-//! everything back ([`DbError::Hook`]). Hooks cannot reach the database.
+//! everything back ([`DbError::Hook`]). Hooks cannot reach the database. They may enqueue
+//! background jobs: after the hooks and before the commit, the jobs they asked for are inserted
+//! in the same transaction (the outbox, [`crate::jobs`], ADR 0013), so a job exists if and only
+//! if the operation committed. An unknown job name or an oversize payload is [`DbError::Job`]
+//! and fails the operation.
 //!
 //! DocTypes with `submittable = true` also have [`submit`], [`cancel`] and [`amend`], and their
 //! documents carry a [`DocStatus`]: see those functions for the rules.
@@ -45,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use forgebase_core::document::{Changes, DocStatus, Document, Row, ValidationError, validate};
-use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError, Operation};
+use forgebase_core::hooks::{DocTypeHooks, EnqueuedJobs, HookContext, HookError, Operation};
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
 use forgebase_core::permission::{Access, Caller, Right, evaluate};
@@ -184,7 +188,9 @@ pub async fn insert(
     check_actor(caller.name())?;
     access_to(doctype, caller, Right::Create)?;
     let tx = client.transaction().await?;
-    let stored = insert_in(&tx, registry, doctype, doc, caller, None).await?;
+    let jobs = EnqueuedJobs::new();
+    let stored = insert_in(&tx, registry, doctype, doc, caller, None, &jobs).await?;
+    write_jobs(&tx, registry, &jobs, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -202,6 +208,7 @@ async fn insert_in(
     mut doc: Document,
     caller: &Caller,
     amend: Option<&AmendOf>,
+    jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
     let actor = caller.name();
     let operation = if amend.is_some() {
@@ -209,7 +216,7 @@ async fn insert_in(
     } else {
         Operation::Insert
     };
-    let ctx = HookContext::new(&doctype.name, actor, operation);
+    let ctx = HookContext::new(&doctype.name, actor, operation).with_jobs(jobs);
     run_hooks(registry, doctype, "before_insert", |hooks| {
         hooks.before_insert(&ctx, &mut doc)
     })?;
@@ -413,6 +420,7 @@ pub async fn update(
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
+    let jobs = EnqueuedJobs::new();
     let stored = update_in(
         &tx,
         registry,
@@ -421,8 +429,10 @@ pub async fn update(
         expected_version,
         changes,
         caller,
+        &jobs,
     )
     .await?;
+    write_jobs(&tx, registry, &jobs, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -435,6 +445,7 @@ async fn update_in(
     expected_version: i64,
     changes: &Changes,
     caller: &Caller,
+    jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
     let grant = grant(doctype, caller, Right::Write)?;
     if changes.is_empty() {
@@ -473,7 +484,7 @@ async fn update_in(
             "field `{field}` gives the document its name and cannot be changed (renames are not supported yet)"
         )));
     }
-    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Update);
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Update).with_jobs(jobs);
     run_hooks(registry, doctype, "validate", |hooks| {
         hooks.validate(&ctx, &mut doc)
     })?;
@@ -707,7 +718,18 @@ pub async fn submit(
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = submit_in(&tx, registry, doctype, name, expected_version, caller).await?;
+    let jobs = EnqueuedJobs::new();
+    let stored = submit_in(
+        &tx,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        caller,
+        &jobs,
+    )
+    .await?;
+    write_jobs(&tx, registry, &jobs, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -719,6 +741,7 @@ async fn submit_in(
     name: &str,
     expected_version: i64,
     caller: &Caller,
+    jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
     check_actor(caller.name())?;
     require_submittable(doctype, "submit")?;
@@ -735,7 +758,7 @@ async fn submit_in(
     .await?;
     require_status(doctype, &current, DocStatus::Draft, "submit")?;
     let mut doc = as_document(&current);
-    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Submit);
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Submit).with_jobs(jobs);
     run_hooks(registry, doctype, "validate", |hooks| {
         hooks.validate(&ctx, &mut doc)
     })?;
@@ -799,7 +822,18 @@ pub async fn cancel(
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = cancel_in(&tx, registry, doctype, name, expected_version, caller).await?;
+    let jobs = EnqueuedJobs::new();
+    let stored = cancel_in(
+        &tx,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        caller,
+        &jobs,
+    )
+    .await?;
+    write_jobs(&tx, registry, &jobs, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -811,6 +845,7 @@ async fn cancel_in(
     name: &str,
     expected_version: i64,
     caller: &Caller,
+    jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
     check_actor(caller.name())?;
     require_submittable(doctype, "cancel")?;
@@ -827,7 +862,7 @@ async fn cancel_in(
     .await?;
     require_status(doctype, &current, DocStatus::Submitted, "cancel")?;
     let doc = as_document(&current);
-    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Cancel);
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Cancel).with_jobs(jobs);
     run_hooks(registry, doctype, "before_cancel", |hooks| {
         hooks.before_cancel(&ctx, &doc)
     })?;
@@ -898,7 +933,18 @@ pub async fn amend(
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    let stored = amend_in(&tx, registry, doctype, name, expected_version, caller).await?;
+    let jobs = EnqueuedJobs::new();
+    let stored = amend_in(
+        &tx,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        caller,
+        &jobs,
+    )
+    .await?;
+    write_jobs(&tx, registry, &jobs, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -910,6 +956,7 @@ async fn amend_in(
     name: &str,
     expected_version: i64,
     caller: &Caller,
+    jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
     check_actor(caller.name())?;
     require_submittable(doctype, "amend")?;
@@ -947,7 +994,7 @@ async fn amend_in(
         from: current.name,
         name: new_name,
     };
-    insert_in(client, registry, doctype, doc, caller, Some(&amend)).await
+    insert_in(client, registry, doctype, doc, caller, Some(&amend), jobs).await
 }
 
 /// The name of the amendment of a cancelled document, see [`amend`].
@@ -999,7 +1046,18 @@ pub async fn delete(
 ) -> Result<(), DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
-    delete_in(&tx, registry, doctype, name, expected_version, caller).await?;
+    let jobs = EnqueuedJobs::new();
+    delete_in(
+        &tx,
+        registry,
+        doctype,
+        name,
+        expected_version,
+        caller,
+        &jobs,
+    )
+    .await?;
+    write_jobs(&tx, registry, &jobs, caller).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1011,6 +1069,7 @@ async fn delete_in(
     name: &str,
     expected_version: i64,
     caller: &Caller,
+    jobs: &EnqueuedJobs,
 ) -> Result<(), DbError> {
     let grant = grant(doctype, caller, Right::Delete)?;
     // `FOR UPDATE` makes concurrent linkers (`FOR KEY SHARE`) wait, so `before_delete` hooks do
@@ -1029,7 +1088,7 @@ async fn delete_in(
         return Err(invalid_status(doctype, &current, "delete"));
     }
     let doc = as_document(&current);
-    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Delete);
+    let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Delete).with_jobs(jobs);
     run_hooks(registry, doctype, "before_delete", |hooks| {
         hooks.before_delete(&ctx, &doc)
     })?;
@@ -1064,6 +1123,19 @@ async fn delete_in(
         return Err(stale_or_missing(client, doctype, &target).await?);
     }
     Ok(())
+}
+
+/// Writes the jobs the hooks of this operation enqueued, in the operation's transaction (the
+/// outbox, ADR 0013): after every hook has run and before the commit, so a refused or rolled-back
+/// operation leaves no job. An unknown job name or an oversize payload is [`DbError::Job`] and
+/// fails the whole operation.
+async fn write_jobs(
+    client: &impl GenericClient,
+    registry: &Registry,
+    jobs: &EnqueuedJobs,
+    caller: &Caller,
+) -> Result<(), DbError> {
+    crate::jobs::enqueue_collected(client, registry, jobs.take(), caller.name()).await
 }
 
 /// Calls `call` for every hook set registered for the DocType, in registration order, and stops

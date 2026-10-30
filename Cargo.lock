@@ -374,6 +374,7 @@ version = "0.0.0"
 dependencies = [
  "rust_decimal",
  "serde",
+ "serde_json",
  "thiserror",
  "time",
  "toml",
@@ -389,6 +390,7 @@ dependencies = [
  "forgebase-core",
  "getrandom 0.4.3",
  "rust_decimal",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",

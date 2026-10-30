@@ -39,8 +39,10 @@
 //! # Rules
 //!
 //! - **No database access.** A hook gets the document and a [`HookContext`], nothing else. Hooks
-//!   that read other documents, and effects that must happen after commit, are not supported
-//!   yet (ADR 0009).
+//!   that read other documents are not supported yet (ADR 0009).
+//! - **Effects after commit go through the outbox.** A hook may [`HookContext::enqueue`] a
+//!   background job. The job is written in the same transaction as the document change, after
+//!   all hooks have run, so it exists if and only if the change is committed (ADR 0013).
 //! - **An error aborts the operation.** A hook returns `Err(HookError)` to reject the
 //!   operation; the transaction (a savepoint inside a caller-owned transaction) is rolled back
 //!   and nothing is persisted. `forgebase-db` reports it as `DbError::Hook`.
@@ -98,8 +100,91 @@
 //! ```
 
 use std::fmt;
+use std::sync::Mutex;
 
 use crate::document::Document;
+
+/// The largest payload of a job: 64 KiB of serialized JSON. It applies to every way of
+/// enqueueing a job.
+pub const MAX_JOB_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Checks a job payload: at most [`MAX_JOB_PAYLOAD_BYTES`] of serialized JSON, and no string
+/// with a NUL character (PostgreSQL `jsonb` cannot store one). Returns the reason when refused.
+pub fn check_job_payload(payload: &serde_json::Value) -> Result<(), String> {
+    fn has_nul(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => text.contains('\0'),
+            serde_json::Value::Array(items) => items.iter().any(has_nul),
+            serde_json::Value::Object(map) => map
+                .iter()
+                .any(|(key, value)| key.contains('\0') || has_nul(value)),
+            _ => false,
+        }
+    }
+    let size = serde_json::to_vec(payload).map_or(usize::MAX, |bytes| bytes.len());
+    if size > MAX_JOB_PAYLOAD_BYTES {
+        return Err(format!(
+            "the job payload is larger than {MAX_JOB_PAYLOAD_BYTES} bytes of JSON"
+        ));
+    }
+    if has_nul(payload) {
+        return Err("the job payload contains a NUL character".to_owned());
+    }
+    Ok(())
+}
+
+/// A job that a hook asked for, waiting to be written to the job table with the document change.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct EnqueuedJob {
+    name: String,
+    payload: serde_json::Value,
+}
+
+impl EnqueuedJob {
+    /// The full job name, `<app>.<job>`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The payload.
+    pub fn payload(&self) -> &serde_json::Value {
+        &self.payload
+    }
+}
+
+/// Collects the jobs that the hooks of one operation enqueue. `forgebase-db` makes one per
+/// operation, gives it to every hook call through [`HookContext::with_jobs`] and, after the
+/// hooks and before the commit, writes what it holds to the job table in the operation's
+/// transaction. An app's unit test can make one to see what a hook enqueued.
+///
+/// It is `Sync` (a mutex inside), so that the futures of the database code stay `Send`.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct EnqueuedJobs {
+    jobs: Mutex<Vec<EnqueuedJob>>,
+}
+
+impl EnqueuedJobs {
+    /// An empty collector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Takes the collected jobs, in the order they were enqueued, and leaves the collector
+    /// empty.
+    pub fn take(&self) -> Vec<EnqueuedJob> {
+        std::mem::take(&mut *self.lock())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<EnqueuedJob>> {
+        // A hook that panicked while holding the lock cannot leave a half-written list behind
+        // (a push is the only thing done under it), so a poisoned lock is still usable.
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// The operation a hook runs for. New operations may be added later, so match with a wildcard
 /// arm.
@@ -125,7 +210,10 @@ pub enum Operation {
 /// `#[non_exhaustive]`: more information may be added later, so other crates cannot build it with
 /// a struct literal; use [`HookContext::new`] (for example in a test that calls a hook directly).
 /// The fields are public to read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It is `Copy`; it holds a reference to the collector of the jobs the hooks enqueue (see
+/// [`HookContext::enqueue`]), which equality compares by identity.
+#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct HookContext<'a> {
     /// The name of the DocType.
@@ -138,7 +226,23 @@ pub struct HookContext<'a> {
     pub actor: &'a str,
     /// The operation.
     pub operation: Operation,
+    jobs: Option<&'a EnqueuedJobs>,
 }
+
+impl PartialEq for HookContext<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.doctype == other.doctype
+            && self.actor == other.actor
+            && self.operation == other.operation
+            && match (self.jobs, other.jobs) {
+                (None, None) => true,
+                (Some(a), Some(b)) => std::ptr::eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for HookContext<'_> {}
 
 impl<'a> HookContext<'a> {
     /// A context for `operation` on `doctype` by `actor`. The framework builds these for the hooks
@@ -148,7 +252,39 @@ impl<'a> HookContext<'a> {
             doctype,
             actor,
             operation,
+            jobs: None,
         }
+    }
+
+    /// This context with a collector for the jobs a hook enqueues. The framework gives every
+    /// hook call of an operation the same collector; an app's unit test uses it to see what a
+    /// hook enqueued.
+    pub const fn with_jobs(mut self, jobs: &'a EnqueuedJobs) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
+    /// Asks for a background job `name` (`<app>.<job>`) with `payload`. The job is written to
+    /// the job table in the same transaction as the document change, after all hooks have run,
+    /// so it exists if and only if the change is committed (the transactional outbox, ADR
+    /// 0013). An unknown job name fails the whole operation when the job is written. Never put
+    /// secrets in a payload: it is stored in clear text.
+    ///
+    /// Fails if the payload is larger than [`MAX_JOB_PAYLOAD_BYTES`] bytes of JSON, or when this
+    /// context has no collector (a context made by [`HookContext::new`] in a test: add one with
+    /// [`HookContext::with_jobs`]).
+    pub fn enqueue(&self, name: &str, payload: serde_json::Value) -> Result<(), HookError> {
+        let Some(jobs) = self.jobs else {
+            return Err(HookError::new(
+                "jobs cannot be enqueued here: this HookContext has no job collector (use HookContext::with_jobs in a test)",
+            ));
+        };
+        check_job_payload(&payload).map_err(HookError::new)?;
+        jobs.lock().push(EnqueuedJob {
+            name: name.to_owned(),
+            payload,
+        });
+        Ok(())
     }
 }
 
@@ -234,5 +370,54 @@ pub trait DocTypeHooks: Send + Sync {
     fn before_cancel(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), HookError> {
         let _ = (ctx, doc);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_hook_enqueues_into_the_collector_in_order() {
+        let jobs = EnqueuedJobs::new();
+        let ctx = HookContext::new("customer", "ann", Operation::Insert).with_jobs(&jobs);
+        ctx.enqueue("crm.welcome", json!({"n": 1}))
+            .expect("enqueued");
+        // The context is `Copy`: a copy shares the collector.
+        let copy = ctx;
+        copy.enqueue("crm.audit", json!(null)).expect("enqueued");
+        let taken = jobs.take();
+        assert_eq!(
+            taken.iter().map(EnqueuedJob::name).collect::<Vec<_>>(),
+            ["crm.welcome", "crm.audit"]
+        );
+        assert_eq!(taken[0].payload(), &json!({"n": 1}));
+        assert!(jobs.take().is_empty(), "take leaves the collector empty");
+        assert_eq!(ctx, copy);
+    }
+
+    #[test]
+    fn a_context_without_a_collector_refuses_to_enqueue() {
+        let ctx = HookContext::new("customer", "ann", Operation::Insert);
+        let error = ctx.enqueue("crm.welcome", json!({})).expect_err("refused");
+        assert!(error.message().contains("no job collector"), "{error}");
+        assert_ne!(ctx, ctx.with_jobs(&EnqueuedJobs::new()));
+    }
+
+    #[test]
+    fn the_payload_limit_counts_serialized_json() {
+        let fits = json!({"text": "x".repeat(MAX_JOB_PAYLOAD_BYTES - 20)});
+        assert!(check_job_payload(&fits).is_ok());
+        let too_big = json!({"text": "x".repeat(MAX_JOB_PAYLOAD_BYTES)});
+        assert!(
+            check_job_payload(&too_big)
+                .unwrap_err()
+                .contains("larger than")
+        );
+        assert!(check_job_payload(&json!({"a": ["b\u{0}"]})).is_err());
+        assert!(check_job_payload(&json!({"a\u{0}": 1})).is_err());
+        assert!(check_job_payload(&json!("a\\u0000")).is_ok());
     }
 }

@@ -3,7 +3,7 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1 and M3.2):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2 and M6.1):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -33,6 +33,10 @@
 //!   `forgebase-core`; read access is applied in SQL, an unreadable document is "not found", and
 //!   [`list`] filters, sorts and pages with a typed [`ListQuery`]. See the `document` module
 //!   documentation of the functions for the exact rules.
+//! - [`jobs`]: the job queue and the outbox (M6.1, ADR 0013): the table of migration 0005, enqueue,
+//!   claim with leases, guarded completion and failure, and what the `job` commands read. It
+//!   never runs a handler; the worker is in the `forgebase` crate. The document functions write
+//!   the jobs that hooks enqueue in the operation's own transaction.
 //! - [`auth`]: users, roles, Argon2id password hashing, server-side sessions with CSRF tokens, API
 //!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP or
 //!   cookies here (they are in `forgebase-http`); [`auth::AuthUser::caller`] gives the [`Caller`] for the document functions.
@@ -42,6 +46,7 @@ pub mod auth;
 mod document;
 mod error;
 mod ident;
+pub mod jobs;
 mod list;
 mod migrate;
 mod plan;
@@ -74,8 +79,18 @@ use tokio_postgres::NoTls;
 /// TLS is not supported yet: connections are made without encryption. There is no connect
 /// timeout by default; add `connect_timeout=<seconds>` to the URL to bound it.
 pub async fn connect(database_url: &str) -> Result<Pool, DbError> {
+    connect_sized(database_url, None).await
+}
+
+/// Like [`connect`], with the largest number of connections the pool opens (`None`: the
+/// default of the pool, four per CPU). A job worker needs one connection for each job it runs at
+/// the same time, so it sets the size from its concurrency.
+pub async fn connect_sized(database_url: &str, max_size: Option<usize>) -> Result<Pool, DbError> {
     let mut config = deadpool_postgres::Config::new();
     config.url = Some(database_url.to_owned());
+    if let Some(max_size) = max_size {
+        config.pool = Some(deadpool_postgres::PoolConfig::new(max_size));
+    }
     let pool = config.create_pool(Some(Runtime::Tokio1), NoTls)?;
     drop(pool.get().await?);
     Ok(pool)
