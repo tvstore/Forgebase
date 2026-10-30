@@ -8,7 +8,10 @@
 // no right for is hidden (the API refusal itself is tested in Rust: forgebase-http/tests/resources.rs
 // and crates/forgebase-db/tests/permissions.rs; one refused request is repeated here). UX.4 adds
 // the command bar (Ctrl+K), the filter chips, link titles and reduced motion as small tests of
-// their own, and the link title in the list and the form to the main flow.
+// their own, and the link title in the list and the form to the main flow. M8.2 adds the workflow
+// on the e2e-only DocType `purchase_request` (seed.sh): a clerk sends a request for approval, a
+// manager approves it; the state badge, the actions, the confirmation, the history and the state
+// filter. Sales orders keep their plain Submit.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -429,4 +432,153 @@ test('prefers-reduced-motion switches the motion of a dialog off', async ({ page
   // ...and with reduced motion, every animation and transition has no duration.
   await page.emulateMedia({ reducedMotion: 'reduce' });
   expect(await durations()).toEqual({ animation: '0s', transition: '0s', backdrop: '0s' });
+});
+
+// ---- M8.2: the workflow -----------------------------------------------------------------
+
+/** The entries of the Activity card, newest first. */
+const history = (page: Page) => page.getByRole('list', { name: 'Workflow history' }).getByRole('listitem');
+
+/** From the Purchase Request list: a new request with a title and an amount, saved. Returns its name. */
+async function createRequest(page: Page, title: string): Promise<string> {
+  await page.goto('/desk/#/new/purchase_request');
+  await expect(page.getByRole('heading', { name: 'New Purchase Request', exact: true })).toBeFocused();
+  await page.getByLabel('Title').fill(title);
+  await page.getByLabel('Amount').fill('120.50');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page).toHaveURL(/#\/form\/purchase_request\/PR-\d{4}-\d{5}$/);
+  await expect(toast(page, 'Saved')).toBeVisible();
+  return decodeURIComponent(page.url().split('/').pop() ?? '');
+}
+
+test('a clerk sends a purchase request for approval and a manager approves it', async ({ page }) => {
+  // ---- the clerk -------------------------------------------------------------------------
+  await login(page, 'e2e_clerk');
+  const name = await createRequest(page, 'Office chairs');
+  await expect(statusBadge(page)).toHaveText('Draft');
+  const sendButton = page.getByRole('button', { name: 'Submit for Approval' });
+  await expect(sendButton).toBeVisible();
+  // The plain Submit and Cancel are replaced by the workflow's actions; the clerk has no Approve.
+  await expect(page.getByRole('button', { name: 'Submit', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Activity', level: 2 })).toBeVisible();
+  await expect(page.getByText('No transitions yet.')).toBeVisible();
+  await expectNoHorizontalScroll(page, 'the workflow form');
+
+  // Unsaved changes: the action is disabled (Save comes first), and clicking it says why.
+  await page.getByLabel('Amount').fill('130.00');
+  await expect(sendButton).toBeDisabled();
+  await expect(sendButton).toHaveAttribute('title', 'Save first');
+  await expect(page.getByRole('button', { name: 'Save' })).toHaveClass(/btn-primary/);
+  await sendButton.click({ force: true });
+  await expect(page.getByRole('alert')).toContainText('Save them first');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(toast(page, 'Saved').last()).toBeVisible();
+  await expect(sendButton).toBeEnabled();
+  await expect(sendButton).toHaveClass(/btn-primary/);
+
+  // The confirmation names the move; Back (and Escape) answers no and nothing changes.
+  await sendButton.click();
+  const dialog = page.getByRole('dialog', { name: 'Submit for Approval' });
+  await expect(dialog).toContainText(`Move Office chairs from Draft to Pending Approval?`);
+  await expect(dialog.getByRole('button', { name: 'Back' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(sendButton).toBeFocused();
+  await expect(statusBadge(page)).toHaveText('Draft');
+  await sendButton.click();
+  await dialog.getByRole('button', { name: 'Back' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // Confirm: the version is sent with the action.
+  await sendButton.click();
+  const request = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/transition'));
+  await dialog.getByRole('button', { name: 'Confirm' }).click();
+  expect(JSON.parse((await request).postData() ?? '{}')).toEqual({ action: 'Submit for Approval', version: 2 });
+  await expect(toast(page, 'Submit for Approval: Pending Approval')).toBeVisible();
+  await expect(statusBadge(page)).toHaveText('Pending Approval');
+  await expect(sendButton).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0); // not the clerk's action
+  await expect(history(page)).toHaveCount(1);
+  await expect(history(page).first()).toContainText('e2e_clerk Submit for Approval');
+  await expect(history(page).first()).toContainText('Draft → Pending Approval');
+  await expect(history(page).first().locator('time')).toHaveAttribute('datetime', /^\d{4}-/);
+  await expectNoSecretsInStorage(page);
+  await logout(page);
+
+  // ---- the manager -----------------------------------------------------------------------
+  await login(page, 'e2e_manager');
+  await page.goto(`/desk/#/form/purchase_request/${encodeURIComponent(name)}`);
+  await expect(statusBadge(page)).toHaveText('Pending Approval');
+  const approve = page.getByRole('button', { name: 'Approve' });
+  await expect(approve).toHaveClass(/btn-primary/); // the first action is the primary one
+  await expect(page.getByRole('button', { name: 'Reject' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
+  await expect(history(page)).toHaveCount(1);
+  await expectNoHorizontalScroll(page, 'the pending form');
+
+  await approve.click();
+  await expect(page.getByRole('dialog', { name: 'Approve' })).toContainText(
+    'Move Office chairs from Pending Approval to Approved?',
+  );
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(toast(page, 'Approve: Approved')).toBeVisible();
+  await expect(statusBadge(page)).toHaveText('Approved');
+  await expect(history(page)).toHaveCount(2);
+  await expect(history(page).first()).toContainText('e2e_manager Approve'); // newest first
+  await expect(history(page).last()).toContainText('e2e_clerk Submit for Approval');
+  await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Cancel Approval' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0); // the plain Cancel stays hidden
+  await expect(page.getByRole('heading', { name: 'Office chairs', level: 1 })).toBeFocused();
+  await expectNoHorizontalScroll(page, 'the approved form');
+
+  // ---- the list: the state is the badge, and it filters ------------------------------------
+  await page.goto('/desk/#/list/purchase_request');
+  await expectLoaded(page);
+  await expect(page.getByRole('columnheader', { name: 'Status' })).toBeVisible();
+  const row = page.getByRole('row', { name: new RegExp(`Office chairs.*${name}.*Approved`) });
+  await expect(row).toBeVisible();
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
+  await page.getByRole('button', { name: 'Add filter' }).click();
+  await page.getByLabel('Filter 1 field').selectOption({ label: 'Status' });
+  await page.getByLabel('Filter 1 value').selectOption('Draft');
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Draft' })).toBeVisible();
+  await expect(row).toHaveCount(0);
+  await page.getByLabel('Filter 1 value').selectOption('Approved');
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Approved' })).toBeVisible();
+  await expect(row).toBeVisible();
+  await expectNoHorizontalScroll(page, 'the workflow list');
+});
+
+test('a workflow action on a stale version shows the conflict and Reload brings the actions back', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  const name = await createRequest(page, 'Stale request');
+  // Somebody else changes the document after it was opened.
+  const status = await page.evaluate(async (documentName) => {
+    const session = (await (await fetch('/api/v1/session', { headers: { 'X-Forgebase-CSRF': 'refresh' } })).json()) as {
+      data: { csrf_token: string };
+    };
+    const response = await fetch(`/api/v1/resource/purchase_request/${encodeURIComponent(documentName)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-Forgebase-CSRF': session.data.csrf_token },
+      body: JSON.stringify({ version: 1, data: { amount: '1.00' } }),
+    });
+    return response.status;
+  }, name);
+  expect(status).toBe(200);
+
+  await page.getByRole('button', { name: 'Submit for Approval' }).click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.getByRole('alert')).toContainText('Someone else changed this document');
+  await expect(statusBadge(page)).toHaveText('Draft');
+  await page.getByRole('button', { name: 'Reload' }).click();
+  await expect(toast(page, 'Loaded the current version')).toBeVisible();
+  await expect(page.getByLabel('Amount')).toHaveValue('1.00');
+  await page.getByRole('button', { name: 'Submit for Approval' }).click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(statusBadge(page)).toHaveText('Pending Approval');
 });

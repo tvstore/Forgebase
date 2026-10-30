@@ -15,6 +15,9 @@
 #   - e2e_clerk, role "Sales Clerk": no submit, cancel, amend or delete right;
 #   - the customer "ada@example.com" (full name "Ada Lovelace", the customer's `title_field`) for the orders:
 #     a Link to it shows that title in the list and the form (UX.4, link titles).
+#   - a separate DocType `purchase_request` with a workflow (M8.2), so that the sales order flow keeps its plain
+#     Submit: Draft -> Pending Approval (Sales Clerk or Sales Manager), Pending Approval -> Approved (Sales Manager,
+#     submits), Pending Approval -> Draft "Reject" (Sales Manager), Approved -> Cancelled (Sales Manager, cancels).
 # Passwords come from E2E_PASSWORD (default below): a throw-away password of a throw-away database.
 # Start the server with:  forgebase serve --doctypes "$E2E_DIR/doctypes"
 set -euo pipefail
@@ -43,6 +46,91 @@ cat >> "$DOCTYPES/customer.toml" <<'TOML'
 [[permissions]]
 role = "Sales Clerk"
 read = true
+TOML
+
+# e2e only: a DocType with a workflow. The clerk may write but not submit; the transition roles narrow
+# what the rights allow (ADR 0015): "Approve" needs the role Sales Manager and the submit right.
+cat > "$DOCTYPES/purchase_request.toml" <<'TOML'
+name = "purchase_request"
+label = "Purchase Request"
+submittable = true
+naming = { series = "PR-.YYYY.-.#####" }
+title_field = "title"
+icon = "clipboard-list"
+list_fields = ["title", "amount"]
+
+[[fields]]
+name = "title"
+type = "data"
+required = true
+
+[[fields]]
+name = "amount"
+type = "decimal"
+precision = 12
+scale = 2
+
+[[permissions]]
+role = "Sales Clerk"
+read = true
+write = true
+create = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+create = true
+delete = true
+submit = true
+cancel = true
+amend = true
+
+[workflow]
+
+[[workflow.states]]
+name = "Draft"
+docstatus = 0
+style = "neutral"
+
+[[workflow.states]]
+name = "Pending Approval"
+docstatus = 0
+style = "warning"
+
+[[workflow.states]]
+name = "Approved"
+docstatus = 1
+style = "success"
+
+[[workflow.states]]
+name = "Cancelled"
+docstatus = 2
+style = "danger"
+
+[[workflow.transitions]]
+action = "Submit for Approval"
+from = "Draft"
+to = "Pending Approval"
+roles = ["Sales Clerk", "Sales Manager"]
+
+[[workflow.transitions]]
+action = "Approve"
+from = "Pending Approval"
+to = "Approved"
+roles = ["Sales Manager"]
+
+[[workflow.transitions]]
+action = "Reject"
+from = "Pending Approval"
+to = "Draft"
+roles = ["Sales Manager"]
+
+[[workflow.transitions]]
+action = "Cancel Approval"
+from = "Approved"
+to = "Cancelled"
+roles = ["Sales Manager"]
 TOML
 
 "$BIN" migrate --doctypes "$DOCTYPES" > /dev/null
