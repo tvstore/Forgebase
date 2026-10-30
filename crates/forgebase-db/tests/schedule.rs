@@ -319,23 +319,27 @@ async fn job(db: &TestDb, status: &str, finished_ago: Option<&str>) {
 }
 
 #[tokio::test]
-async fn purge_done_deletes_only_old_done_jobs_in_batches() {
+async fn purge_finished_deletes_only_old_done_and_dead_jobs_in_batches() {
     let db = TestDb::migrated().await;
     job(&db, "done", Some("8 days")).await;
     job(&db, "done", Some("8 days")).await;
-    job(&db, "done", Some("8 days")).await;
+    job(&db, "dead", Some("8 days")).await;
+    job(&db, "dead", Some("30 days")).await;
     job(&db, "done", Some("6 days")).await; // recent
-    job(&db, "dead", Some("30 days")).await; // dead jobs are kept
+    job(&db, "dead", Some("6 days")).await; // recent
     job(&db, "queued", None).await;
     job(&db, "running", None).await;
+    // Old but not finished: never purged, whatever `created_at` or `run_at` say.
+    db.exec("UPDATE fb_job SET created_at = now() - interval '90 days', run_at = now() - interval '90 days' WHERE status IN ('queued', 'running')")
+        .await;
     let client = db.pool.get().await.expect("connection");
     assert_eq!(
-        jobs::purge_done(&**client, 2).await.expect("purge"),
-        2,
+        jobs::purge_finished(&**client, 3).await.expect("purge"),
+        3,
         "a batch is bounded"
     );
-    assert_eq!(jobs::purge_done(&**client, 2).await.expect("purge"), 1);
-    assert_eq!(jobs::purge_done(&**client, 2).await.expect("purge"), 0);
+    assert_eq!(jobs::purge_finished(&**client, 3).await.expect("purge"), 1);
+    assert_eq!(jobs::purge_finished(&**client, 3).await.expect("purge"), 0);
     assert_eq!(
         db.rows("SELECT status, count(*)::text FROM fb_job GROUP BY status ORDER BY status")
             .await,
@@ -345,6 +349,24 @@ async fn purge_done_deletes_only_old_done_jobs_in_batches() {
             ["queued", "1"],
             ["running", "1"]
         ]
+    );
+}
+
+#[tokio::test]
+async fn purge_finished_keeps_a_dead_job_that_was_retried() {
+    let db = TestDb::migrated().await;
+    job(&db, "dead", Some("30 days")).await;
+    let id = db.rows("SELECT id::text FROM fb_job").await[0][0].clone();
+    let client = db.pool.get().await.expect("connection");
+    assert_eq!(
+        jobs::retry_dead(&**client, &id).await.expect("retry"),
+        jobs::RetryResult::Queued
+    );
+    assert_eq!(jobs::purge_finished(&**client, 10).await.expect("purge"), 0);
+    assert_eq!(
+        db.rows("SELECT status, (finished_at IS NULL)::text FROM fb_job")
+            .await,
+        [["queued", "true"]]
     );
 }
 

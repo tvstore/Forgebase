@@ -24,6 +24,7 @@ async fn migrates_empty_database_and_is_idempotent() {
             vec!["4".to_owned(), "apps".into(), "64".into()],
             vec!["5".to_owned(), "jobs".into(), "64".into()],
             vec!["6".to_owned(), "schedules".into(), "64".into()],
+            vec!["7".to_owned(), "finished_jobs_index".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -39,7 +40,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["6".to_owned()]]
+        vec![vec!["7".to_owned()]]
     );
 }
 
@@ -90,7 +91,7 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![2, 3, 4, 5, 6]
+        vec![2, 3, 4, 5, 6, 7]
     );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY version")
@@ -101,7 +102,8 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
             vec!["3".into()],
             vec!["4".into()],
             vec!["5".into()],
-            vec!["6".into()]
+            vec!["6".into()],
+            vec!["7".into()]
         ]
     );
     assert_eq!(
@@ -118,7 +120,7 @@ async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![3, 4, 5, 6]
+        vec![3, 4, 5, 6, 7]
     );
     assert_eq!(applied[0].name, "auth");
     for table in [
@@ -244,4 +246,18 @@ async fn unexpected_fb_migration_shape_is_an_error_not_a_panic() {
     let mut client = db.pool.get().await.unwrap();
     let err = migrate_framework(&mut client, false).await.unwrap_err();
     assert!(matches!(err, DbError::Postgres(_)), "{err}");
+}
+
+#[tokio::test]
+async fn migration_7_replaces_the_done_jobs_index_with_a_finished_jobs_index() {
+    let db = TestDb::migrated().await;
+    assert_eq!(
+        db.rows(
+            "SELECT indexname FROM pg_indexes \
+             WHERE tablename = 'fb_job' AND indexname LIKE 'fb_job_%_idx' \
+             AND indexname IN ('fb_job_done_idx', 'fb_job_finished_idx')"
+        )
+        .await,
+        vec![vec!["fb_job_finished_idx".to_owned()]]
+    );
 }

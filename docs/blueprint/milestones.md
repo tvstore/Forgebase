@@ -109,6 +109,7 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
   - *Example apps end to end:* M6.3 evidence above.
   - *No `crates/` change in M6.3; no new external dependency:* the empty `git diff --stat origin/main...HEAD -- crates/` above; the examples depend on `forgebase` only (and `sales`), and `Cargo.lock` is unchanged by M6.3.
   - *CI green, independent review PASS, docs updated:* required before each merge by [AGENTS.md section 10.3](../../AGENTS.md#103-standing-merge-authorization) and recorded on #21, #22 and this PR; docs: README, the guide, ADR 0013, the architecture, the security model and this file.
+- **Follow-up (owner decision 2026-10-30):** the built-in `purge_jobs` also deletes `dead` jobs 7 days after they finished (`jobs::purge_finished`, migration 0007); see [ADR 0013](../adr/0013-jobs-scheduler-and-transactional-outbox.md#implementation-details-m62).
 - **Non-goals:** Redis, a separate jobs service, realtime, named queues, priorities, an HTTP or desk interface for jobs, jobs running as a user, exactly-once external effects, database reads in hooks.
 
 ## M7 Site management
