@@ -284,6 +284,8 @@ Hashing of tokens needs no crate: SHA-256 is computed by PostgreSQL (`sha256(con
 - cargo-deny (licenses, advisories, bans, sources) in CI; cargo-audit mostly redundant. Both are CI tools, not workspace dependencies. Details: [maintenance-policy](maintenance-policy.md).
 - Measured floors: stack A **1.89** (set by `uuid` 1.29.0); stack B **1.94** (set by sqlx).
 
+**CI actions (owner decision 2026-10-30, [maintenance policy](maintenance-policy.md#ci)).** `actions/checkout` v7.0.1 and `actions/cache` v6.1.0 (licence MIT, owned by GitHub), each pinned by full commit SHA in `ci.yml` with a version comment, and upgraded like each other. `actions/cache` is used for the Cargo and npm caches; it is the only reason a third action was admitted (cost of the private repository). The SHA of `v6.1.0` is `55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (a lightweight tag; read with `git ls-remote --tags`). No third-party action is used.
+
 ### 12. Frontend
 
 React + TypeScript for `desk/` is Accepted ([ADR 0002](../adr/0002-modular-monolith-and-workspace-layout.md)). Alternatives, listed briefly and not evaluated (Unverified): Vue, Svelte or Solid as the UI framework; server-rendered HTML (for example with htmx) instead of a SPA.

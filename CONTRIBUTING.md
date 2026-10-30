@@ -23,6 +23,14 @@ cargo +1.97 check --workspace --all-targets --all-features --locked   # MSRV
 cargo deny --locked check                              # needs network for advisories
 ```
 
+Two small scripts back the `changes` and `docs` jobs of CI. Both need only `python3` (standard library):
+
+```sh
+python3 .github/ci/test_classify_paths.py   # unit test of the path classifier (which CI jobs a change needs)
+python3 .github/ci/linkcheck.py             # relative links and anchors in *.md, outside node_modules and target
+git diff --name-only --no-renames origin/main...HEAD | python3 .github/ci/classify-paths.py --event pull_request   # what CI would run for your branch
+```
+
 The workspace includes the example apps in `examples/` (`sales`, `sales_extension`), so these commands also build, lint and test them. They may depend on the `forgebase` crate only, and a change to them must not need a change under `crates/`.
 
 The desk has its own checks (the `desk` job of CI). Run them in `desk/` when you change it:
@@ -93,5 +101,7 @@ The generated crate is outside the checkout, so `rust-toolchain.toml` does not a
 Adding a dependency needs the justification described in [maintenance-policy](docs/blueprint/maintenance-policy.md#dependency-admission). It must pass cargo-deny. An npm dependency of the desk is pinned to an exact version, must pass `npm run licenses` (see [the frontend rules](docs/blueprint/maintenance-policy.md#frontend-npm-dependencies)) and, if it is a runtime dependency, needs an ADR.
 
 ## Commits and PRs
+
+Open a pull request as a **draft**: CI does not run on drafts (it is billed per minute). Run the local checks above first, and mark the pull request ready for review when you want CI to run; every push to a ready pull request runs it again. CI runs only the jobs that the changed paths need; the details are in [the maintenance policy](docs/blueprint/maintenance-policy.md#ci).
 
 Keep commits small and focused. Update docs and `CHANGELOG.md` in the same PR as the behavior change.

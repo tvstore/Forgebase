@@ -2,9 +2,11 @@
 """Tests for classify-paths.py. Run: python3 .github/ci/test_classify_paths.py"""
 
 import importlib.util
+import sys
 import pathlib
 import unittest
 
+sys.dont_write_bytecode = True  # do not leave __pycache__ in the repository
 _spec = importlib.util.spec_from_file_location(
     "classify_paths", pathlib.Path(__file__).with_name("classify-paths.py")
 )

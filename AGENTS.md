@@ -244,6 +244,7 @@ Owner decision of 2026-10-28, confirmed by the owner on 2026-10-29. It changes w
 - The orchestrator (Opus) writes specifications and coordinates.
 - Stage 2 Doing is a Sonnet subagent.
 - Stage 3 Review is a new Opus subagent for each review round. It did not write the change and receives the specification and the diff, not the implementer's summary. Findings go back to Stage 2 and the review repeats until PASS. A minor documentation-only fix may be applied directly by the orchestrator and is disclosed.
+- To keep CI cost down (owner decision of 2026-10-30), the working session opens pull requests as **draft** (CI skips drafts), runs all checks locally during implementation and review, and marks the pull request ready only after review PASS. See [the maintenance policy](docs/blueprint/maintenance-policy.md#ci).
 
 ### 10.3 Standing merge authorization
 
