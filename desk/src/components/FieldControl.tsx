@@ -78,9 +78,7 @@ export function FieldControl({ id, field, value, onChange, invalid, titles, desc
           {...common}
           type="number"
           step="1"
-         
           value={text}
-         
           // A number control reports "" for text it cannot read (for example "e"): keep a marker
           // so the save refuses it on the field instead of treating it as empty.
           onChange={(e) => onChange(e.target.validity.badInput ? 'not a number' : e.target.value)}
@@ -106,9 +104,7 @@ export function FieldControl({ id, field, value, onChange, invalid, titles, desc
           {...common}
           type="text"
           maxLength={field.max_length}
-         
           value={text}
-         
           onChange={(e) => onChange(e.target.value)}
         />
       );

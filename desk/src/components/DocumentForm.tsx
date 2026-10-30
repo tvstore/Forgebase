@@ -515,9 +515,11 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
                           return (
                             <ReadOnlyField
                               key={field.name}
+                              id={id}
                               field={field}
                               value={state.values[field.name] ?? emptyValue(field)}
                               titles={titles}
+                              message={message}
                               className={field.type === 'text' ? 'field-wide' : undefined}
                             />
                           );

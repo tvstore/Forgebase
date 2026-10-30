@@ -49,6 +49,22 @@ describe('error details to fields', () => {
     expect(mapDetail('field `lines` row 1: unknown field `zzz`', order)?.key).toBe('lines');
   });
 
+  it('keeps a message about a read-only field, a cell of a table included', () => {
+    const locked = meta([
+      field('total', 'decimal', { read_only: true }),
+      field('lines', 'table', { target: 'line', fields: [field('amount', 'decimal', { read_only: true })] }),
+    ]);
+    const mapped = mapDetails(
+      ['field `total`: 3 decimal places exceeds scale 2', 'field `lines` row 1: field `amount` is required'],
+      locked,
+    );
+    expect(mapped.unmapped).toEqual([]);
+    expect(mapped.errors).toEqual({
+      total: '3 decimal places exceeds scale 2.',
+      [errorKey('lines', 1, 'amount')]: 'This field is required.',
+    });
+  });
+
   it('leaves what names no field of the form unmapped', () => {
     expect(mapDetail('unknown field `nope`', order)).toBeNull();
     expect(mapDetail('field `nope` is required', order)).toBeNull();

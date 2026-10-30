@@ -28,6 +28,7 @@ const DEV_ONLY = new Set([...SHIPPED, 'MPL-2.0', 'BlueOak-1.0.0', 'CC-BY-4.0']);
 const RUNTIME_DEPENDENCIES = ['@fontsource-variable/inter', 'react', 'react-dom'];
 // The one license that is allowed for fonts only, and the package scopes that count as fonts.
 const FONT_LICENSE = 'OFL-1.1';
+const FONT_REGISTRY = /^https:\/\/registry\.npmjs\.org\/@fontsource(-variable)?\//;
 const FONT_PACKAGE = /^@fontsource(-variable)?\//;
 
 const read = (name) => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
@@ -47,6 +48,20 @@ if (JSON.stringify(runtime) !== JSON.stringify(RUNTIME_DEPENDENCIES)) {
   );
 }
 
+/**
+ * A font package for the OFL exception: the install path names it, the lockfile entry's own name
+ * (when it has one) agrees, and it was resolved from the npm registry's @fontsource scopes, so an
+ * npm alias cannot put another package under a font's path.
+ */
+function isFontPackage(name, info) {
+  return (
+    FONT_PACKAGE.test(name) &&
+    (info.name === undefined || info.name === name) &&
+    typeof info.resolved === 'string' &&
+    FONT_REGISTRY.test(info.resolved)
+  );
+}
+
 const counts = new Map();
 let total = 0;
 for (const [path, info] of Object.entries(lock.packages ?? {})) {
@@ -59,7 +74,7 @@ for (const [path, info] of Object.entries(lock.packages ?? {})) {
   counts.set(key, (counts.get(key) ?? 0) + 1);
   if (typeof license !== 'string') {
     problems.push(`${name}@${info.version}: no license in the lockfile`);
-  } else if (license === FONT_LICENSE && FONT_PACKAGE.test(name)) {
+  } else if (license === FONT_LICENSE && isFontPackage(name, info)) {
     // A font package: allowed, shipped or not.
   } else if (!(dev ? DEV_ONLY : SHIPPED).has(license)) {
     problems.push(

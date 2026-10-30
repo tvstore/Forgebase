@@ -323,6 +323,31 @@ test('the command bar opens with Ctrl+K, jumps to a list and a new form, and giv
   await expectNoSecretsInStorage(page); // the recent documents are in memory only
 });
 
+test('the recent documents of one user are not shown to the next user of the tab', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  await page.getByRole('main').getByRole('link', { name: 'Sales Order', exact: true }).click();
+  await fillNewOrder(page);
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page).toHaveURL(/#\/form\/sales_order\/SO-\d{4}-\d{5}$/);
+  const name = decodeURIComponent(page.url().split('/').pop() ?? '');
+
+  await expect(toast(page, 'Saved')).toBeVisible();
+  const bar = page.getByRole('dialog', { name: 'Search or jump to' });
+  await page.keyboard.press('Control+k');
+  await expect(bar).toBeVisible();
+  await expect(bar.getByRole('group', { name: 'Recent' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(bar).toHaveCount(0);
+
+  // Logged out and in again as someone else, in the same tab: nothing of the first user is left.
+  await logout(page);
+  await login(page, 'e2e_clerk');
+  await page.keyboard.press('Control+k');
+  await expect(bar).toBeVisible();
+  await expect(bar.getByRole('group', { name: 'Recent' })).toHaveCount(0);
+  await expect(bar.getByText(name)).toHaveCount(0);
+});
+
 test('a clerk without create rights is not offered "New" in the command bar', async ({ page }) => {
   await login(page, 'e2e_clerk');
   await page.keyboard.press('Control+k');
@@ -374,7 +399,11 @@ test('prefers-reduced-motion switches the motion of a dialog off', async ({ page
     await expect(dialog).toBeVisible();
     const result = await dialog.evaluate((el) => {
       const style = getComputedStyle(el);
-      return { animation: style.animationDuration, transition: style.transitionDuration };
+      return {
+        animation: style.animationDuration,
+        transition: style.transitionDuration,
+        backdrop: getComputedStyle(el, '::backdrop').animationDuration,
+      };
     });
     await page.getByRole('button', { name: 'Stay' }).click();
     await expect(dialog).toHaveCount(0);
@@ -383,8 +412,10 @@ test('prefers-reduced-motion switches the motion of a dialog off', async ({ page
 
   // With motion, the dialog fades and scales in...
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  expect((await durations()).animation).not.toBe('0s');
+  const moving = await durations();
+  expect(moving.animation).not.toBe('0s');
+  expect(moving.backdrop).not.toBe('0s');
   // ...and with reduced motion, every animation and transition has no duration.
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  expect(await durations()).toEqual({ animation: '0s', transition: '0s' });
+  expect(await durations()).toEqual({ animation: '0s', transition: '0s', backdrop: '0s' });
 });

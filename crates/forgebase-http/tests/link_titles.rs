@@ -4,7 +4,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{Env, get};
+use common::{Env, get, registry_with, send_to};
 use serde_json::json;
 
 /// A titled target: `Reader` reads all, `Mine` only its own documents.
@@ -185,4 +185,40 @@ async fn the_meta_carries_the_icon() {
     };
     assert_eq!(by_name("cust")["icon"], "users");
     assert_eq!(by_name("deal")["icon"], json!(null));
+}
+
+/// With a pool of one connection, `link_titles=1` must not ask for a second connection while the
+/// handler holds the first (the pool has no wait timeout, so that would hang for ever).
+#[tokio::test]
+async fn link_titles_use_the_connection_the_handler_holds() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let (env, reader) = setup().await;
+    let name = {
+        let list = env.send(get("/api/v1/resource/deal").token(&reader)).await;
+        list.data()[0]["name"].as_str().unwrap().to_owned()
+    };
+    let pool = forgebase_db::connect_sized(&env.db.url, Some(1))
+        .await
+        .expect("pool of one");
+    let state = forgebase_http::AppState::new(
+        pool,
+        Arc::new(registry_with(&[CUST, DEAL, DEAL_LINE])),
+        forgebase_http::AppConfig::default(),
+    );
+    let app = forgebase_http::router(state);
+    for uri in [
+        "/api/v1/resource/deal?link_titles=1".to_owned(),
+        format!("/api/v1/resource/deal/{name}?link_titles=1"),
+    ] {
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            send_to(&app, get(&uri).token(&reader)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{uri} hung: a second connection was requested"));
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+        assert_eq!(reply.json()["link_titles"], json!({"cust": {"C-1": "Ada"}}));
+    }
 }

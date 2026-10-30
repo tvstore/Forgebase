@@ -854,7 +854,7 @@
   }
 
   .muted-name {
-    @apply block text-small font-normal wrap-anywhere text-muted;
+    @apply block overflow-hidden text-small font-normal text-ellipsis whitespace-nowrap text-muted;
   }
 
   .row-link {
@@ -1093,6 +1093,12 @@
     @apply flex items-center gap-2 border-b border-line px-4;
   }
 
+  /* The input has no outline of its own (it sits in this row); the row shows the focus with a
+     navy bar under it (the navy is 13:1 on white). */
+  .command-input:focus-within {
+    box-shadow: inset 0 -3px 0 0 var(--color-primary);
+  }
+
   .command-input .icon {
     @apply text-muted;
   }
@@ -1166,7 +1172,8 @@
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
-  *::after {
+  *::after,
+  *::backdrop {
     animation-duration: 0s !important;
     animation-delay: 0s !important;
     animation-iteration-count: 1 !important;

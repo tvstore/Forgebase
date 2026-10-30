@@ -139,16 +139,19 @@ fn link_titles_flag(query: &BTreeMap<String, String>) -> Result<bool, ApiError> 
 
 /// The response of a read: `{"data": value}`, plus a sibling `link_titles` key when asked for.
 /// Without the parameter the output is exactly what it was before UX.4.
+/// It uses the connection the handler already holds: a second `state.client()` here would wait
+/// for a pool slot while this request keeps its own, and with every slot held by such a request
+/// the pool (which has no wait timeout) would never free one.
 async fn with_link_titles(
+    client: &forgebase_db::Client,
     state: &AppState,
     caller: &Caller,
     doctype: &str,
     documents: &[forgebase_db::StoredDocument],
     value: Json,
 ) -> Reply {
-    let client = state.client().await?;
     let titles =
-        forgebase_db::link_titles(&**client, state.registry(), caller, doctype, documents).await?;
+        forgebase_db::link_titles(client, state.registry(), caller, doctype, documents).await?;
     Ok((
         StatusCode::OK,
         AxumJson(json!({ "data": value, "link_titles": titles })),
@@ -336,6 +339,7 @@ pub async fn list(
     let value = documents_to_json(&documents)?;
     if titles {
         return with_link_titles(
+            &client,
             &state,
             &authenticated.caller(),
             &doctype.name,
@@ -407,10 +411,10 @@ pub async fn read(
             name: name.clone(),
         })
     })?;
-    drop(client);
     let value = document_to_json(&stored)?;
     if titles {
         return with_link_titles(
+            &client,
             &state,
             &authenticated.caller(),
             &doctype.name,

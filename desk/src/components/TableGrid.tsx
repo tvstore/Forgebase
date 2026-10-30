@@ -92,7 +92,16 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, titles, idB
                     const message = errors[key];
                     const cellId = `${idBase}-${row.key}-${c.name}`;
                     if (readOnly || c.read_only) {
-                      return <ReadOnlyCell key={c.name} field={c} value={row.values[c.name] ?? ''} titles={titles} />;
+                      return (
+                        <ReadOnlyCell
+                          key={c.name}
+                          id={cellId}
+                          field={c}
+                          value={row.values[c.name] ?? ''}
+                          titles={titles}
+                          message={message}
+                        />
+                      );
                     }
                     return (
                       <td key={c.name} className={isNumeric(c.type) ? 'num' : undefined}>

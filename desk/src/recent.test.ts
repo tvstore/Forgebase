@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_RECENT, getRecent, pushRecent, recordRecent } from './recent';
+import { MAX_RECENT, clearRecent, getRecent, pushRecent, recordRecent } from './recent';
 import type { RecentDocument } from './recent';
 
 const doc = (name: string, doctype = 'order'): RecentDocument => ({ doctype, name, title: `Title ${name}` });
@@ -44,5 +44,14 @@ describe('the in-memory list', () => {
     recordRecent(doc('X1'));
     recordRecent(doc('X2'));
     expect(getRecent().slice(0, 2).map((d) => d.name)).toEqual(['X2', 'X1']);
+  });
+});
+
+describe('clearRecent', () => {
+  it('forgets every recorded document', () => {
+    recordRecent(doc('A'));
+    expect(getRecent().length).toBeGreaterThan(0);
+    clearRecent();
+    expect(getRecent()).toEqual([]);
   });
 });

@@ -24,6 +24,11 @@ export function recordRecent(entry: RecentDocument): void {
   recent = pushRecent(recent, entry);
 }
 
+/** Forgets every document: called when the session ends, so the next user does not see them. */
+export function clearRecent(): void {
+  recent = [];
+}
+
 /** The documents opened in this tab, newest first. */
 export function getRecent(): readonly RecentDocument[] {
   return recent;
