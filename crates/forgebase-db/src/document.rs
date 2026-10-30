@@ -1561,7 +1561,7 @@ fn sql_param<'a>(
     }
 }
 
-fn check_actor(actor: &str) -> Result<(), DbError> {
+pub(crate) fn check_actor(actor: &str) -> Result<(), DbError> {
     if actor.is_empty() || actor.contains('\0') {
         return Err(DbError::InvalidActor);
     }

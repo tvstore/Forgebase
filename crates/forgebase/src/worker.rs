@@ -159,7 +159,7 @@ impl Worker {
             .values()
             .map(|def| Known {
                 name: &def.name,
-                lease: def.options.timeout + self.config.margin,
+                lease: def.options.timeout.saturating_add(self.config.margin),
             })
             .collect();
         let claimed = {
@@ -176,8 +176,9 @@ impl Worker {
         let attempt = claimed.attempt;
         let label = format!("job {} {}", claimed.name, claimed.id);
         if u32::try_from(attempt).unwrap_or(u32::MAX) > def.options.max_attempts {
-            // A worker died or timed out on every attempt: do not run it again.
-            let message = "the attempts were used up (a worker stopped while running the job)";
+            // A worker died or timed out on every attempt (or the limit was lowered since): do
+            // not run it again.
+            let message = "the attempts were used up (a worker stopped while running the job, or max_attempts was lowered)";
             return self
                 .record(&claimed, worker, def, &label, JobError::permanent(message))
                 .await
@@ -196,17 +197,22 @@ impl Worker {
             result = tokio::time::timeout(def.options.timeout, &mut task) => match result {
                 Ok(Ok(finish)) => finish,
                 Ok(Err(error)) => Finish::Failed(JobError::new(panic_message(error))),
-                Err(_) => {
-                    stop_task(&mut task).await;
-                    Finish::Failed(JobError::new(format!(
+                Err(_) => match stop_task(&mut task).await {
+                    // The task finished in the instant before the abort: believe its result.
+                    Some(finish) => finish,
+                    None => Finish::Failed(JobError::new(format!(
                         "timed out after {} s",
                         def.options.timeout.as_secs_f64()
-                    )))
-                }
+                    ))),
+                },
             },
             () = async { stopping.set().await; tokio::time::sleep(self.config.grace).await } => {
                 // The grace period is over: give the job back.
-                stop_task(&mut task).await;
+                let ended = stop_task(&mut task).await;
+                if matches!(ended, Some(Finish::Done)) {
+                    log(&format!("{label}: the job had already completed (attempt {attempt})"));
+                    return Ok(Some(Outcome::Done));
+                }
                 let client = self.pool.get().await?;
                 if jobs::release(&**client, claimed.id, worker, attempt).await? {
                     log(&format!("{label} released (the worker is stopping)"));
@@ -303,10 +309,11 @@ impl Worker {
     }
 }
 
-/// Aborts a task and waits until it is gone (its connection is closed by then).
-async fn stop_task(task: &mut tokio::task::JoinHandle<Finish>) {
+/// Aborts a task and waits until it is gone (its connection is closed by then). Returns the
+/// result of the task if it had finished before the abort took effect.
+async fn stop_task(task: &mut tokio::task::JoinHandle<Finish>) -> Option<Finish> {
     task.abort();
-    let _ = task.await;
+    task.await.ok()
 }
 
 fn panic_message(error: tokio::task::JoinError) -> String {
@@ -390,12 +397,14 @@ pub(crate) fn worker_id() -> String {
 /// Runs `concurrency` worker slots until the first message on `signals`, then lets running jobs
 /// finish for at most the grace period (the slots handle that, see [`Worker::run_one`]). A
 /// second message ends the wait at once; leases recover whatever was running.
+///
+/// Returns `false` if a slot task panicked (the caller exits non-zero).
 pub(crate) async fn run_worker(
     worker: Arc<Worker>,
     concurrency: u32,
     id: &str,
     mut signals: mpsc::UnboundedReceiver<()>,
-) {
+) -> bool {
     let (sender, receiver) = watch::channel(false);
     let stop = Stop {
         receiver,
@@ -411,13 +420,19 @@ pub(crate) async fn run_worker(
         worker.job_count()
     ));
     let finished = async {
+        let mut panicked = false;
         for slot in slots {
-            let _ = slot.await;
+            if let Err(error) = slot.await {
+                log(&format!("a worker slot ended abnormally: {error}"));
+                panicked = true;
+            }
         }
+        panicked
     };
     tokio::pin!(finished);
+    let mut panicked = false;
     tokio::select! {
-        () = &mut finished => {}
+        slot_panicked = &mut finished => panicked = slot_panicked,
         Some(()) = signals.recv() => {
             let _ = sender.send(true);
             log(&format!(
@@ -425,7 +440,7 @@ pub(crate) async fn run_worker(
                 worker.config.grace.as_secs_f64()
             ));
             tokio::select! {
-                () = &mut finished => {}
+                slot_panicked = &mut finished => panicked = slot_panicked,
                 Some(()) = signals.recv() => {
                     log("exiting now (second signal); running jobs are recovered by their lease");
                 }
@@ -433,6 +448,7 @@ pub(crate) async fn run_worker(
         }
     }
     log("stopped");
+    !panicked
 }
 
 /// One plain line on standard error, like the other commands of the binary.
@@ -498,7 +514,7 @@ mod tests {
             .job_with(
                 "work",
                 LabJob(Arc::clone(lab)),
-                JobOptions::new().timeout(Duration::from_millis(600)),
+                JobOptions::new().timeout(Duration::from_secs(3)),
             );
         Forgebase::new().app(app)
     }
@@ -536,6 +552,43 @@ mod tests {
 
     async fn one(db: &TestDb, sql: &str) -> Vec<String> {
         db.rows(sql).await.remove(0)
+    }
+
+    /// Polls (every 20 ms, for at most 10 s) until `sql` returns at least one row, and returns
+    /// the first. A test waits for the real precondition with this, never with a fixed sleep.
+    async fn wait_row(db: &TestDb, sql: &str) -> Vec<String> {
+        let started = Instant::now();
+        loop {
+            if let Some(row) = db.rows(sql).await.into_iter().next() {
+                return row;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the condition did not hold within 10 s: {sql}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Waits until the job is claimed by `worker` and its handler has inserted its document: the
+    /// row is `running` and locked by `worker`, and a backend is idle in a transaction (the
+    /// handler sleeps). Returns that backend's pid.
+    async fn wait_handler_sleeping(db: &TestDb, worker: &str) -> String {
+        wait_row(
+            db,
+            &format!("SELECT 1 FROM fb_job WHERE status = 'running' AND locked_by = '{worker}'"),
+        )
+        .await;
+        let database = one(db, "SELECT current_database()").await.remove(0);
+        wait_row(
+            db,
+            &format!(
+                "SELECT pid::text FROM pg_stat_activity WHERE datname = '{database}' \
+                 AND state = 'idle in transaction'"
+            ),
+        )
+        .await
+        .remove(0)
     }
 
     async fn seen(db: &TestDb) -> String {
@@ -593,10 +646,11 @@ mod tests {
             "UPDATE fb_job SET attempts = attempts + 1",
         ] {
             let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
-            enqueue(&db, "{\"sleep_ms\": 500}").await;
+            enqueue(&db, "{\"sleep_ms\": 2000}").await;
             let monitor = async {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                // The handler has inserted its document by now; another session takes the job.
+                // The handler has inserted its document (it sleeps); another session takes
+                // the job.
+                wait_handler_sleeping(&db, "w").await;
                 db.exec(steal).await;
             };
             let stop = Stop::never();
@@ -620,20 +674,8 @@ mod tests {
     async fn a_timed_out_handler_loses_its_connection_instead_of_returning_it_to_the_pool() {
         let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
         enqueue(&db, "{\"sleep_ms\": 20000}").await;
-        let database = one(&db, "SELECT current_database()").await.remove(0);
         // While the handler sleeps its connection is idle in a transaction (it has inserted).
-        let monitor = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            one(
-                &db,
-                &format!(
-                    "SELECT pid::text FROM pg_stat_activity WHERE datname = '{database}' \
-                     AND state = 'idle in transaction'"
-                ),
-            )
-            .await
-            .remove(0)
-        };
+        let monitor = wait_handler_sleeping(&db, "w");
         let stop = Stop::never();
         let (outcome, pid) = tokio::join!(worker.run_one("w", &stop), monitor);
         assert_eq!(outcome.expect("ok"), Some(Outcome::Retried));
@@ -700,8 +742,8 @@ mod tests {
         }
         stop_a.send(()).expect("open");
         stop_b.send(()).expect("open");
-        a.await.expect("worker a");
-        b.await.expect("worker b");
+        assert!(a.await.expect("worker a"), "no slot panicked");
+        assert!(b.await.expect("worker b"), "no slot panicked");
         assert_eq!(
             lab.runs.load(Ordering::SeqCst),
             200,
@@ -731,12 +773,12 @@ mod tests {
     #[tokio::test]
     async fn the_first_signal_lets_a_running_job_finish_within_the_grace_period() {
         let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
-        enqueue(&db, "{\"sleep_ms\": 400}").await;
+        enqueue(&db, "{\"sleep_ms\": 1500}").await;
         let (stop, receiver) = signals();
         let running = tokio::spawn(run_worker(worker, 1, "w", receiver));
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        wait_handler_sleeping(&db, "w/0").await;
         stop.send(()).expect("open");
-        running.await.expect("worker");
+        assert!(running.await.expect("worker"), "no slot panicked");
         assert_eq!(
             one(&db, "SELECT status, attempts::text FROM fb_job").await,
             ["done", "1"]
@@ -748,14 +790,14 @@ mod tests {
     #[tokio::test]
     async fn a_job_still_running_after_the_grace_period_is_released() {
         let (db, _lab, worker) = setup(Duration::from_millis(200)).await;
-        // The job's own timeout is 600 ms, longer than the grace period.
+        // The job's own timeout is 3 s, longer than the grace period.
         enqueue(&db, "{\"sleep_ms\": 20000}").await;
         let (stop, receiver) = signals();
         let running = tokio::spawn(run_worker(worker, 1, "w", receiver));
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        wait_handler_sleeping(&db, "w/0").await;
         stop.send(()).expect("open");
         let started = Instant::now();
-        running.await.expect("worker");
+        assert!(running.await.expect("worker"), "no slot panicked");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(
             one(&db, "SELECT status, attempts::text, (locked_by IS NULL)::text, (locked_until IS NULL)::text FROM fb_job").await,
@@ -771,11 +813,11 @@ mod tests {
         enqueue(&db, "{\"sleep_ms\": 20000}").await;
         let (stop, receiver) = signals();
         let running = tokio::spawn(run_worker(worker, 1, "w", receiver));
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        wait_handler_sleeping(&db, "w/0").await;
         stop.send(()).expect("open");
         stop.send(()).expect("open");
         let started = Instant::now();
-        running.await.expect("worker");
+        assert!(running.await.expect("worker"), "no slot panicked");
         assert!(started.elapsed() < Duration::from_secs(5));
         // Nobody released it: it is still running, with a lease that will expire.
         assert_eq!(one(&db, "SELECT status FROM fb_job").await, ["running"]);

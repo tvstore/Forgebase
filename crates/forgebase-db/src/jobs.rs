@@ -106,7 +106,8 @@ const COLUMNS: &str = "id, name, payload::text, status, attempts, run_at, locked
 
 /// Inserts a job and returns its id. `name` must be a job of `registry`, and the payload must
 /// pass [`check_job_payload`] (64 KiB of JSON); otherwise [`DbError::Job`] and nothing is
-/// written. It runs in the transaction of `client`.
+/// written. `enqueued_by` must be a valid actor (non-empty, no NUL), else
+/// [`DbError::InvalidActor`]. It runs in the transaction of `client`.
 pub async fn enqueue(
     client: &impl GenericClient,
     registry: &Registry,
@@ -114,6 +115,7 @@ pub async fn enqueue(
     payload: &serde_json::Value,
     enqueued_by: &str,
 ) -> Result<Uuid, DbError> {
+    crate::document::check_actor(enqueued_by)?;
     if !registry.has_job(name) {
         return Err(DbError::Job(format!(
             "unknown job `{name}` (jobs are registered by the apps of the binary as `<app>.<job>`)"

@@ -261,6 +261,13 @@ async fn an_oversize_payload_is_refused_by_the_hook_context_and_by_the_queue() {
             .is_err()
     );
     assert!(queued(&db).await.is_empty());
+    for actor in ["", "a\u{0}b"] {
+        let error = jobs::enqueue(&**client, &registry, "app.audit", &json!({}), actor)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::InvalidActor), "{actor:?}: {error}");
+    }
+    assert!(queued(&db).await.is_empty());
 }
 
 const KNOWN: [Known<'static>; 1] = [Known {

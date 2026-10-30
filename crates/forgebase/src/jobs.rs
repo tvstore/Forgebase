@@ -152,6 +152,9 @@ impl std::error::Error for JobError {}
 /// to 1 hour, and a 5 minute timeout. Build with [`JobOptions::new`] and the methods below, and
 /// give it to [`App::job_with`](crate::App::job_with); invalid values are a startup error.
 ///
+/// Limits: 1 to 1000 attempts, a timeout of more than zero and at most 24 hours, a
+/// backoff base of more than zero, a cap of at least the base and at most 30 days.
+///
 /// The options are part of the binary, not of the job row (see Delivery on [`JobHandler`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -161,6 +164,13 @@ pub struct JobOptions {
     backoff_base: Duration,
     backoff_cap: Duration,
 }
+
+/// The most attempts a job may be given.
+const MAX_ATTEMPTS: u32 = 1000;
+/// The longest timeout a job may have.
+const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+/// The longest backoff cap a job may have.
+const MAX_BACKOFF_CAP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 impl Default for JobOptions {
     fn default() -> Self {
@@ -179,20 +189,20 @@ impl JobOptions {
         Self::default()
     }
 
-    /// The most attempts a job gets, the first one included. At least 1.
+    /// The most attempts a job gets, the first one included. From 1 to 1000.
     pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts;
         self
     }
 
-    /// How long a handler may run before the attempt is failed. More than zero.
+    /// How long a handler may run before the attempt is failed. More than zero, at most 24 hours.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// The delay before the second attempt is `base`; each further one doubles it, up to `cap`.
-    /// `base` is more than zero and `cap` is at least `base`.
+    /// `base` is more than zero, `cap` is at least `base` and at most 30 days.
     pub fn backoff(mut self, base: Duration, cap: Duration) -> Self {
         self.backoff_base = base;
         self.backoff_cap = cap;
@@ -205,14 +215,23 @@ impl JobOptions {
         if self.max_attempts < 1 {
             problems.push("max_attempts must be at least 1".to_owned());
         }
+        if self.max_attempts > MAX_ATTEMPTS {
+            problems.push(format!("max_attempts must be at most {MAX_ATTEMPTS}"));
+        }
         if self.timeout.is_zero() {
             problems.push("timeout must be more than zero".to_owned());
+        }
+        if self.timeout > MAX_TIMEOUT {
+            problems.push("timeout must be at most 24 hours".to_owned());
         }
         if self.backoff_base.is_zero() {
             problems.push("the backoff base must be more than zero".to_owned());
         }
         if self.backoff_cap < self.backoff_base {
             problems.push("the backoff cap must be at least the backoff base".to_owned());
+        }
+        if self.backoff_cap > MAX_BACKOFF_CAP {
+            problems.push("the backoff cap must be at most 30 days".to_owned());
         }
         problems
     }
@@ -372,6 +391,54 @@ mod tests {
                 .problems()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn options_above_the_upper_bounds_are_listed() {
+        let day = Duration::from_secs(24 * 60 * 60);
+        let base = Duration::from_secs(1);
+        assert!(
+            JobOptions::new()
+                .max_attempts(MAX_ATTEMPTS)
+                .problems()
+                .is_empty()
+        );
+        assert!(JobOptions::new().timeout(day).problems().is_empty());
+        assert!(
+            JobOptions::new()
+                .backoff(base, 30 * day)
+                .problems()
+                .is_empty()
+        );
+        assert_eq!(
+            JobOptions::new().max_attempts(MAX_ATTEMPTS + 1).problems(),
+            ["max_attempts must be at most 1000"]
+        );
+        assert_eq!(
+            JobOptions::new()
+                .timeout(day + Duration::from_secs(1))
+                .problems(),
+            ["timeout must be at most 24 hours"]
+        );
+        assert_eq!(
+            JobOptions::new()
+                .backoff(base, 30 * day + Duration::from_secs(1))
+                .problems(),
+            ["the backoff cap must be at most 30 days"]
+        );
+        // A base above the cap is refused (and a huge base above a huge cap as well).
+        assert_eq!(
+            JobOptions::new().backoff(day, base).problems(),
+            ["the backoff cap must be at least the backoff base"]
+        );
+        assert_eq!(
+            JobOptions::new()
+                .timeout(Duration::MAX)
+                .backoff(Duration::MAX, Duration::MAX)
+                .problems()
+                .len(),
+            2
         );
     }
 

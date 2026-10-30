@@ -553,8 +553,13 @@ async fn worker(
         composed.jobs,
         WorkerConfig::default(),
     );
-    run_worker(Arc::new(worker), concurrency, &worker_id(), signals).await;
-    Ok(())
+    if run_worker(Arc::new(worker), concurrency, &worker_id(), signals).await {
+        Ok(())
+    } else {
+        Err(CliError::Config(
+            "a worker slot panicked (see the log above)".to_owned(),
+        ))
+    }
 }
 
 /// The directory of the built desk from `FORGEBASE_DESK_DIR` (typically `desk/dist`), or `None`
