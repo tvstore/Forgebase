@@ -4,14 +4,14 @@
 use std::str::FromStr;
 
 use forgebase::testing::{
-    HttpClient, TestDb, assert_doctypes_listed, json, run_jobs, run_schedules_at,
+    HttpClient, TestDb, assert_doctypes_listed, check_reports, json, run_jobs, run_schedules_at,
 };
 use forgebase::{
     Decimal, DocTypeHooks, Document, EnqueuedJobs, Forgebase, HookContext, OffsetDateTime,
-    Operation, Row, Value,
+    Operation, Row, TransitionInfo, Value,
 };
 
-use sales::{OrderRules, app};
+use sales::{APPROVAL_LIMIT, OrderRules, app};
 
 const ORDERS: &str = "/api/v1/resource/sales_order";
 
@@ -203,6 +203,38 @@ fn a_refused_submit_enqueues_nothing() {
     assert!(jobs.take().is_empty());
 }
 
+fn approve_hook(action: &str, total: &str) -> Result<(), forgebase::HookError> {
+    let info = TransitionInfo::new(action, "Pending Approval", "Approved");
+    let ctx = HookContext::new("sales_order", "ann", Operation::Transition).with_transition(&info);
+    let mut doc = Document::default();
+    doc.values
+        .insert("total".to_owned(), Value::Decimal(dec(total)));
+    OrderRules.before_transition(&ctx, &mut doc)
+}
+
+#[test]
+fn approve_is_limited_to_the_approval_limit_and_the_limit_itself_passes() {
+    assert_eq!(APPROVAL_LIMIT, dec("10000.00"));
+    approve_hook("Approve", "10000.00").expect("the limit itself is allowed");
+    let error = approve_hook("Approve", "10000.01").expect_err("above the limit");
+    assert_eq!(
+        error.message(),
+        "orders above 10000.00 need a Sales Manager: use 'Approve as Manager'"
+    );
+}
+
+#[test]
+fn only_the_approve_action_is_limited() {
+    for action in [
+        "Approve as Manager",
+        "Reject",
+        "Submit for Approval",
+        "Cancel",
+    ] {
+        approve_hook(action, "99999.00").unwrap_or_else(|e| panic!("{action}: {e:?}"));
+    }
+}
+
 // --- Against PostgreSQL -------------------------------------------------------------------------
 
 struct Env {
@@ -244,6 +276,32 @@ fn two_items() -> forgebase::testing::Json {
         {"description": "Widget", "qty": 3, "rate": "10.50"},
         {"description": "Gadget", "qty": 2, "rate": "0.25"}
     ])
+}
+
+/// Takes the transition `action` on the order `name` (at `version`) as `client`.
+async fn transition(
+    client: &HttpClient,
+    name: &str,
+    action: &str,
+    version: i64,
+) -> forgebase::testing::Reply {
+    client
+        .post(
+            &format!("{ORDERS}/{name}/transition"),
+            json!({"action": action, "version": version}),
+        )
+        .await
+}
+
+/// Sends the draft `name` (version 1) for approval and approves it, both as `client`: the
+/// order is `Approved` (submitted) at version 3.
+async fn approved(client: &HttpClient, name: &str) {
+    let sent = transition(client, name, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    let done = transition(client, name, "Approve", 2).await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
+    assert_eq!(done.data()["workflow_state"], "Approved");
+    assert_eq!(done.data()["docstatus"], 1);
 }
 
 #[tokio::test]
@@ -376,11 +434,11 @@ async fn a_draft_may_have_no_items_but_cannot_be_submitted() {
     assert_eq!(created.data()["total"], "0.00");
     let name = created.data()["name"].as_str().expect("name").to_owned();
 
-    // The framework reports a hook error as 422 `hook_rejected`.
-    let refused = env
-        .user
-        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
-        .await;
+    // Sending the order for approval is a draft-to-draft move and needs no items. Approving
+    // submits it, and the framework reports the hook error as 422 `hook_rejected`.
+    let sent = transition(&env.user, &name, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    let refused = transition(&env.user, &name, "Approve", 2).await;
     assert_eq!(refused.status, 422, "{:?}", refused.body);
     assert_eq!(refused.error_code(), Some("hook_rejected"));
     assert!(
@@ -391,10 +449,11 @@ async fn a_draft_may_have_no_items_but_cannot_be_submitted() {
         "{:?}",
         refused.body
     );
-    // Nothing changed: still a draft, same version.
+    // Nothing changed: still pending approval and a draft, same version.
     let read = env.user.get(&format!("{ORDERS}/{name}")).await;
     assert_eq!(read.data()["docstatus"], 0);
-    assert_eq!(read.data()["version"], 1);
+    assert_eq!(read.data()["workflow_state"], "Pending Approval");
+    assert_eq!(read.data()["version"], 2);
     env.db.cleanup().await;
 }
 
@@ -411,13 +470,10 @@ async fn an_order_with_items_can_be_submitted() {
         .await;
     let name = created.data()["name"].as_str().expect("name").to_owned();
 
-    let submitted = env
-        .user
-        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
-        .await;
-    assert_eq!(submitted.status, 200, "{:?}", submitted.body);
-    assert_eq!(submitted.data()["docstatus"], 1);
-    assert_eq!(submitted.data()["total"], "32.00");
+    approved(&env.user, &name).await;
+    let read = env.user.get(&format!("{ORDERS}/{name}")).await;
+    assert_eq!(read.data()["docstatus"], 1);
+    assert_eq!(read.data()["total"], "32.00");
     env.db.cleanup().await;
 }
 
@@ -433,18 +489,13 @@ async fn permissions_are_enforced() {
         )
         .await;
     let name = created.data()["name"].as_str().expect("name").to_owned();
-    let submitted = env
-        .user
-        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
-        .await;
-    assert_eq!(submitted.status, 200, "{:?}", submitted.body);
+    approved(&env.user, &name).await;
 
-    // A Sales User cannot cancel; a Sales Manager can.
-    let cancel = format!("{ORDERS}/{name}/cancel");
-    let denied = env.user.post(&cancel, json!({"version": 2})).await;
+    // A Sales User cannot cancel (no right, no role); a Sales Manager can.
+    let denied = transition(&env.user, &name, "Cancel", 3).await;
     assert_eq!(denied.status, 403, "{:?}", denied.body);
     assert_eq!(denied.error_code(), Some("permission_denied"));
-    let cancelled = env.manager.post(&cancel, json!({"version": 2})).await;
+    let cancelled = transition(&env.manager, &name, "Cancel", 3).await;
     assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
     assert_eq!(cancelled.data()["docstatus"], 2);
 
@@ -453,6 +504,334 @@ async fn permissions_are_enforced() {
     assert_eq!(one.status, 403, "{:?}", one.body);
     let list = env.outsider.get(ORDERS).await;
     assert_eq!(list.status, 403, "{:?}", list.body);
+    env.db.cleanup().await;
+}
+
+// --- The approval workflow ----------------------------------------------------------------------
+
+/// The `fb_workflow_log` rows of an order as "action: from -> to by actor", oldest first.
+async fn log_of(db: &TestDb, name: &str) -> Vec<String> {
+    db.rows(&format!(
+        "SELECT action || ': ' || from_state || ' -> ' || to_state || ' by ' || actor
+         FROM fb_workflow_log WHERE doctype = 'sales_order' AND name = '{name}' ORDER BY id"
+    ))
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn big_items() -> forgebase::testing::Json {
+    // 10 000.01: one cent above `APPROVAL_LIMIT`.
+    json!([{"description": "Machine", "qty": 1, "rate": "10000.01"}])
+}
+
+#[tokio::test]
+async fn an_order_goes_from_draft_to_cancelled_through_the_workflow() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    let read = env.user.get(&format!("{ORDERS}/{name}")).await;
+    assert_eq!(read.data()["workflow_state"], "Draft");
+    assert_eq!(read.data()["docstatus"], 0);
+
+    // What the Sales User may do now.
+    let offered = env.user.get(&format!("{ORDERS}/{name}/transitions")).await;
+    assert_eq!(offered.status, 200, "{:?}", offered.body);
+    assert_eq!(
+        offered.data()["transitions"],
+        json!([{"action": "Submit for Approval", "to": "Pending Approval"}])
+    );
+
+    let sent = transition(&env.user, &name, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    assert_eq!(sent.data()["workflow_state"], "Pending Approval");
+    assert_eq!(sent.data()["docstatus"], 0);
+    let approved = transition(&env.user, &name, "Approve", 2).await;
+    assert_eq!(approved.status, 200, "{:?}", approved.body);
+    assert_eq!(approved.data()["workflow_state"], "Approved");
+    assert_eq!(approved.data()["docstatus"], 1);
+    let cancelled = transition(&env.manager, &name, "Cancel", 3).await;
+    assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
+    assert_eq!(cancelled.data()["workflow_state"], "Cancelled");
+    assert_eq!(cancelled.data()["docstatus"], 2);
+
+    // Every move left a log row, written with the transition; the API shows the same history.
+    assert_eq!(
+        log_of(&env.db, &name).await,
+        [
+            "Submit for Approval: Draft -> Pending Approval by ann",
+            "Approve: Pending Approval -> Approved by ann",
+            "Cancel: Approved -> Cancelled by max"
+        ]
+    );
+    let history = env.user.get(&format!("{ORDERS}/{name}/history")).await;
+    assert_eq!(history.data()["history"].as_array().map(Vec::len), Some(3));
+
+    // The hooks of the submit and the cancel ran inside the transitions: both jobs exist.
+    let jobs = env
+        .db
+        .rows(
+            "SELECT payload->>'event' FROM fb_job WHERE name = 'sales.log_order_event' ORDER BY 1",
+        )
+        .await;
+    assert_eq!(jobs, [["cancelled"], ["submitted"]]);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn plain_submit_and_cancel_are_refused_on_an_order() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    let refused = env
+        .user
+        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
+        .await;
+    assert_eq!(refused.status, 409, "{:?}", refused.body);
+    assert_eq!(refused.error_code(), Some("workflow_required"));
+
+    approved(&env.user, &name).await;
+    let refused = env
+        .manager
+        .post(&format!("{ORDERS}/{name}/cancel"), json!({"version": 3}))
+        .await;
+    assert_eq!(refused.status, 409, "{:?}", refused.body);
+    assert_eq!(refused.error_code(), Some("workflow_required"));
+    let read = env.user.get(&format!("{ORDERS}/{name}")).await;
+    assert_eq!(read.data()["docstatus"], 1);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sales_user_approves_up_to_the_limit_and_a_manager_above_it() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, big_items()).await;
+    let sent = transition(&env.user, &name, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    assert_eq!(sent.data()["total"], "10000.01");
+
+    // The hook vetoes: the message names the way out, and nothing changed (state, version, log,
+    // jobs).
+    let vetoed = transition(&env.user, &name, "Approve", 2).await;
+    assert_eq!(vetoed.status, 422, "{:?}", vetoed.body);
+    assert_eq!(vetoed.error_code(), Some("hook_rejected"));
+    assert!(
+        vetoed
+            .error_message()
+            .expect("message")
+            .contains("need a Sales Manager: use 'Approve as Manager'"),
+        "{:?}",
+        vetoed.body
+    );
+    let read = env.user.get(&format!("{ORDERS}/{name}")).await;
+    assert_eq!(read.data()["workflow_state"], "Pending Approval");
+    assert_eq!(read.data()["version"], 2);
+    assert_eq!(
+        log_of(&env.db, &name).await,
+        ["Submit for Approval: Draft -> Pending Approval by ann"]
+    );
+    assert_eq!(
+        count(&env.db, "SELECT count(*)::text FROM fb_job").await,
+        "0"
+    );
+
+    // The manager's action is not open to a Sales User: it needs the role.
+    let denied = transition(&env.user, &name, "Approve as Manager", 2).await;
+    assert_eq!(denied.status, 403, "{:?}", denied.body);
+    assert_eq!(denied.error_code(), Some("permission_denied"));
+
+    // The Sales Manager approves the large order with the action that has no limit.
+    let done = transition(&env.manager, &name, "Approve as Manager", 2).await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
+    assert_eq!(done.data()["workflow_state"], "Approved");
+    assert_eq!(done.data()["docstatus"], 1);
+    assert_eq!(
+        log_of(&env.db, &name).await.last().map(String::as_str),
+        Some("Approve as Manager: Pending Approval -> Approved by max")
+    );
+
+    // An order of exactly the limit is a Sales User's to approve.
+    let exact = draft(
+        &env,
+        None,
+        json!([{"description": "Machine", "qty": 1, "rate": "10000.00"}]),
+    )
+    .await;
+    approved(&env.user, &exact).await;
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_rejected_order_is_a_draft_again_and_editable() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    transition(&env.user, &name, "Submit for Approval", 1).await;
+
+    // While it waits for approval only a Sales Manager may edit it (`edit_roles`).
+    let edit = json!({"version": 2, "data": {"remarks": "ring me"}});
+    let denied = env
+        .user
+        .patch(&format!("{ORDERS}/{name}"), edit.clone())
+        .await;
+    assert_eq!(denied.status, 403, "{:?}", denied.body);
+
+    // Only a Sales Manager rejects.
+    let denied = transition(&env.user, &name, "Reject", 2).await;
+    assert_eq!(denied.status, 403, "{:?}", denied.body);
+    let rejected = transition(&env.manager, &name, "Reject", 2).await;
+    assert_eq!(rejected.status, 200, "{:?}", rejected.body);
+    assert_eq!(rejected.data()["workflow_state"], "Draft");
+    assert_eq!(rejected.data()["docstatus"], 0);
+
+    // Back in Draft the Sales User edits it again.
+    let edit = json!({"version": 3, "data": {"remarks": "ring me"}});
+    let updated = env.user.patch(&format!("{ORDERS}/{name}"), edit).await;
+    assert_eq!(updated.status, 200, "{:?}", updated.body);
+    assert_eq!(updated.data()["remarks"], "ring me");
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_wrong_state_and_an_unknown_action_are_refused() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    // "Approve" is not a transition from Draft; "Fly" is no action at all.
+    for action in ["Approve", "Fly"] {
+        let refused = transition(&env.user, &name, action, 1).await;
+        assert_eq!(refused.status, 409, "{:?}", refused.body);
+        assert_eq!(refused.error_code(), Some("unknown_transition"));
+    }
+    // A user without a sales role cannot even see the order.
+    let hidden = transition(&env.outsider, &name, "Submit for Approval", 1).await;
+    assert_eq!(hidden.status, 403, "{:?}", hidden.body);
+    env.db.cleanup().await;
+}
+
+// --- The report "Sales by customer" -------------------------------------------------------------
+
+const REPORT: &str = "/api/v1/report/sales.sales_by_customer";
+
+/// An order of `customer` on `date` with one item of `qty` x `rate`, approved when `approve`.
+async fn order_of(env: &Env, customer: &str, date: &str, rate: &str, approve: bool) -> String {
+    let created = env
+        .user
+        .post(
+            ORDERS,
+            json!({"customer": customer, "order_date": date,
+                   "items": [{"description": "Item", "qty": 1, "rate": rate}]}),
+        )
+        .await;
+    assert_eq!(created.status, 201, "{:?}", created.body);
+    let name = created.data()["name"].as_str().expect("name").to_owned();
+    if approve {
+        approved(&env.user, &name).await;
+    }
+    name
+}
+
+#[tokio::test]
+async fn the_report_sql_fits_its_declaration() {
+    let env = env().await;
+    assert_eq!(
+        check_reports(&binary(), &env.db).await,
+        Vec::<String>::new()
+    );
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn sales_by_customer_counts_the_approved_orders_of_the_period() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let reply = env
+        .manager
+        .post(
+            "/api/v1/resource/customer",
+            json!({"email": "bob@example.com", "full_name": "Bob"}),
+        )
+        .await;
+    assert_eq!(reply.status, 201, "{:?}", reply.body);
+
+    // Counted: two orders of ada (12.00 and 5.00) and one of bob (40.00) in October.
+    order_of(&env, "ada@example.com", "2026-10-01", "12.00", true).await;
+    order_of(&env, "ada@example.com", "2026-10-05", "5.00", true).await;
+    order_of(&env, "bob@example.com", "2026-10-03", "40.00", true).await;
+    // Not counted: a draft, a pending order, a cancelled order, an order outside the period.
+    order_of(&env, "ada@example.com", "2026-10-06", "100.00", false).await;
+    let pending = order_of(&env, "ada@example.com", "2026-10-07", "100.00", false).await;
+    transition(&env.user, &pending, "Submit for Approval", 1).await;
+    let cancelled = order_of(&env, "ada@example.com", "2026-10-08", "100.00", true).await;
+    let reply = transition(&env.manager, &cancelled, "Cancel", 3).await;
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    order_of(&env, "ada@example.com", "2026-12-01", "100.00", true).await;
+
+    // Biggest customer first.
+    let run = env
+        .manager
+        .post(
+            REPORT,
+            json!({"params": {"from": "2026-10-01", "to": "2026-10-31"}}),
+        )
+        .await;
+    assert_eq!(run.status, 200, "{:?}", run.body);
+    assert_eq!(
+        run.data()["columns"]
+            .as_array()
+            .expect("columns")
+            .iter()
+            .map(|c| c["name"].as_str().expect("name"))
+            .collect::<Vec<_>>(),
+        ["customer", "orders", "total", "last_order"]
+    );
+    assert_eq!(
+        run.data()["rows"],
+        json!([
+            ["bob@example.com", 1, "40.00", "2026-10-03"],
+            ["ada@example.com", 2, "17.00", "2026-10-05"]
+        ])
+    );
+    assert_eq!(run.data()["truncated"], false);
+
+    // The optional customer narrows it; the dates are required.
+    let one = env
+        .manager
+        .post(
+            REPORT,
+            json!({"params": {"from": "2026-10-01", "to": "2026-10-31",
+                              "customer": "bob@example.com"}}),
+        )
+        .await;
+    assert_eq!(
+        one.data()["rows"],
+        json!([["bob@example.com", 1, "40.00", "2026-10-03"]])
+    );
+    let missing = env
+        .manager
+        .post(REPORT, json!({"params": {"from": "2026-10-01"}}))
+        .await;
+    assert_eq!(missing.status, 422, "{:?}", missing.body);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sales_user_cannot_run_or_see_the_report() {
+    let env = env().await;
+    let params = json!({"params": {"from": "2026-10-01", "to": "2026-10-31"}});
+    // Not allowed looks like not existing (404), for the Sales User and for a stranger.
+    for client in [&env.user, &env.outsider] {
+        let refused = client.post(REPORT, params.clone()).await;
+        assert_eq!(refused.status, 404, "{:?}", refused.body);
+        let listed = client.get("/api/v1/report").await;
+        assert_eq!(listed.status, 200, "{:?}", listed.body);
+        assert_eq!(listed.data(), &json!([]));
+    }
+    let listed = env.manager.get("/api/v1/report").await;
+    assert_eq!(listed.data()[0]["name"], "sales.sales_by_customer");
+    assert_eq!(listed.data()[0]["label"], "Sales by customer");
     env.db.cleanup().await;
 }
 
@@ -474,12 +853,9 @@ async fn draft(env: &Env, order_date: Option<&str>, items: forgebase::testing::J
     created.data()["name"].as_str().expect("name").to_owned()
 }
 
+/// Sends the draft for approval and approves it (version 1 to 3): the order is submitted.
 async fn submit(env: &Env, name: &str) {
-    let reply = env
-        .user
-        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
-        .await;
-    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    approved(&env.user, name).await;
 }
 
 /// Copies the job rows named `name` into new queued rows: the same job delivered twice.
@@ -544,10 +920,7 @@ async fn a_submit_and_a_cancel_are_logged_by_a_job() {
         .await;
     assert_eq!(write.status, 403, "{:?}", write.body);
 
-    let cancelled = env
-        .manager
-        .post(&format!("{ORDERS}/{name}/cancel"), json!({"version": 2}))
-        .await;
+    let cancelled = transition(&env.manager, &name, "Cancel", 3).await;
     assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
     let run = run_jobs(&binary(), &env.db).await;
     assert_eq!(run.done(), 1);
@@ -588,12 +961,11 @@ async fn a_refused_submit_leaves_no_job() {
     // the framework test `forgebase-db/tests/jobs.rs::a_later_rejecting_hook_leaves_no_job`.
     let env = env().await;
     customer(&env.manager).await;
-    // The rule "an order needs items" refuses this submit.
+    // The rule "an order needs items" refuses the approval, which is the submit.
     let name = draft(&env, None, json!([])).await;
-    let refused = env
-        .user
-        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
-        .await;
+    let sent = transition(&env.user, &name, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    let refused = transition(&env.user, &name, "Approve", 2).await;
     assert_eq!(refused.status, 422, "{:?}", refused.body);
     assert_eq!(
         count(
@@ -667,13 +1039,7 @@ async fn the_daily_summary_counts_the_submitted_orders_of_the_day_before_the_tic
     draft(&env, Some(day), two_items()).await;
     let cancelled = draft(&env, Some(day), two_items()).await;
     submit(&env, &cancelled).await;
-    let reply = env
-        .manager
-        .post(
-            &format!("{ORDERS}/{cancelled}/cancel"),
-            json!({"version": 2}),
-        )
-        .await;
+    let reply = transition(&env.manager, &cancelled, "Cancel", 3).await;
     assert_eq!(reply.status, 200, "{:?}", reply.body);
     let other = draft(&env, Some("2000-01-01"), two_items()).await;
     submit(&env, &other).await;

@@ -193,14 +193,11 @@ async fn the_extension_hook_runs_after_the_sales_hook() {
     assert_eq!(fine.status, 201, "{:?}", fine.body);
     assert_eq!(fine.data()["total"], "10.00");
     let name = fine.data()["name"].as_str().expect("name").to_owned();
-    let submitted = env
-        .user
-        .post(
-            &format!("/api/v1/resource/sales_order/{name}/submit"),
-            json!({"version": 1}),
-        )
-        .await;
+    // `sales_order` has an approval workflow: sending it for approval and approving it is the
+    // submit, and runs the same hooks.
+    let submitted = submit(&env, &name).await;
     assert_eq!(submitted.status, 200, "{:?}", submitted.body);
+    assert_eq!(submitted.data()["docstatus"], 1);
     env.db.cleanup().await;
 }
 
@@ -315,9 +312,25 @@ async fn draft(env: &Env, order_date: Option<&str>) -> String {
     created.data()["name"].as_str().expect("name").to_owned()
 }
 
+/// Submits the draft `name` (version 1) as the `sales` approval workflow wants it: sent for
+/// approval, then approved. Returns the reply of the first transition that fails, or of the
+/// approval (the submit itself).
 async fn submit(env: &Env, name: &str) -> forgebase::testing::Reply {
+    let sent = env
+        .user
+        .post(
+            &format!("{ORDERS}/{name}/transition"),
+            json!({"action": "Submit for Approval", "version": 1}),
+        )
+        .await;
+    if sent.status != 200 {
+        return sent;
+    }
     env.user
-        .post(&format!("{ORDERS}/{name}/submit"), json!({"version": 1}))
+        .post(
+            &format!("{ORDERS}/{name}/transition"),
+            json!({"action": "Approve", "version": 2}),
+        )
         .await
 }
 

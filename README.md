@@ -98,36 +98,39 @@ cargo run -p sales -- doc delete sales_order "$ORDER" --version 2
 
 ### Submit, cancel and amend
 
-`sales_order` is `submittable` and uses a naming series ([sales_order.toml](examples/sales/doctypes/sales_order.toml)): a new order is a **draft** (`docstatus` 0, named `SO-<year>-00001`, ...; it may have no items yet), `submit` needs at least one item and a positive total (the `before_submit` hook of the app refuses otherwise) and locks it (`docstatus` 1; only fields marked `allow_on_submit`, here `remarks`, can still change), `cancel` makes it `docstatus` 2, and `amend` creates a new draft from a cancelled order, named `<original>-<n>` with `amended_from` set. Every step needs `--version`, the version you last read (each one adds 1).
+`sales_order` is `submittable` and uses a naming series ([sales_order.toml](examples/sales/doctypes/sales_order.toml)): a new order is a **draft** (`docstatus` 0, named `SO-<year>-00001`, ...; it may have no items yet), **submitting** needs at least one item and a positive total (the `before_submit` hook of the app refuses otherwise) and locks it (`docstatus` 1; only fields marked `allow_on_submit`, here `remarks`, can still change), **cancelling** makes it `docstatus` 2, and `amend` creates a new draft from a cancelled order, named `<original>-<n>` with `amended_from` set. In the `sales` app an order also has an approval workflow (see [Workflow](#workflow)), so it is submitted and cancelled with **transitions**: `doc submit` and `doc cancel` are refused on it, and the commands below use `doc transition` (the CLI does not check the roles of a transition, the HTTP API does). `doc submit` and `doc cancel` work as before on a submittable DocType that has no workflow. Every step needs `--version`, the version you last read (each one adds 1).
 
 ```sh
-# Continues the example above (the `bob@example.com` customer exists). A new order is a draft: "docstatus": 0, named by the series.
+# Continues the example above (the `bob@example.com` customer exists). A new order is a draft in the state "Draft": "docstatus": 0, named by the series.
 NAME=$(cargo run -q -p sales -- doc insert sales_order \
   --data '{"customer": "bob@example.com", "items": [{"description": "Widget", "qty": 2, "rate": "9.50"}]}' | sed -n 's/^  "name": "\(.*\)",$/\1/p')
 
-# An order without items can be saved as a draft but not submitted: this fails (exit code 1) with the hook's message
-# "a sales order needs at least one item to be submitted". (Delete the draft again; it is version 1.)
+# An order without items can be saved and sent for approval, but not approved (approving submits it): this fails (exit code 1)
+# with the hook's message "a sales order needs at least one item to be submitted". (Delete the draft again; it is version 2.)
 EMPTY=$(cargo run -q -p sales -- doc insert sales_order \
   --data '{"customer": "bob@example.com"}' | sed -n 's/^  "name": "\(.*\)",$/\1/p')
-cargo run -p sales -- doc submit sales_order "$EMPTY" --version 1
-cargo run -p sales -- doc delete sales_order "$EMPTY" --version 1
+cargo run -p sales -- doc transition sales_order "$EMPTY" "Submit for Approval" --version 1
+cargo run -p sales -- doc transition sales_order "$EMPTY" "Approve" --version 2
+cargo run -p sales -- doc delete sales_order "$EMPTY" --version 2
 
-# Submit it (version 1 -> 2): "docstatus": 1. A submitted order is locked: this update fails (exit code 1) ...
-cargo run -p sales -- doc submit sales_order "$NAME" --version 1
-cargo run -p sales -- doc update sales_order "$NAME" --version 2 \
+# Send it for approval (version 1 -> 2: "workflow_state": "Pending Approval"), then approve it (2 -> 3): "docstatus": 1.
+# A submitted order is locked: this update fails (exit code 1) ...
+cargo run -p sales -- doc transition sales_order "$NAME" "Submit for Approval" --version 1
+cargo run -p sales -- doc transition sales_order "$NAME" "Approve" --version 2
+cargo run -p sales -- doc update sales_order "$NAME" --version 3 \
   --data '{"order_date": "2026-11-01"}'
-# ... and this one, on the allow_on_submit field, works (version 2 -> 3). A submitted order cannot be deleted either.
-cargo run -p sales -- doc update sales_order "$NAME" --version 2 \
+# ... and this one, on the allow_on_submit field, works (version 3 -> 4). A submitted order cannot be deleted either.
+cargo run -p sales -- doc update sales_order "$NAME" --version 3 \
   --data '{"remarks": "rush delivery"}'
 
-# Cancel it (3 -> 4: "docstatus": 2), then amend it: a new draft with the same values and rows, named "<NAME>-1", "amended_from": "<NAME>".
-cargo run -p sales -- doc cancel sales_order "$NAME" --version 3
-cargo run -p sales -- doc amend sales_order "$NAME" --version 4
-# The amendment is a draft again: edit it, submit it, and so on. A cancelled order can be amended once (the second try fails), or deleted.
-cargo run -p sales -- doc delete sales_order "$NAME" --version 4
+# Cancel it (4 -> 5: "docstatus": 2), then amend it: a new draft with the same values and rows, named "<NAME>-1", "amended_from": "<NAME>".
+cargo run -p sales -- doc transition sales_order "$NAME" "Cancel" --version 4
+cargo run -p sales -- doc amend sales_order "$NAME" --version 5
+# The amendment is a draft again: edit it, send it for approval, and so on. A cancelled order can be amended once (the second try fails), or deleted.
+cargo run -p sales -- doc delete sales_order "$NAME" --version 5
 ```
 
-`doc submit`, `doc cancel` and `doc amend` take `--actor` like the other commands and no data; the output of a submittable DocType includes `docstatus` (0, 1 or 2) and `amended_from`. `docstatus` and `amended_from` cannot be set through `--data`.
+`doc submit`, `doc cancel` and `doc amend` take `--actor` like the other commands and no data (`doc transition` takes the action and `--version`); the output of a submittable DocType includes `docstatus` (0, 1 or 2) and `amended_from`. `docstatus` and `amended_from` cannot be set through `--data`.
 
 A DocType file can also say how the desk should show it (UX.1). A field without `label` gets its humanized name (`order_date` is "Order Date"; write `label = "Quantity"` where that is not good English), `read_only = true` marks a field that only hooks may write (a client that sends a value for it is refused with a 422; it cannot be `required` or a `table`), and `title_field` and `list_fields` name the field that names a document and the columns of the list:
 
@@ -196,7 +199,7 @@ to = "Approved"
 roles = ["Sales Manager"]
 ```
 
-A transition is `POST /api/v1/resource/<doctype>/<name>/transition` with `{"action": "Approve", "version": N}`, or `forgebase doc transition <doctype> <name> "Approve" --version N` (the command runs as the system context, so the roles are not checked). `GET .../transitions` lists what the caller may take now, `GET .../history` lists the transitions taken (oldest first, the newest 500), and `GET /api/v1/meta/<doctype>` has the states and transitions without the roles. The document has `"workflow_state"`, which no client can set. A condition on a transition is written in Rust: implement `DocTypeHooks::before_transition` (it may veto, change values and enqueue a job; `ctx.transition` has the action and the two states). `migrate` gives the documents that exist when a workflow is added their state and warns about documents in a state the workflow no longer has. The desk shows the state as the badge and the actions you may take as buttons (M8.2, see [Desk](#desk)).
+A transition is `POST /api/v1/resource/<doctype>/<name>/transition` with `{"action": "Approve", "version": N}`, or `forgebase doc transition <doctype> <name> "Approve" --version N` (the command runs as the system context, so the roles are not checked). `GET .../transitions` lists what the caller may take now, `GET .../history` lists the transitions taken (oldest first, the newest 500), and `GET /api/v1/meta/<doctype>` has the states and transitions without the roles. The document has `"workflow_state"`, which no client can set. A condition on a transition is written in Rust: implement `DocTypeHooks::before_transition` (it may veto, change values and enqueue a job; `ctx.transition` has the action and the two states). `migrate` gives the documents that exist when a workflow is added their state and warns about documents in a state the workflow no longer has. The desk shows the state as the badge and the actions you may take as buttons (M8.2, see [Desk](#desk)). The `sales` example has a full approval workflow on `sales_order` (Draft, Pending Approval, Approved, Cancelled; a Sales User approves up to 10 000, above that a Sales Manager uses "Approve as Manager": hooks see no roles, so the limit is a `before_transition` hook on the action name), a report "Sales by customer" and a shared saved view in the CI script; the guide explains them: [workflow, saved views and reports](docs/guide/workflow-and-reports.md).
 
 ### Users and tokens
 
@@ -251,12 +254,16 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
   -d '{"version": 1, "data": {"loyalty_points": 20}}' \
   http://localhost:8000/api/v1/resource/customer/ann@example.com
 
-# Create a sales order (its name comes from the series; use the `name` in the response below), then submit it (submit, cancel and amend take {"version": N}; amend answers 201 with the new draft)
+# Create a sales order (its name comes from the series; use the `name` in the response below), then send it for approval and approve it
+# (a transition takes {"action", "version"}; the order has a workflow, so there is no plain submit. Cancel and amend take {"version": N}; amend answers 201 with the new draft.
+# The user needs a role of the transition and the right: `root` is an Administrator, who passes every role check)
 curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
   -d '{"customer": "ann@example.com", "items": [{"description": "Widget", "qty": 2, "rate": "9.50"}]}' \
   http://localhost:8000/api/v1/resource/sales_order
 curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
-  -d '{"version": 1}' http://localhost:8000/api/v1/resource/sales_order/SO-2026-00001/submit
+  -d '{"action": "Submit for Approval", "version": 1}' http://localhost:8000/api/v1/resource/sales_order/SO-2026-00001/transition
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"action": "Approve", "version": 2}' http://localhost:8000/api/v1/resource/sales_order/SO-2026-00001/transition
 
 # Delete (204; the version goes in the query string). Here it is refused with 409 `linked_document_exists`, because the sales order links to the customer
 curl -s -b jar.txt -X DELETE -H "X-Forgebase-CSRF: $CSRF" \
