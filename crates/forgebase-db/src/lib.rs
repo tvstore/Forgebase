@@ -3,7 +3,7 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2 and M6.1):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1 and M6.2):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -37,6 +37,10 @@
 //!   claim with leases, guarded completion and failure, and what the `job` commands read. It
 //!   never runs a handler; the worker is in the `forgebase` crate. The document functions write
 //!   the jobs that hooks enqueue in the operation's own transaction.
+//! - [`schedule`]: the scheduler (M6.2, ADR 0013): schedule times ([`schedule::Spec`]), the
+//!   `fb_schedule` table of migration 0006, its sync at `migrate` and the tick that enqueues due
+//!   jobs exactly once however many workers run. Also here: the SQL of the built-in clean-up jobs
+//!   ([`jobs::purge_done`], [`auth::purge_sessions`], [`auth::purge_login_failures`]).
 //! - [`auth`]: users, roles, Argon2id password hashing, server-side sessions with CSRF tokens, API
 //!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP or
 //!   cookies here (they are in `forgebase-http`); [`auth::AuthUser::caller`] gives the [`Caller`] for the document functions.
@@ -50,6 +54,7 @@ pub mod jobs;
 mod list;
 mod migrate;
 mod plan;
+pub mod schedule;
 mod sync;
 mod value;
 
@@ -106,6 +111,10 @@ pub struct MigrateReport {
     pub sync: Option<SyncReport>,
     /// App migrations applied (pending ones in a dry run), in app order and version order.
     pub app_migrations: Vec<AppliedAppMigration>,
+    /// The changes to the schedules (`add`, `change`, `remove`; see [`schedule::sync`]), one line
+    /// each; with a dry run, the planned ones. Empty when the schedules were not given
+    /// ([`migrate_apps`]) or, in a dry run, while framework migrations are pending.
+    pub schedules: Vec<String>,
 }
 
 /// Applies the framework migrations, then syncs the DocType schema. Same as [`migrate_apps`]
@@ -148,12 +157,26 @@ pub async fn migrate_apps(
     apps: &[AppSpec<'_>],
     options: &SyncOptions,
 ) -> Result<MigrateReport, DbError> {
+    migrate_all(pool, registry, apps, None, options).await
+}
+
+/// [`migrate_apps`], and then, in the same run and under the same lock, the sync of the
+/// schedules the binary declares ([`schedule::sync`]) when `schedules` is `Some`: schedules the
+/// binary does not declare are **deleted**, so the binary that migrates is the source of truth.
+/// With `None` the schedule table is left alone.
+pub async fn migrate_all(
+    pool: &Pool,
+    registry: &Registry,
+    apps: &[AppSpec<'_>],
+    schedules: Option<&[schedule::Declared<'_>]>,
+    options: &SyncOptions,
+) -> Result<MigrateReport, DbError> {
     // The connection is taken out of the pool: it holds a session-level lock, so it must never
     // go back to the pool alive. When this function ends, by returning, by a panic or because the
     // future is dropped (cancellation), the connection is closed and PostgreSQL releases the lock.
     let mut client = deadpool_postgres::Object::take(pool.get().await?);
     lock(&client, options).await?;
-    let result = migrate_locked(&mut client, registry, apps, options).await;
+    let result = migrate_locked(&mut client, registry, apps, schedules, options).await;
     // Released explicitly as well, so a caller that keeps going does not wait for the close. A
     // failure here means the connection is gone, and then so is its lock.
     let _ = client
@@ -189,6 +212,7 @@ async fn migrate_locked(
     client: &mut Client,
     registry: &Registry,
     apps: &[AppSpec<'_>],
+    schedules: Option<&[schedule::Declared<'_>]>,
     options: &SyncOptions,
 ) -> Result<MigrateReport, DbError> {
     let migrations = migrate_framework(client, options.dry_run).await?;
@@ -216,6 +240,7 @@ async fn migrate_locked(
             migrations,
             sync: None,
             app_migrations,
+            schedules: Vec::new(),
         });
     }
     let pending = app_migrations::pending(client, apps).await?;
@@ -232,9 +257,14 @@ async fn migrate_locked(
             app_migrations::record(client, app).await?;
         }
     }
+    let schedules = match schedules {
+        Some(declared) => schedule::sync(client, declared, options.dry_run).await?,
+        None => Vec::new(),
+    };
     Ok(MigrateReport {
         migrations,
         sync: Some(sync),
         app_migrations,
+        schedules,
     })
 }

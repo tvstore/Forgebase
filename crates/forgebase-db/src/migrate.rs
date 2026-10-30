@@ -54,6 +54,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "jobs",
         sql: include_str!("../migrations/0005_jobs.sql"),
     },
+    Migration {
+        version: 6,
+        name: "schedules",
+        sql: include_str!("../migrations/0006_schedules.sql"),
+    },
 ];
 
 /// Applies the pending framework migrations and returns them.

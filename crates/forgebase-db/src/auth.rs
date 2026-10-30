@@ -491,8 +491,8 @@ async fn load_user(
 /// outcome is known, so concurrent attempts for one username are serialized and cannot exceed
 /// the limit. The counting is committed even though the login fails. For that this function must
 /// get a pooled client, **not** a caller-owned transaction (see the module documentation).
-/// Rows for unknown usernames are not cleaned up automatically (a later job may delete rows whose
-/// `last_failure_at` and `locked_until` are both older than 15 minutes: ADR 0010).
+/// Rows that no longer matter are deleted by the built-in job `forgebase.purge_login_failures`
+/// ([`purge_login_failures`], ADR 0013).
 ///
 /// **Password change race.** The user row is read with `FOR SHARE` and kept locked until the
 /// session exists, so a concurrent [`set_password`] (or [`set_enabled`]) waits for this login to
@@ -631,6 +631,46 @@ pub async fn validate_session(
         return Ok(None);
     };
     Ok(Some(load_user(client, row.get(0), row.get(1)).await?))
+}
+
+/// Deletes up to `limit` `fb_login_failure` rows that no longer affect a login, and returns how
+/// many it deleted (the built-in job `forgebase.purge_login_failures` calls it until a batch is
+/// not full).
+///
+/// A row still matters while either of these holds, and both are the conditions [`login`] uses
+/// (the same constants): the username is locked (`locked_until > now()`), or its last failure is
+/// within `FAILURE_WINDOW_SECS` (`last_failure_at >= now() - window`, so a failure of exactly
+/// the window ago still counts) and the next failure would be counted with it. Every other row
+/// is deleted: a username that is not locked and whose last failure is older than the window
+/// (or that has none) starts again at one failure, exactly as if it had no row.
+pub async fn purge_login_failures(client: &impl GenericClient, limit: i64) -> Result<u64, DbError> {
+    Ok(client
+        .execute(
+            "DELETE FROM fb_login_failure WHERE username IN ( \
+               SELECT username FROM fb_login_failure \
+               WHERE (locked_until IS NULL OR locked_until <= now()) \
+                 AND (last_failure_at IS NULL \
+                      OR last_failure_at < now() - make_interval(secs => $1::float8)) \
+               LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            &[&FAILURE_WINDOW_SECS, &limit],
+        )
+        .await?)
+}
+
+/// Deletes up to `limit` sessions that [`validate_session`] would refuse as expired, and
+/// returns how many it deleted: `now() >= expires_at` (7 days after login) or `now() >=
+/// last_seen_at + 24 hours` (the same constants). A valid session is kept.
+pub async fn purge_sessions(client: &impl GenericClient, limit: i64) -> Result<u64, DbError> {
+    Ok(client
+        .execute(
+            "DELETE FROM fb_session WHERE token_hash IN ( \
+               SELECT token_hash FROM fb_session \
+               WHERE now() >= expires_at \
+                  OR now() >= last_seen_at + make_interval(secs => $1::float8) \
+               LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            &[&SESSION_IDLE_SECS, &limit],
+        )
+        .await?)
 }
 
 /// Whether `csrf_token` is the CSRF token of the session `session_token`, and that session is
