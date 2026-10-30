@@ -43,16 +43,16 @@ async function fillNewOrder(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: 'New Sales Order' })).toBeFocused();
 
   // The Link field suggests the names of the target DocType as you type.
-  await page.getByLabel('customer').fill('ada');
+  await page.getByLabel('Customer').fill('ada');
   await expect(page.locator(`datalist option[value="${CUSTOMER}"]`)).toHaveCount(1);
-  await page.getByLabel('customer').fill(CUSTOMER);
-  await page.getByLabel('order_date').fill('2026-10-29');
+  await page.getByLabel('Customer').fill(CUSTOMER);
+  await page.getByLabel('Order Date').fill('2026-10-29');
 
   await page.getByRole('button', { name: 'Add row' }).click();
-  await expect(page.getByLabel('description, row 1')).toBeFocused();
-  await page.getByLabel('description, row 1').fill('Widget');
-  await page.getByLabel('qty, row 1').fill('2');
-  await page.getByLabel('rate, row 1').fill('9.50');
+  await expect(page.getByLabel('Description, row 1')).toBeFocused();
+  await page.getByLabel('Description, row 1').fill('Widget');
+  await page.getByLabel('Quantity, row 1').fill('2');
+  await page.getByLabel('Rate, row 1').fill('9.50');
 }
 
 test('login, list, create, edit and submit a sales order; a clerk cannot submit', async ({ page }) => {
@@ -67,26 +67,26 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await fillNewOrder(page);
 
   // A row with a non-integer quantity is refused on its cell, and nothing is created.
-  await page.getByLabel('qty, row 1').fill('1.5');
+  await page.getByLabel('Quantity, row 1').fill('1.5');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByRole('alert')).toContainText('not saved');
-  await expect(page.getByLabel('qty, row 1')).toBeFocused();
-  await expect(page.getByLabel('qty, row 1')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByLabel('Quantity, row 1')).toBeFocused();
+  await expect(page.getByLabel('Quantity, row 1')).toHaveAttribute('aria-invalid', 'true');
   await expect(page.getByText('Enter a whole number.')).toBeVisible();
-  await page.getByLabel('qty, row 1').fill('2');
+  await page.getByLabel('Quantity, row 1').fill('2');
 
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page).toHaveURL(/#\/form\/sales_order\/SO-\d{4}-\d{5}$/);
   const name = decodeURIComponent(page.url().split('/').pop() ?? '');
   await expect(page.getByRole('heading', { name, level: 1 })).toBeFocused();
   await expect(page.locator('.doc-status')).toHaveText('Status: Draft');
-  await expect(page.getByLabel('customer')).toHaveValue(CUSTOMER);
-  await expect(page.getByLabel('rate, row 1')).toHaveValue('9.50');
+  await expect(page.getByLabel('Customer')).toHaveValue(CUSTOMER);
+  await expect(page.getByLabel('Rate, row 1')).toHaveValue('9.50');
   await expect(page.getByRole('button', { name: 'Submit' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible();
 
   // ---- edit: only the changed field is sent ---------------------------------------------
-  await page.getByLabel('remarks').fill('first remark');
+  await page.getByLabel('Remarks').fill('first remark');
   const patch = page.waitForRequest((r) => r.method() === 'PATCH');
   await page.getByRole('button', { name: 'Save' }).click();
   expect(JSON.parse((await patch).postData() ?? '{}')).toEqual({ version: 1, data: { remarks: 'first remark' } });
@@ -94,13 +94,13 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(page.locator('dd', { hasText: /^2$/ })).toBeVisible();
 
   // Unsaved changes are not lost by navigating away: the page asks first.
-  await page.getByLabel('remarks').fill('unsaved remark');
+  await page.getByLabel('Remarks').fill('unsaved remark');
   await page.getByRole('link', { name: 'Home' }).click();
   await expect(page.getByRole('group', { name: 'You have unsaved changes.' })).toBeVisible();
   await page.getByRole('button', { name: 'Stay' }).click();
   await expect(page).toHaveURL(/#\/form\/sales_order\//);
-  await expect(page.getByLabel('remarks')).toHaveValue('unsaved remark');
-  await page.getByLabel('remarks').fill('first remark');
+  await expect(page.getByLabel('Remarks')).toHaveValue('unsaved remark');
+  await page.getByLabel('Remarks').fill('first remark');
 
   // ---- submit ---------------------------------------------------------------------------
   await page.getByRole('button', { name: 'Submit' }).click();
@@ -109,8 +109,8 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Delete' })).toHaveCount(0); // a submitted document cannot be deleted
   // A submitted order edits only its allow_on_submit field; its table is read-only.
-  await expect(page.getByLabel('remarks')).toBeEditable();
-  await expect(page.getByLabel('customer')).not.toBeEditable();
+  await expect(page.getByLabel('Remarks')).toBeEditable();
+  await expect(page.getByLabel('Customer')).not.toBeEditable();
   await expect(page.getByRole('button', { name: 'Add row' })).toHaveCount(0);
   await expectNoSecretsInStorage(page);
 

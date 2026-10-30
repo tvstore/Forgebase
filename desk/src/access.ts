@@ -47,9 +47,11 @@ export function mayChange(ctx: DocContext): boolean {
 /**
  * Whether a field is read-only. A draft is editable by a user who may change it; a submitted
  * document only in its `allow_on_submit` fields (never its tables); a cancelled one not at all;
- * the field that names the document only while it is created (renames are not supported).
+ * the field that names the document only while it is created (renames are not supported). A
+ * `read_only` field of the metadata (computed by the server) is always read-only.
  */
 export function fieldReadOnly(ctx: DocContext, meta: DocTypeMeta, field: FieldMeta): boolean {
+  if (field.read_only) return true;
   if (!mayChange(ctx)) return true;
   if (!ctx.isNew && meta.naming === `field:${field.name}`) return true;
   if (ctx.isNew || ctx.docStatus === 0) return false;

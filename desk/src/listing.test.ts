@@ -19,6 +19,7 @@ const field = (name: string, type: FieldType, extra: Partial<FieldMeta> = {}): F
   required: false,
   unique: false,
   allow_on_submit: false,
+  read_only: false,
   ...extra,
 });
 
@@ -27,6 +28,8 @@ const meta = (fields: FieldMeta[], submittable = false): DocTypeMeta => ({
   label: 'Thing',
   naming: 'random',
   submittable,
+  title_field: null,
+  list_fields: null,
   fields,
   rights: {
     read: 'all', write: 'all', create: 'all', delete: 'all', submit: 'none', cancel: 'none', amend: 'none',

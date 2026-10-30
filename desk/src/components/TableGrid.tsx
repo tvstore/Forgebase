@@ -91,7 +91,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                           field={c}
                           value={row.values[c.name] ?? ''}
                           onChange={(value) => setCell(index, c.name, value)}
-                          readOnly={readOnly}
+                          readOnly={readOnly || c.read_only}
                           invalid={message !== undefined}
                           describedBy={message ? `${cellId}-error` : undefined}
                           ariaLabel={`${c.label}, row ${index + 1}`}

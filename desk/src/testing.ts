@@ -9,6 +9,7 @@ export const field = (name: string, type: FieldType, extra: Partial<FieldMeta> =
   required: false,
   unique: false,
   allow_on_submit: false,
+  read_only: false,
   ...extra,
 });
 
@@ -28,6 +29,8 @@ export const meta = (fields: FieldMeta[], extra: Partial<DocTypeMeta> = {}): Doc
   label: 'Order',
   naming: 'random',
   submittable: false,
+  title_field: null,
+  list_fields: null,
   fields,
   rights: rights({ read: 'all', write: 'all', create: 'all' }),
   ...extra,

@@ -189,7 +189,10 @@ export type Built =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; errors: Errors };
 
-/** One row as JSON; empty controls are left out (the API reads a missing key as no value). */
+/**
+ * One row as JSON; empty controls are left out (the API reads a missing key as no value) and so
+ * are `read_only` columns (the server computes them and refuses a row that carries one).
+ */
 function rowToJson(
   tableName: string,
   rowNumber: number,
@@ -199,6 +202,7 @@ function rowToJson(
 ): Record<string, unknown> {
   const json: Record<string, unknown> = {};
   for (const f of fields) {
+    if (f.read_only) continue; // computed by the server: the server refuses a row that has it
     const result = toJsonValue(f, row.values[f.name] ?? emptyValue(f));
     if (!result.ok) errors[errorKey(tableName, rowNumber, f.name)] = result.error;
     else if (result.value !== null) json[f.name] = result.value;
@@ -212,7 +216,8 @@ function tableToJson(field: FieldMeta, rows: FormRow[], errors: Errors): Record<
 
 /**
  * The request body of a create: every non-empty field and the rows of every Table field. A
- * field the user cannot edit is still sent when it has a value (there is none on a new document).
+ * field the user cannot edit is still sent when it has a value (there is none on a new
+ * document); a `read_only` field never is.
  */
 export function buildCreate(meta: DocTypeMeta, state: FormState): Built {
   const data: Record<string, unknown> = {};
@@ -222,6 +227,7 @@ export function buildCreate(meta: DocTypeMeta, state: FormState): Built {
       data[f.name] = tableToJson(f, state.tables[f.name] ?? [], errors);
       continue;
     }
+    if (f.read_only) continue; // never sent
     const result = toJsonValue(f, state.values[f.name] ?? emptyValue(f));
     if (!result.ok) errors[f.name] = result.error;
     else if (result.value !== null) data[f.name] = result.value;
@@ -247,8 +253,9 @@ export function changedFields(meta: DocTypeMeta, initial: FormState, current: Fo
 }
 
 /**
- * The `data` of a `PATCH`: **only** the fields in `editable` that changed. A changed Table field
- * is sent as all its rows (the server replaces the rows of a table it is given).
+ * The `data` of a `PATCH`: **only** the fields in `editable` that changed, never a `read_only`
+ * one. A changed Table field is sent as all its rows (the server replaces the rows of a table it
+ * is given) without their `read_only` columns.
  */
 export function buildChanges(
   meta: DocTypeMeta,
@@ -260,7 +267,7 @@ export function buildChanges(
   const errors: Errors = {};
   const changed = new Set(changedFields(meta, initial, current));
   for (const f of meta.fields) {
-    if (!changed.has(f.name) || !editable(f)) continue;
+    if (!changed.has(f.name) || !editable(f) || f.read_only) continue;
     if (f.type === 'table') {
       data[f.name] = tableToJson(f, current.tables[f.name] ?? [], errors);
       continue;

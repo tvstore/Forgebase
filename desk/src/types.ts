@@ -38,6 +38,8 @@ export interface FieldMeta {
   required: boolean;
   unique: boolean;
   allow_on_submit: boolean;
+  /** Written only by the server (hooks): shown read-only and never sent. */
+  read_only: boolean;
   max_length?: number;
   precision?: number;
   scale?: number;
@@ -52,6 +54,10 @@ export interface DocTypeMeta {
   label: string;
   naming: string;
   submittable: boolean;
+  /** The field that names a document for a person (not used by the desk yet), or null. */
+  title_field: string | null;
+  /** The columns of the list after `name` (not used by the desk yet), or null for the default. */
+  list_fields: string[] | null;
   fields: FieldMeta[];
   rights: Rights;
 }
