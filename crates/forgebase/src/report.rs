@@ -120,7 +120,7 @@ mod tests {
         let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 4 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n"
+                "framework migrations: 5 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n"
             ),
             "{text}"
         );
@@ -140,7 +140,7 @@ mod tests {
             app_migrations: vec![],
         };
         let text = migrate_report(&report, true, 0);
-        assert!(text.contains("4 pending"), "{text}");
+        assert!(text.contains("5 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 

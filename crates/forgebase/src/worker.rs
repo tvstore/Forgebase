@@ -279,7 +279,7 @@ impl Worker {
                 log(&format!(
                     "{label} failed (attempt {attempt} of {}), retry in {} s: {}",
                     def.options.max_attempts,
-                    after.as_secs(),
+                    after.as_secs_f64(),
                     error.message()
                 ));
                 Ok(Outcome::Retried)
@@ -422,7 +422,7 @@ pub(crate) async fn run_worker(
             let _ = sender.send(true);
             log(&format!(
                 "stopping: running jobs get up to {} s (send the signal again to exit now)",
-                worker.config.grace.as_secs()
+                worker.config.grace.as_secs_f64()
             ));
             tokio::select! {
                 () = &mut finished => {}
@@ -438,4 +438,347 @@ pub(crate) async fn run_worker(
 /// One plain line on standard error, like the other commands of the binary.
 pub(crate) fn log(message: &str) {
     let _ = writeln!(std::io::stderr(), "worker: {message}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    use forgebase_core::document::Document;
+    use forgebase_core::value::Value;
+
+    use super::*;
+    use crate::app::{App, DocTypeFile};
+    use crate::builder::Forgebase;
+    use crate::compose::compose;
+    use crate::jobs::JobFuture;
+    use crate::testing::TestDb;
+
+    const SEEN: &str = "name = \"seen\"\nlabel = \"Seen\"\n[[fields]]\nname = \"job_id\"\ntype = \"data\"\nrequired = true\nunique = true\n";
+
+    /// One handler for all tests; the payload's `kind` says what it does.
+    #[derive(Default)]
+    struct Lab {
+        running: Mutex<HashSet<String>>,
+        clashes: AtomicUsize,
+        runs: AtomicUsize,
+    }
+
+    struct LabJob(Arc<Lab>);
+
+    impl JobHandler for LabJob {
+        fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+            Box::pin(async move {
+                let lab = &self.0;
+                lab.runs.fetch_add(1, Ordering::SeqCst);
+                let id = ctx.id().to_owned();
+                // The same job must never run twice at once.
+                if !lab.running.lock().expect("lock").insert(id.clone()) {
+                    lab.clashes.fetch_add(1, Ordering::SeqCst);
+                }
+                let sleep = ctx.payload()["sleep_ms"].as_u64().unwrap_or(0);
+                let document = Document {
+                    values: [("job_id".to_owned(), Value::Text(id.clone()))].into(),
+                    ..Document::default()
+                };
+                let inserted = ctx.documents().insert("seen", document).await;
+                tokio::time::sleep(Duration::from_millis(sleep)).await;
+                lab.running.lock().expect("lock").remove(&id);
+                inserted.map(drop)
+            })
+        }
+    }
+
+    fn lab_binary(lab: &Arc<Lab>) -> Forgebase {
+        let app = App::new("lab")
+            .doctypes(const { &[DocTypeFile::new("seen.toml", SEEN)] })
+            .job_with(
+                "work",
+                LabJob(Arc::clone(lab)),
+                JobOptions::new().timeout(Duration::from_millis(600)),
+            );
+        Forgebase::new().app(app)
+    }
+
+    fn config(grace: Duration) -> WorkerConfig {
+        WorkerConfig {
+            poll: Duration::from_millis(20),
+            grace,
+            margin: Duration::from_secs(1),
+        }
+    }
+
+    async fn setup(grace: Duration) -> (TestDb, Arc<Lab>, Arc<Worker>) {
+        let lab = Arc::new(Lab::default());
+        let binary = lab_binary(&lab);
+        let db = TestDb::new().await;
+        db.migrate(&binary, false).await.expect("migrate");
+        let composed = compose(&binary.apps, None).expect("composes");
+        let worker = Arc::new(Worker::new(
+            db.pool.clone(),
+            composed.registry,
+            composed.jobs,
+            config(grace),
+        ));
+        (db, lab, worker)
+    }
+
+    async fn enqueue(db: &TestDb, payload: &str) {
+        db.exec(&format!(
+            "INSERT INTO fb_job (id, name, payload, status, enqueued_by) \
+             VALUES (gen_random_uuid(), 'lab.work', '{payload}', 'queued', 'test')"
+        ))
+        .await;
+    }
+
+    async fn one(db: &TestDb, sql: &str) -> Vec<String> {
+        db.rows(sql).await.remove(0)
+    }
+
+    async fn seen(db: &TestDb) -> String {
+        one(db, "SELECT count(*)::text FROM doc_seen")
+            .await
+            .remove(0)
+    }
+
+    #[tokio::test]
+    async fn an_expired_lease_is_recovered_and_the_job_runs() {
+        let (db, lab, worker) = setup(Duration::from_secs(5)).await;
+        // A worker that crashed: running, lease in the past, one attempt used.
+        db.exec(
+            "INSERT INTO fb_job (id, name, payload, status, attempts, locked_by, locked_until, enqueued_by) \
+             VALUES (gen_random_uuid(), 'lab.work', '{}', 'running', 1, 'dead-worker', now() - interval '1 minute', 'test')",
+        )
+        .await;
+        let outcome = worker.run_one("w", &Stop::never()).await.expect("ok");
+        assert_eq!(outcome, Some(Outcome::Done));
+        assert_eq!(lab.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            one(&db, "SELECT status, attempts::text, locked_by FROM fb_job").await,
+            ["done", "2", "w"]
+        );
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_live_lease_is_left_alone_and_exhausted_attempts_are_not_run_again() {
+        let (db, lab, worker) = setup(Duration::from_secs(5)).await;
+        db.exec(
+            "INSERT INTO fb_job (id, name, payload, status, attempts, locked_by, locked_until, enqueued_by) \
+             VALUES (gen_random_uuid(), 'lab.work', '{}', 'running', 1, 'other', now() + interval '1 minute', 'test')",
+        )
+        .await;
+        assert_eq!(worker.run_one("w", &Stop::never()).await.expect("ok"), None);
+
+        // The job already used all 5 attempts (the workers died on each): it is dead, not run.
+        db.exec("UPDATE fb_job SET attempts = 5, locked_until = now() - interval '1 second'")
+            .await;
+        let outcome = worker.run_one("w", &Stop::never()).await.expect("ok");
+        assert_eq!(outcome, Some(Outcome::Dead));
+        assert_eq!(lab.runs.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            one(&db, "SELECT status, attempts::text FROM fb_job").await,
+            ["dead", "6"]
+        );
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_rolls_back_the_handler_and_marks_nothing() {
+        for steal in [
+            "UPDATE fb_job SET locked_by = 'thief'",
+            "UPDATE fb_job SET attempts = attempts + 1",
+        ] {
+            let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
+            enqueue(&db, "{\"sleep_ms\": 500}").await;
+            let monitor = async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                // The handler has inserted its document by now; another session takes the job.
+                db.exec(steal).await;
+            };
+            let stop = Stop::never();
+            let (outcome, ()) = tokio::join!(worker.run_one("w", &stop), monitor);
+            assert_eq!(outcome.expect("ok"), Some(Outcome::LeaseLost), "{steal}");
+            assert_eq!(
+                seen(&db).await,
+                "0",
+                "the handler's insert was rolled back: {steal}"
+            );
+            assert_eq!(
+                one(&db, "SELECT status FROM fb_job").await,
+                ["running"],
+                "not marked done by the old worker: {steal}"
+            );
+            db.cleanup().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_handler_loses_its_connection_instead_of_returning_it_to_the_pool() {
+        let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
+        enqueue(&db, "{\"sleep_ms\": 20000}").await;
+        let database = one(&db, "SELECT current_database()").await.remove(0);
+        // While the handler sleeps its connection is idle in a transaction (it has inserted).
+        let monitor = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            one(
+                &db,
+                &format!(
+                    "SELECT pid::text FROM pg_stat_activity WHERE datname = '{database}' \
+                     AND state = 'idle in transaction'"
+                ),
+            )
+            .await
+            .remove(0)
+        };
+        let stop = Stop::never();
+        let (outcome, pid) = tokio::join!(worker.run_one("w", &stop), monitor);
+        assert_eq!(outcome.expect("ok"), Some(Outcome::Retried));
+        // The backend of the handler is gone: the connection was closed, not pooled.
+        let started = Instant::now();
+        loop {
+            let alive = one(
+                &db,
+                &format!("SELECT count(*)::text FROM pg_stat_activity WHERE pid = {pid}"),
+            )
+            .await
+            .remove(0);
+            if alive == "0" {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the connection is still open"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(seen(&db).await, "0");
+        assert_eq!(
+            one(&db, "SELECT status, attempts::text FROM fb_job").await,
+            ["queued", "1"]
+        );
+        db.cleanup().await;
+    }
+
+    fn signals() -> (mpsc::UnboundedSender<()>, mpsc::UnboundedReceiver<()>) {
+        mpsc::unbounded_channel()
+    }
+
+    #[tokio::test]
+    async fn four_slots_run_200_jobs_exactly_once_each() {
+        let (db, lab, worker) = setup(Duration::from_secs(5)).await;
+        db.exec(
+            "INSERT INTO fb_job (id, name, payload, status, enqueued_by) \
+             SELECT gen_random_uuid(), 'lab.work', jsonb_build_object('sleep_ms', 5, 'n', n), 'queued', 'test' \
+             FROM generate_series(1, 200) AS n",
+        )
+        .await;
+        // Two workers with two slots each, on one pool.
+        let (stop_a, signals_a) = signals();
+        let (stop_b, signals_b) = signals();
+        let a = tokio::spawn(run_worker(Arc::clone(&worker), 2, "a", signals_a));
+        let b = tokio::spawn(run_worker(Arc::clone(&worker), 2, "b", signals_b));
+        let started = Instant::now();
+        loop {
+            let done = one(
+                &db,
+                "SELECT count(*)::text FROM fb_job WHERE status = 'done'",
+            )
+            .await
+            .remove(0);
+            if done == "200" {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "only {done} of 200 jobs are done"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        stop_a.send(()).expect("open");
+        stop_b.send(()).expect("open");
+        a.await.expect("worker a");
+        b.await.expect("worker b");
+        assert_eq!(
+            lab.runs.load(Ordering::SeqCst),
+            200,
+            "every job ran exactly once"
+        );
+        assert_eq!(
+            lab.clashes.load(Ordering::SeqCst),
+            0,
+            "no job ran twice at once"
+        );
+        assert_eq!(
+            one(
+                &db,
+                "SELECT count(*)::text FROM fb_job WHERE attempts <> 1 OR status <> 'done'"
+            )
+            .await,
+            ["0"]
+        );
+        assert_eq!(
+            seen(&db).await,
+            "200",
+            "no unique violation, no lost insert"
+        );
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn the_first_signal_lets_a_running_job_finish_within_the_grace_period() {
+        let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
+        enqueue(&db, "{\"sleep_ms\": 400}").await;
+        let (stop, receiver) = signals();
+        let running = tokio::spawn(run_worker(worker, 1, "w", receiver));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stop.send(()).expect("open");
+        running.await.expect("worker");
+        assert_eq!(
+            one(&db, "SELECT status, attempts::text FROM fb_job").await,
+            ["done", "1"]
+        );
+        assert_eq!(seen(&db).await, "1");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_job_still_running_after_the_grace_period_is_released() {
+        let (db, _lab, worker) = setup(Duration::from_millis(200)).await;
+        // The job's own timeout is 600 ms, longer than the grace period.
+        enqueue(&db, "{\"sleep_ms\": 20000}").await;
+        let (stop, receiver) = signals();
+        let running = tokio::spawn(run_worker(worker, 1, "w", receiver));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        stop.send(()).expect("open");
+        let started = Instant::now();
+        running.await.expect("worker");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            one(&db, "SELECT status, attempts::text, (locked_by IS NULL)::text, (locked_until IS NULL)::text FROM fb_job").await,
+            ["queued", "0", "true", "true"]
+        );
+        assert_eq!(seen(&db).await, "0", "the aborted attempt was rolled back");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_second_signal_exits_at_once_and_the_lease_covers_the_job() {
+        let (db, _lab, worker) = setup(Duration::from_secs(60)).await;
+        enqueue(&db, "{\"sleep_ms\": 20000}").await;
+        let (stop, receiver) = signals();
+        let running = tokio::spawn(run_worker(worker, 1, "w", receiver));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        stop.send(()).expect("open");
+        stop.send(()).expect("open");
+        let started = Instant::now();
+        running.await.expect("worker");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Nobody released it: it is still running, with a lease that will expire.
+        assert_eq!(one(&db, "SELECT status FROM fb_job").await, ["running"]);
+        db.cleanup().await;
+    }
 }

@@ -1,6 +1,6 @@
 # 0012 App model and public API boundary
 
-- Status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
+- Status: Accepted. Public surface extended by M6.1 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
 - Date: 2026-10-29
 
 ## Context
@@ -32,6 +32,21 @@ The decisions below are the owner's (M5 plan v2, 2026-10-29).
 | `testing` (feature `testing`): `TestDb`, `HttpClient`, `Reply`, `Migrated`, `AppliedMigration` (`new`; the last three are `#[non_exhaustive]`), `MigrateError`, `PASSWORD`, `assert_doctypes_listed`, `Json`, `json!`, `serde_json` | Helpers for tests of an app. |
 
 Nothing else is public. The stock `forgebase` binary is `Forgebase::new().run()`: no apps, DocTypes from `--doctypes DIR`.
+
+### Public surface update (M6.1)
+
+[ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md) (the M6 plan, owner decisions of 2026-10-30) adds these items to the crate root of `forgebase`. Nothing else becomes public; the existing items are unchanged except `HookContext`, which gets two methods.
+
+| Item | Purpose |
+|---|---|
+| `App::job(name, impl JobHandler + 'static)`, `App::job_with(name, handler, JobOptions)` | Register a background job; its full name is `<app>.<name>`. An invalid or duplicate name and invalid options are startup errors. |
+| `JobHandler` (`run`), `JobFuture` | What a job implements: a boxed `Send` future (no async-trait crate). |
+| `JobContext` (`name`, `id`, `attempt`, `payload`, `enqueue`, `documents`; `#[non_exhaustive]`, no public fields) | What a running job knows and may do, inside the job's transaction. |
+| `Documents` (`get`, `list`, `insert`, `update`, `delete`, `submit`, `cancel`, `amend`), `StoredDocument` (`name`, `version`, `docstatus`, `document`; `#[non_exhaustive]`), `ListQuery` (`new`, `filter`, `order_by`, `limit`; `#[non_exhaustive]`), `FilterOp` (`Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`, `Like`; `#[non_exhaustive]`) | The documents handle of a job (the system context, actor `job:<app>.<job>`). They wrap the types of `forgebase-db`, which are not re-exported. |
+| `JobError` (`new`, `permanent`, `is_permanent`, `message`), `JobOptions` (`new`, `max_attempts`, `timeout`, `backoff`; `#[non_exhaustive]`) | A job's failure (retryable or permanent) and its options (5 attempts, 30 s doubling to 1 h, 5 min timeout). |
+| `HookContext::enqueue(name, payload)`, `HookContext::with_jobs(&EnqueuedJobs)`, `EnqueuedJobs` (`new`, `take`; `#[non_exhaustive]`), `EnqueuedJob` (`name`, `payload`; `#[non_exhaustive]`) | A hook asks for a job, written with the document change (the outbox). `with_jobs` lets an app's unit test see what a hook enqueued. `HookContext` stays `Copy`. |
+| `serde_json` (the crate), `Changes`, `DocStatus` | The payload type, re-exported so an app uses the same version as the framework; `Changes` and `DocStatus` are what `Documents` takes and returns (`Changes` was already the argument of `update`). |
+| `testing::run_jobs(&Forgebase, &TestDb) -> JobRun` (`done`, `retried`, `dead`; `#[non_exhaustive]`) | Runs the jobs that are due with the worker's own code. |
 
 ## Implementation details (M5.1)
 

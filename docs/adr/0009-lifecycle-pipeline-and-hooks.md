@@ -1,6 +1,6 @@
 # 0009 Lifecycle pipeline and hooks
 
-- Status: Accepted
+- Status: Accepted. Extended by [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md) (2026-10-30): hooks may enqueue jobs into the transactional outbox; they still have no database access.
 - Date: 2026-10-28 (owner decisions and implementation details separated on 2026-10-29, per owner instruction)
 
 ## Context

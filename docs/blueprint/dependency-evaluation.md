@@ -267,6 +267,8 @@ Hashing of tokens needs no crate: SHA-256 is computed by PostgreSQL (`sha256(con
 
 **Recommendation (Proposed):** custom Postgres `SKIP LOCKED` queue (few hundred lines, no new dependencies) with retries, backoff and a lease timeout.
 
+**Decision (M6.1, [ADR 0013](../adr/0013-jobs-scheduler-and-transactional-outbox.md)): done as recommended, with no new package.** `serde_json` 1.0.154 (`std`, the workspace entry), already a dependency of `forgebase`, is now also a direct dependency of `forgebase-core` (the payload of `HookContext::enqueue`) and `forgebase-db` (reading and writing payloads); it is the same package and version, so `Cargo.lock` gains only the dependency edges, and `forgebase` re-exports it as `forgebase::serde_json` so apps use that version. The payload is bound to PostgreSQL as text and cast to `jsonb` in SQL, so the `with-serde_json-1` feature of `tokio-postgres` is not needed. The `tokio` features `signal`, `sync` and `time` of `forgebase` were already enabled; `tokio::task` and `watch` (the worker) need no further feature. `deadpool-postgres` is used for `Object::take` (closing a connection instead of pooling it) and a pool size, as `migrate_apps` already does.
+
 ### 10. Configuration
 
 | Option | Weight | Notes |

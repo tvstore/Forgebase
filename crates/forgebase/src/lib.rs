@@ -40,6 +40,15 @@
 //! - **Startup errors.** All of the above is checked before anything runs; every problem is
 //!   reported together ([`StartupError`], exit code 1).
 //!
+//! # Background jobs
+//!
+//! An app registers jobs with [`App::job`]; a hook ([`HookContext::enqueue`]), another job
+//! ([`JobContext::enqueue`]) or `forgebase job enqueue` enqueues them, and `forgebase worker`
+//! runs them. A job runs in one database transaction together with its completion, with a
+//! documents API as the system context ([`JobContext::documents`]); delivery is at-least-once.
+//! A hook's jobs are written in the same transaction as the document change (the transactional
+//! outbox). See [`JobHandler`] for the rules and ADR 0013.
+//!
 //! # The binary
 //!
 //! `forgebase [OPTIONS] COMMAND`: `migrate` (framework migrations, DocType schema sync and app
@@ -47,7 +56,8 @@
 //! `amend` of documents; `update`, `delete`, `submit`, `cancel` and `amend` need `--version`),
 //! `user` (`create`, `set-password`, `add-role`, `remove-role`, `disable`, `enable`; passwords
 //! come from standard input), `token` (`create`, `revoke`), `serve` (the HTTP API; no
-//! migrations) and `new-app` (writes a new app crate that builds and passes its tests; needs no
+//! migrations), `worker` (runs background jobs until Ctrl-C or SIGTERM), `job` (`list`, `show`,
+//! `retry` and `enqueue`; the command line is the only interface to jobs) and `new-app` (writes a new app crate that builds and passes its tests; needs no
 //! database, see `docs/guide/first-app.md`). Configuration comes from `FORGEBASE_DATABASE_URL`, and for `serve` from
 //! `FORGEBASE_LISTEN`, `FORGEBASE_ALLOWED_HOSTS`, `FORGEBASE_DEV_INSECURE_COOKIES` and
 //! `FORGEBASE_DESK_DIR`.
@@ -64,8 +74,8 @@
 //! # Tests of an app
 //!
 //! With the `testing` cargo feature (enable it in `[dev-dependencies]`), the `testing` module
-//! gives a throwaway PostgreSQL database, an in-process HTTP client and a guard that finds a
-//! DocType file missing from the embedded list.
+//! gives a throwaway PostgreSQL database, an in-process HTTP client, `run_jobs` (runs the jobs
+//! that are due) and a guard that finds a DocType file missing from the embedded list.
 
 mod app;
 mod args;

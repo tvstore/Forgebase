@@ -283,12 +283,13 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 4 pending"), "{text}");
+    assert!(text.contains("framework migrations: 5 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
             && text.contains("0003 auth")
-            && text.contains("0004 apps"),
+            && text.contains("0004 apps")
+            && text.contains("0005 jobs"),
         "{text}"
     );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
@@ -323,7 +324,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 4 applied"), "{text}");
+    assert!(text.contains("framework migrations: 5 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -1758,4 +1759,35 @@ fn serve_serves_the_desk_only_when_configured() {
     );
     assert!(!stderr(&output).contains(&db.url), "{}", stderr(&output));
     let _ = std::fs::remove_dir_all(&desk);
+}
+
+#[test]
+fn the_worker_of_a_binary_without_jobs_says_so_and_job_commands_need_the_database() {
+    let db = TestDb::new();
+    // The stock binary has no apps, so no jobs: the worker refuses to start (no database work).
+    let output = db.forgebase(&["worker", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&output), Some(1));
+    assert!(
+        stderr(&output).starts_with("error: this binary has no jobs"),
+        "{}",
+        stderr(&output)
+    );
+    // A job name is checked against the binary's jobs: here there are none.
+    let output = db.forgebase(&["job", "enqueue", "crm.welcome"]);
+    assert_eq!(code(&output), Some(1));
+    // (the database has no framework tables yet, so that is the error shown first)
+    assert!(
+        stderr(&output).starts_with("error: "),
+        "{}",
+        stderr(&output)
+    );
+    // Usage errors are exit code 2.
+    assert_eq!(
+        code(&db.forgebase(&["worker", "--doctypes", DOCTYPES, "--concurrency", "0"])),
+        Some(2)
+    );
+    assert_eq!(
+        code(&db.forgebase(&["worker", "--doctypes", DOCTYPES, "--concurrency", "65"])),
+        Some(2)
+    );
 }
