@@ -304,7 +304,7 @@ async fn submit(env: &Env, name: &str) -> forgebase::testing::Reply {
 }
 
 async fn job_names(db: &TestDb) -> Vec<String> {
-    db.rows("SELECT name FROM fb_job ORDER BY name")
+    db.rows("SELECT name FROM fb_job ORDER BY name COLLATE \"C\"")
         .await
         .into_iter()
         .flatten()
@@ -402,6 +402,8 @@ async fn an_order_without_a_date_gets_no_visit() {
 
 #[tokio::test]
 async fn a_refused_submit_leaves_no_job_of_either_app() {
+    // The refusal happens before any job is collected. "Collected, then refused" is covered by
+    // the framework test `forgebase-db/tests/jobs.rs::a_later_rejecting_hook_leaves_no_job`.
     let env = env().await;
     // Every save needs a total of 10.00, so a small order cannot be saved. Make the stored
     // order small behind the API's back (a row edited by hand, as after a bad import): the

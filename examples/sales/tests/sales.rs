@@ -255,7 +255,7 @@ async fn the_migration_creates_the_groups_once() {
         forgebase::testing::AppliedMigration::new("sales", 1, "default_customer_groups")
     );
     let groups = db
-        .rows("SELECT name, title, owner, version::text FROM doc_customer_group ORDER BY name")
+        .rows("SELECT name, title, owner, version::text FROM doc_customer_group ORDER BY name COLLATE \"C\"")
         .await;
     assert_eq!(
         groups,
@@ -529,7 +529,7 @@ async fn a_submit_and_a_cancel_are_logged_by_a_job() {
     assert_eq!(run.done(), 1);
     let events = env
         .db
-        .rows("SELECT event FROM doc_sales_order_log ORDER BY event")
+        .rows("SELECT event FROM doc_sales_order_log ORDER BY event COLLATE \"C\"")
         .await;
     assert_eq!(events, [["cancelled"], ["submitted"]]);
     env.db.cleanup().await;
@@ -560,6 +560,8 @@ async fn a_job_delivered_twice_logs_once() {
 
 #[tokio::test]
 async fn a_refused_submit_leaves_no_job() {
+    // The refusal happens before any job is collected. "Collected, then refused" is covered by
+    // the framework test `forgebase-db/tests/jobs.rs::a_later_rejecting_hook_leaves_no_job`.
     let env = env().await;
     customer(&env.manager).await;
     // The rule "an order needs items" refuses this submit.
@@ -595,7 +597,7 @@ async fn a_job_for_a_missing_order_is_dead_at_once() {
     assert_eq!((run.done(), run.retried(), run.dead()), (0, 0, 2));
     let errors = env
         .db
-        .rows("SELECT attempts::text, last_error FROM fb_job ORDER BY last_error")
+        .rows("SELECT attempts::text, last_error FROM fb_job ORDER BY last_error COLLATE \"C\"")
         .await;
     assert_eq!(errors.len(), 2);
     assert!(errors.iter().all(|row| row[0] == "1"), "{errors:?}");

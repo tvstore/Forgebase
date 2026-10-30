@@ -172,19 +172,22 @@ impl JobHandler for LogOrderEvent {
             let key = format!("{order}-{event}");
             let mut documents = ctx.documents();
 
-            // Idempotency: the work was done by an earlier run of this job.
+            // Idempotency: the work was done by an earlier run of this job. This check keeps the
+            // normal path quiet; the unique key and the re-check after a failed insert (below)
+            // cover two deliveries at the same moment.
             if documents.get("sales_order_log", &key).await?.is_some() {
                 return Ok(());
             }
             let Some(stored) = documents.get("sales_order", &order).await? else {
-                // The order is gone (a draft can be deleted; a submitted one is not logged).
+                // The order is gone (only a draft can be deleted: a submitted or cancelled order that has a log cannot, because of the Link).
                 return Err(JobError::permanent(format!(
                     "the sales order {order} does not exist"
                 )));
             };
 
             let mut log = Document::default();
-            log.values.insert("key".to_owned(), Value::Text(key));
+            log.values
+                .insert("key".to_owned(), Value::Text(key.clone()));
             log.values
                 .insert("sales_order".to_owned(), Value::Text(order));
             log.values.insert("event".to_owned(), Value::Text(event));
@@ -194,21 +197,38 @@ impl JobHandler for LogOrderEvent {
             // Runs as the system context with the actor `job:sales.log_order_event`: that is the
             // log's `owner` and `modified_by`. A refusal here (`?`) is a permanent `JobError`;
             // a database error is retried.
-            documents.insert("sales_order_log", log).await?;
+            if let Err(error) = documents.insert("sales_order_log", log).await {
+                // Two deliveries at the same moment: the other one committed the same key first
+                // and the unique name refused this insert (a unique violation is a permanent
+                // `JobError`, which cannot be told apart from other refusals). The failed insert
+                // ran in a savepoint, so the transaction is usable: if the log exists now, the
+                // work is done.
+                return match documents.get("sales_order_log", &key).await {
+                    Ok(Some(_)) => Ok(()),
+                    _ => Err(error),
+                };
+            }
             Ok(())
         })
     }
 }
 
-/// The most orders one daily summary counts. An example's limit, see [`DailySummary`].
-const MAX_ORDERS_PER_DAY: usize = 499;
+/// The page `Documents::list` returns at most.
+const PAGE: u32 = 500;
+/// The most orders one daily summary counts (one less than a page, so a full page means "more").
+/// An example's limit, see [`DailySummary`].
+const MAX_ORDERS_PER_DAY: usize = (PAGE - 1) as usize;
 
 /// Writes the `sales_daily_summary` of the **day before** the tick: how many orders were
 /// submitted with that `order_date`, and their total. The schedule (`daily_at(2, 0)`) gives it
 /// the payload `{"scheduled_for": "<the tick, RFC 3339 UTC>"}`.
 ///
 /// Idempotent: the summary is named by its day, so a run that finds it does nothing. That also
-/// covers a tick enqueued twice by an operator (`forgebase job enqueue`).
+/// covers a tick enqueued twice by an operator (`forgebase job enqueue`). Two runs at the same
+/// moment: the unique name refuses the second insert, and the handler then finds the summary and
+/// succeeds.
+///
+/// The summary is a snapshot: an order submitted later with a past `order_date` is not counted.
 ///
 /// **Limit of this example.** `Documents::list` returns one page of at most 500 documents and
 /// has no offset, so the example counts up to [`MAX_ORDERS_PER_DAY`] orders and fails
@@ -239,7 +259,7 @@ impl JobHandler for DailySummary {
             let query = ListQuery::new()
                 .filter("order_date", FilterOp::Eq, Value::Date(day))
                 .filter("docstatus", FilterOp::Eq, Value::Int(1))
-                .limit(u32::try_from(MAX_ORDERS_PER_DAY + 1).unwrap_or(500));
+                .limit(PAGE);
             let orders = documents.list("sales_order", &query).await?;
             if orders.len() > MAX_ORDERS_PER_DAY {
                 return Err(JobError::permanent(format!(
@@ -258,7 +278,9 @@ impl JobHandler for DailySummary {
             total.rescale(2);
 
             let mut summary = Document::default();
-            summary.values.insert("day".to_owned(), Value::Text(key));
+            summary
+                .values
+                .insert("day".to_owned(), Value::Text(key.clone()));
             summary.values.insert(
                 "orders".to_owned(),
                 Value::Int(i64::try_from(orders.len()).unwrap_or(i64::MAX)),
@@ -266,7 +288,14 @@ impl JobHandler for DailySummary {
             summary
                 .values
                 .insert("total".to_owned(), Value::Decimal(total));
-            documents.insert("sales_daily_summary", summary).await?;
+            if let Err(error) = documents.insert("sales_daily_summary", summary).await {
+                // Another delivery committed this day first (the unique name refused the
+                // insert, in a savepoint): the summary exists, so the work is done.
+                return match documents.get("sales_daily_summary", &key).await {
+                    Ok(Some(_)) => Ok(()),
+                    _ => Err(error),
+                };
+            }
             Ok(())
         })
     }

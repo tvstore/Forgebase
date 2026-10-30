@@ -94,8 +94,9 @@ const FOLLOW_UP_DAYS: i32 = 7;
 ///   `order_date`** gets no visit: the job ends `done` having done nothing.
 /// - **Idempotent.** Delivery is at-least-once, so the visit remembers its order in
 ///   `source_order` (unique), and the job looks for it first. If two copies of the job ran at the
-///   very same moment, the unique field would make the second one fail and roll back instead of
-///   planning two visits.
+///   very same moment, the unique field refuses the second insert; the job then looks again, finds
+///   the other's visit and succeeds, so there are never two visits. The look-up before the insert
+///   only keeps the normal path quiet.
 struct PlanFollowUpVisit;
 
 impl JobHandler for PlanFollowUpVisit {
@@ -149,7 +150,15 @@ impl JobHandler for PlanFollowUpVisit {
             visit
                 .values
                 .insert("source_order".to_owned(), Value::Text(order));
-            documents.insert("customer_visit", visit).await?;
+            if let Err(error) = documents.insert("customer_visit", visit).await {
+                // Two deliveries at the same moment: the other committed this order's visit
+                // first and the unique `source_order` refused this insert (in a savepoint, so
+                // the transaction is usable). Look again: if the visit exists, the work is done.
+                return match documents.list("customer_visit", &existing).await {
+                    Ok(found) if !found.is_empty() => Ok(()),
+                    _ => Err(error),
+                };
+            }
             Ok(())
         })
     }

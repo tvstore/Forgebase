@@ -4,7 +4,8 @@
 name = "sales_order_log"
 label = "Sales Order Log"
 # The key `<order>-<event>` (for example `SO-2026-00001-submitted`) is the name. It is unique, so a job that runs twice cannot
-# write a second row for the same event: the database enforces the idempotency, the job only checks first to stay quiet.
+# write a second row for the same event. The job checks first, which keeps the normal path quiet; if two deliveries run at the
+# same moment, the unique key refuses the second insert and the job looks again and finds the row, so it succeeds.
 naming = { field = "key" }
 
 [[fields]]

@@ -279,7 +279,7 @@ fn before_cancel(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), Hoo
 
 `json!` is `forgebase::serde_json::json`. Never put a secret in a payload: it is stored in clear text. In a test, a hook needs a collector, or `enqueue` fails: `HookContext::new(..).with_jobs(&jobs)`, then `jobs.take()` lists what was enqueued (`EnqueuedJobs`).
 
-**Be idempotent.** Delivery is **at least once**: a job can run twice (a worker crash, an operator's `job enqueue`). Everything the handler does to the database is atomic with the job's completion, but make the handler safe to repeat anyway, and any effect outside the database (an email) must be. Two ways from the examples: a row whose name is the idempotency key, looked up first (`get("sales_order_log", "<order>-<event>")`; the unique name also protects against two runs at the same moment), and a field that remembers the source (`customer_visit.source_order`, looked up with a `list` filter). `ctx.id()` (the same for every attempt) and `ctx.attempt()` are there for effects that need a key or a log line.
+**Be idempotent.** Delivery is **at least once**: a job can run twice (a worker crash, an operator's `job enqueue`). Everything the handler does to the database is atomic with the job's completion, but make the handler safe to repeat anyway, and any effect outside the database (an email) must be. Two ways from the examples: a row whose name is the idempotency key, looked up first (`get("sales_order_log", "<order>-<event>")`, which keeps the normal path quiet; for two runs at the same moment the unique name refuses the second insert, a failed insert runs in a savepoint so the transaction stays usable, and the handler looks again after it and returns `Ok` if the row now exists: a unique violation is a permanent `JobError`, so check for the row rather than for the error), and a field that remembers the source (`customer_visit.source_order`, looked up with a `list` filter). `ctx.id()` (the same for every attempt) and `ctx.attempt()` are there for effects that need a key or a log line.
 
 **Read and write documents.** `ctx.documents()` offers `get`, `list`, `insert`, `update`, `delete`, `submit`, `cancel` and `amend`. It runs as the **system context** (no permission rules) with the actor `job:<app>.<job>`, which becomes the `owner` and `modified_by` of what the job writes. Validation and hooks run as usual, each write is a savepoint, and everything commits or rolls back with the job. `list` returns one page of at most 500 documents and has no offset.
 
@@ -304,14 +304,14 @@ cargo run -p sales -- job list --status dead  # job show <id>, job retry <id>, j
 
 **Test it.** With the `testing` feature: `run_jobs(&binary, &db).await` runs every due job with the worker's own code and returns how many ended `done`, `retried` or `dead`; jobs that hooks and other jobs enqueue run too. `run_schedules_at(&binary, &db, time).await` enqueues the schedules that are due at `time` (read `next_run_at` from `fb_schedule` with `TestDb::rows`, and use `OffsetDateTime::from_unix_timestamp`), and `run_jobs` then runs them. To test delivery twice, copy a job row with `TestDb::exec` (`INSERT INTO fb_job ... SELECT ... FROM fb_job`) and run again. A job that is retried is queued again after its backoff, so `run_jobs` does not run it again in the same call. The tests of `sales` and `sales_extension` show each of these.
 
-**Common errors.** Both are startup errors, reported with the other mistakes of the app before any command runs:
+**Common errors.** A schedule for a job the app did not register is a startup error, reported with the other mistakes of the app before any command runs:
 
 ```
 error: invalid app setup:
   - app `sales`: schedule for job `daily_sumary`, which `sales` did not register (register it with App::job first; an app schedules only its own jobs)
 ```
 
-An unknown job name in `ctx.enqueue` is not found at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
+An unknown job name in `ctx.enqueue` is found at run time, not at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
 
 ## The public API boundary
 
