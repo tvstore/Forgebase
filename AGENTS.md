@@ -91,6 +91,7 @@ Keep Plan, Doing and Review separate. Do not rely on the implementing agent to d
 | [docs/blueprint/](docs/blueprint/) | `vision`, `feature-matrix`, `architecture`, `dependency-evaluation`, `security-model`, `milestones`, `maintenance-policy` |
 | [docs/guide/](docs/guide/first-app.md) | Guides for people who build on Forgebase (first app) |
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records |
+| [docs/owner-decisions.md](docs/owner-decisions.md) | The owner's decisions, comments and way of thinking, with links to the detailed records; read before planning, keep current |
 
 Do not duplicate content across documents; link instead.
 
@@ -104,6 +105,8 @@ Do not duplicate content across documents; link instead.
 ## 8. Final Rule
 
 If implementation speed conflicts with long-term maintainability, choose maintainability. If an important decision is unclear, ask a question or present concrete options. Do not guess and then implement.
+
+Every decision or comment the owner gives is recorded in [docs/owner-decisions.md](docs/owner-decisions.md) (rules at the top of that file). Read it before planning: it is the best guide to what the owner would decide.
 
 ## 9. Model Selection Policy
 
