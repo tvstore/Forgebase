@@ -144,6 +144,7 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
 
 ## M8 Workflow and reports
 
+- **Status:** In progress. The owner approved the M8 plan on 2026-10-30 ("oke setuju semua dengan plan mu"); M8 is split into M8.1 to M8.5 (owner decision 10). **M8.1, the workflow engine, is delivered by this pull request** ([ADR 0015](../adr/0015-workflow-states-and-transitions.md), owner decisions 1 to 5): `[workflow]` in the DocType file and its validation, the column `workflow_state`, migration 0008 (`fb_workflow_log`), `forgebase_db::transition`, `available_transitions` and `history`, the `before_transition` hook, plain submit and cancel refused on a workflow DocType, `edit_roles`, the backfill in `migrate`, the routes `POST .../transition`, `GET .../transitions` and `GET .../history`, the workflow in the DocType metadata, and `forgebase doc transition`. Tests: `forgebase-core` unit tests (every load error, `transition_access`), `forgebase-db/tests/workflow.rs` (authorization matrix, the four moves, the hook order, atomicity, backfill), `forgebase-http/tests/workflow.rs`, `forgebase/tests/cli.rs`. M8.2 (the desk: state badge, action buttons, history) and M8.3 to M8.5 follow, each with its own owner-approved step of the plan; M8.5 writes the guide section.
 - **Scope:** per-DocType workflow mapped onto docstatus; saved list views and read-only reports ([architecture, section 11](architecture.md#11-desk-reports-workflow)). Capability 8.
 - **Exit criteria:** (to be set in the M8 plan).
 - **Non-goals:** script reports, Server Scripts.

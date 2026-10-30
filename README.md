@@ -16,7 +16,7 @@ Forgebase is a Rust framework for building business applications, inspired by th
 
 ## Status
 
-**M0 Foundations, M1 Metadata and storage, M2 Relationships and lifecycle, M3 Auth, permissions and REST API and M4 Minimal Desk are done** (M4.1: the metadata API, the `desk/` React app with login, home and list view, served by `forgebase serve`; M4.2: the form view with Submit, Cancel, Amend and Delete, and one Playwright smoke test in CI) (M1.1: DocType metadata model and document validation in `forgebase-core`; M1.2: PostgreSQL pool, framework migrations and additive schema sync in `forgebase-db`; M1.3: document insert/get/update/delete in `forgebase-db` and the `forgebase` command-line tool). M2 was delivered in four PRs: M2.1 adds Link fields (foreign keys) and optimistic concurrency (`update` and `delete` need the expected version); M2.2 adds child tables (Table fields: rows saved with their parent in one transaction); M2.3 adds the lifecycle pipeline and hooks (`DocTypeHooks`, registered by the app; see ADR 0009); M2.4 adds docstatus (`submittable` DocTypes with `submit`, `cancel` and `amend`) and naming series (counters gapless per prefix). M3 was delivered in three PRs: M3.1 adds users, roles, Argon2id passwords, server-side sessions, API tokens and login lockout (`forgebase_db::auth`, ADR 0010) and the `forgebase user` and `forgebase token` commands; M3.2 adds role permissions (`[[permissions]]` in the DocType file, enforced in every document operation, deny by default; ADR 0011) and the list query (`forgebase_db::list`, `forgebase doc list`); M3.3 adds the HTTP API (`forgebase serve`: `/api/v1/resource`, login and logout, cookie sessions with CSRF protection, API tokens, `Host` validation, no CORS). M5 (app model and developer experience) is in progress: **M5.1** adds the app model (the entry crate is now called `forgebase`, a library and the `forgebase` binary; apps are plain Rust crates built from `forgebase::App` and listed in order in the binary's `main`; embedded DocTypes, hooks across apps, SQL data migrations per app, `forgebase::testing`; ADR 0012); **M5.2** adds `forgebase new-app` (generates an app crate that builds and passes its own tests, checked by the CI job `app-template`) and the [first-app guide](docs/guide/first-app.md); example apps follow in M5.3. M6 (jobs and scheduler) is in progress: **M6.1** adds background jobs (a Postgres queue, `forgebase worker`, `forgebase job`, the transactional outbox for hooks; ADR 0013); **M6.2** adds the scheduler (`App::schedule`: every N minutes, daily or weekly, UTC) and the built-in clean-up jobs; the example apps follow in M6.3. **M7 (site management) is done:** M7.1 adds sites, a database per site, the `forgebase.toml` config file and `Host` routing (see [Sites](#sites) and ADR 0014); M7.2 adds the apps installed per site, `forgebase site list` and `forgebase site create`; M7.3 adds `forgebase site backup` and `forgebase site restore`, the [operations guide](docs/guide/operations.md) and the CI job `sites`, which completes M7. The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
+**M0 Foundations, M1 Metadata and storage, M2 Relationships and lifecycle, M3 Auth, permissions and REST API and M4 Minimal Desk are done** (M4.1: the metadata API, the `desk/` React app with login, home and list view, served by `forgebase serve`; M4.2: the form view with Submit, Cancel, Amend and Delete, and one Playwright smoke test in CI) (M1.1: DocType metadata model and document validation in `forgebase-core`; M1.2: PostgreSQL pool, framework migrations and additive schema sync in `forgebase-db`; M1.3: document insert/get/update/delete in `forgebase-db` and the `forgebase` command-line tool). M2 was delivered in four PRs: M2.1 adds Link fields (foreign keys) and optimistic concurrency (`update` and `delete` need the expected version); M2.2 adds child tables (Table fields: rows saved with their parent in one transaction); M2.3 adds the lifecycle pipeline and hooks (`DocTypeHooks`, registered by the app; see ADR 0009); M2.4 adds docstatus (`submittable` DocTypes with `submit`, `cancel` and `amend`) and naming series (counters gapless per prefix). M3 was delivered in three PRs: M3.1 adds users, roles, Argon2id passwords, server-side sessions, API tokens and login lockout (`forgebase_db::auth`, ADR 0010) and the `forgebase user` and `forgebase token` commands; M3.2 adds role permissions (`[[permissions]]` in the DocType file, enforced in every document operation, deny by default; ADR 0011) and the list query (`forgebase_db::list`, `forgebase doc list`); M3.3 adds the HTTP API (`forgebase serve`: `/api/v1/resource`, login and logout, cookie sessions with CSRF protection, API tokens, `Host` validation, no CORS). M5 (app model and developer experience) is in progress: **M5.1** adds the app model (the entry crate is now called `forgebase`, a library and the `forgebase` binary; apps are plain Rust crates built from `forgebase::App` and listed in order in the binary's `main`; embedded DocTypes, hooks across apps, SQL data migrations per app, `forgebase::testing`; ADR 0012); **M5.2** adds `forgebase new-app` (generates an app crate that builds and passes its own tests, checked by the CI job `app-template`) and the [first-app guide](docs/guide/first-app.md); example apps follow in M5.3. M6 (jobs and scheduler) is in progress: **M6.1** adds background jobs (a Postgres queue, `forgebase worker`, `forgebase job`, the transactional outbox for hooks; ADR 0013); **M6.2** adds the scheduler (`App::schedule`: every N minutes, daily or weekly, UTC) and the built-in clean-up jobs; the example apps follow in M6.3. **M7 (site management) is done:** M7.1 adds sites, a database per site, the `forgebase.toml` config file and `Host` routing (see [Sites](#sites) and ADR 0014); M7.2 adds the apps installed per site, `forgebase site list` and `forgebase site create`; M7.3 adds `forgebase site backup` and `forgebase site restore`, the [operations guide](docs/guide/operations.md) and the CI job `sites`, which completes M7. M8 (workflow and reports) is in progress: **M8.1** adds the workflow engine (`[workflow]` in the DocType file, transitions with a role and a right, the `before_transition` hook, a transition log; ADR 0015); the desk part follows in M8.2. The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
 
 The repository is currently **private**. It is intended to be open source under the MIT license; it is not open source yet.
 
@@ -160,6 +160,43 @@ cargo run -p sales -- doc list customer \
 ### Permissions
 
 A DocType file can list `[[permissions]]` (see [sales_order.toml](examples/sales/doctypes/sales_order.toml)): a `role`, the rights it grants (`read`, `write`, `create`, `delete`, `submit`, `cancel`, `amend`) and optionally `if_owner = true` (the rights then apply to documents the user owns only). A user may do what any of their roles grants; the role `Administrator` may do everything; **a DocType without rules is closed to everyone else**. Child rows follow their parent. The rules are enforced by `forgebase-db` in every operation (`insert`, `get`, `update`, `delete`, `submit`, `cancel`, `amend`, `list`), which take a `Caller`: a user with roles (`AuthUser::caller()`), or the trusted system context. A document a user is not allowed to read is treated as if it did not exist (`get`, `list`, updates, links, errors), with the known limits listed in [ADR 0011](docs/adr/0011-permission-model-phase-1.md). The `forgebase doc` commands run as the system context; the rules apply to real users of the [HTTP API](#http-api) (and to Rust code that calls `forgebase_db` with `Caller::user(...)`). See [ADR 0011](docs/adr/0011-permission-model-phase-1.md) and the [security model](docs/blueprint/security-model.md).
+
+### Workflow
+
+A DocType can have a **workflow** (M8.1, [ADR 0015](docs/adr/0015-workflow-states-and-transitions.md)): states, each with a docstatus, and transitions between them, written by the app in the DocType file. The first state is the initial one. A transition needs one of its `roles` **and** the right its move needs (`write` for draft to draft, `submit` for draft to submitted, `cancel` for submitted to cancelled), so a role in a workflow never grants more than `[[permissions]]` do. On a DocType with a workflow plain `submit` and `cancel` are refused (`workflow_required`): the state changes only through a transition.
+
+```toml
+[workflow]
+
+[[workflow.states]]
+name = "Draft"
+docstatus = 0
+
+[[workflow.states]]
+name = "Pending Approval"
+docstatus = 0
+style = "warning"
+edit_roles = ["Sales Manager"]   # only these roles may update a draft in this state
+
+[[workflow.states]]
+name = "Approved"
+docstatus = 1
+style = "success"
+
+[[workflow.transitions]]
+action = "Submit for Approval"
+from = "Draft"
+to = "Pending Approval"
+roles = ["Sales User"]
+
+[[workflow.transitions]]
+action = "Approve"
+from = "Pending Approval"
+to = "Approved"
+roles = ["Sales Manager"]
+```
+
+A transition is `POST /api/v1/resource/<doctype>/<name>/transition` with `{"action": "Approve", "version": N}`, or `forgebase doc transition <doctype> <name> "Approve" --version N` (the command runs as the system context, so the roles are not checked). `GET .../transitions` lists what the caller may take now, `GET .../history` lists the transitions taken (oldest first, the newest 500), and `GET /api/v1/meta/<doctype>` has the states and transitions without the roles. The document has `"workflow_state"`, which no client can set. A condition on a transition is written in Rust: implement `DocTypeHooks::before_transition` (it may veto, change values and enqueue a job; `ctx.transition` has the action and the two states). `migrate` gives the documents that exist when a workflow is added their state and warns about documents in a state the workflow no longer has. The desk (state badge, action buttons) comes in M8.2.
 
 ### Users and tokens
 

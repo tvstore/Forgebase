@@ -69,6 +69,8 @@ Change DocTypes additively. Adding a field or a DocType is applied by `migrate`;
 
 A hook set implements `forgebase::DocTypeHooks` for a DocType and is registered with `.hooks("crm_note", NoteRules)`. The sample trims the title and rejects a blank one. Hooks receive the document and a `HookContext`, run inside the operation's transaction, and have **no database access**. They run before the framework's own validation, so a value may be missing or of another kind: look before you change. The order of the hooks in each operation is in [ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md) and in the documentation of `DocTypeHooks` (`cargo doc -p forgebase --open`). A hook is tested without a database by calling it with `HookContext::new(..)`, as the sample test does.
 
+A DocType can also have an **approval workflow**: states and transitions with roles, written in the DocType file (`[workflow]`), and a `before_transition` hook for conditions. A transition needs a role of the transition and the right it stands for, and plain `submit` and `cancel` are refused on such a DocType. The short version is in the README ("Workflow") and the rules are in [ADR 0015](../adr/0015-workflow-states-and-transitions.md); the full guide section comes with M8.5.
+
 ## 5. Extend another app
 
 Two complete, tested examples live in the Forgebase checkout: [`examples/sales`](../../examples/sales/README.md) (DocTypes, hooks, a data migration) and [`examples/sales_extension`](../../examples/sales_extension/README.md), which depends on `sales`, links to its `customer` and adds a hook to its `sales_order`. Read them next to this section; their tests are the model for yours.

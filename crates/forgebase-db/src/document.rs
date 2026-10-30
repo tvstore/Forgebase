@@ -23,7 +23,10 @@
 //! and fails the operation.
 //!
 //! DocTypes with `submittable = true` also have [`submit`], [`cancel`] and [`amend`], and their
-//! documents carry a [`DocStatus`]: see those functions for the rules.
+//! documents carry a [`DocStatus`]: see those functions for the rules. A DocType with a
+//! `[workflow]` (M8.1, ADR 0015) changes state only through [`crate::transition`], which continues
+//! in the update, submit or cancel pipeline of this module; [`submit`] and [`cancel`] refuse it
+//! ([`DbError::WorkflowRequired`]).
 //!
 //! # Permissions (M3.2, ADR 0011)
 //!
@@ -842,7 +845,8 @@ pub(crate) fn require_status(
 /// is locked (see [`update`]). Returns the document as stored.
 ///
 /// `doctype` must have `submittable = true` ([`DbError::NotSubmittable`]) and the document must be
-/// a draft ([`DbError::InvalidDocStatus`]). The caller needs the **submit** right and must be able
+/// a draft ([`DbError::InvalidDocStatus`]). A DocType with a workflow refuses it first, before
+/// anything is looked up ([`DbError::WorkflowRequired`]): use a transition. The caller needs the **submit** right and must be able
 /// to read the document; `expected_version` and the permission checks work as for [`update`];
 /// `version` is incremented, `modified_at` and `modified_by` are set.
 ///
@@ -975,7 +979,8 @@ pub(crate) async fn submit_tail(
 /// [amended](amend); it cannot be updated. Returns the document as stored.
 ///
 /// Documents that link to this one are not touched (no automatic cancellation of linked
-/// documents). `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document
+/// documents). A DocType with a workflow refuses it first, before anything is looked up
+/// ([`DbError::WorkflowRequired`]): use a transition. `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document
 /// submitted ([`DbError::InvalidDocStatus`]). The caller needs the **cancel** right and must be
 /// able to read the document; `expected_version` and the permission checks work as for
 /// [`update`]; `version` is incremented, `modified_at` and `modified_by` are set.

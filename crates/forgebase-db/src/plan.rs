@@ -182,7 +182,8 @@ pub enum Conflict {
     },
     /// A column exists with a different type (or, for standard columns, a different
     /// nullability, uniqueness or primary key; the same for the `docstatus` and `amended_from` columns
-    /// of a submittable DocType), or a standard column is missing.
+    /// of a submittable DocType and the `workflow_state` column of a DocType with a workflow), or a
+    /// standard column is missing.
     ColumnMismatch {
         /// Table name.
         table: String,

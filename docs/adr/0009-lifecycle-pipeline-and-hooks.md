@@ -1,6 +1,6 @@
 # 0009 Lifecycle pipeline and hooks
 
-- Status: Accepted. Extended by [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md) (2026-10-30): hooks may enqueue jobs into the transactional outbox; they still have no database access.
+- Status: Accepted. Extended by [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md) (2026-10-30): hooks may enqueue jobs into the transactional outbox; they still have no database access. Extended by [ADR 0015](0015-workflow-states-and-transitions.md) (2026-10-30): a new hook point, `before_transition`, for DocTypes with a workflow.
 - Date: 2026-10-28 (owner decisions and implementation details separated on 2026-10-29, per owner instruction)
 
 ## Context
