@@ -89,9 +89,19 @@ impl Spec {
 
     /// The first time of this schedule strictly after `t`, in UTC. Only meaningful for values
     /// that have no [`problems`](Spec::problems); out of range values are clamped so the
-    /// function never panics.
+    /// function never panics. At the end of the `time` range the result saturates to the
+    /// largest representable time, which is still after `t` unless `t` is that time itself.
     pub fn next_after(&self, t: OffsetDateTime) -> OffsetDateTime {
         let t = t.to_offset(time::UtcOffset::UTC);
+        let next = self.next_after_utc(t);
+        if next > t {
+            next
+        } else {
+            OffsetDateTime::new_utc(Date::MAX, Time::MAX)
+        }
+    }
+
+    fn next_after_utc(&self, t: OffsetDateTime) -> OffsetDateTime {
         match *self {
             Self::EveryMinutes(n) => {
                 let n = i64::from(n.clamp(1, MAX_EVERY_MINUTES));
@@ -312,6 +322,23 @@ mod tests {
         let date =
             Date::from_calendar_date(y, month, u8::try_from(da).expect("day")).expect("date");
         OffsetDateTime::new_utc(date, Time::from_hms_nano(h, mi, se, nanos).expect("time"))
+    }
+
+    #[test]
+    fn next_after_stays_strictly_after_at_the_end_of_the_time_range() {
+        let t = OffsetDateTime::new_utc(Date::MAX, Time::from_hms(12, 0, 0).expect("time"));
+        let specs = [
+            Spec::EveryMinutes(5),
+            Spec::DailyAt { hour: 3, minute: 0 },
+            Spec::WeeklyOn {
+                weekday: Weekday::Monday,
+                hour: 3,
+                minute: 0,
+            },
+        ];
+        for spec in specs {
+            assert!(spec.next_after(t) > t, "{spec:?}");
+        }
     }
 
     fn every(n: u32, t: OffsetDateTime) -> OffsetDateTime {

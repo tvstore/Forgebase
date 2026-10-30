@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use forgebase_core::meta::Registry;
 use forgebase_db::jobs::{self, Claimed, Failure, JobConnection, Known};
@@ -133,6 +133,9 @@ pub(crate) struct Worker {
     /// The schedules of the binary by full job name.
     schedules: BTreeMap<String, Spec>,
     config: WorkerConfig,
+    /// When this worker last ran a tick; at most one tick per poll interval, whatever the
+    /// concurrency.
+    last_tick: std::sync::Mutex<Option<Instant>>,
 }
 
 impl Worker {
@@ -149,7 +152,22 @@ impl Worker {
             jobs,
             schedules,
             config,
+            last_tick: std::sync::Mutex::new(None),
         }
+    }
+
+    /// True for the first caller in each poll interval (and records it), false for the others.
+    fn tick_due(&self) -> bool {
+        let mut last = self
+            .last_tick
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        if last.is_some_and(|at| now.duration_since(at) < self.config.poll) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 
     /// One scheduler tick: enqueues the jobs of the due schedules, once however many workers
@@ -312,11 +330,14 @@ impl Worker {
     /// One worker slot: claims and runs jobs until `stop` is set; sleeps `poll` when idle.
     async fn run_slot(self: Arc<Self>, worker: String, mut stop: Stop) {
         while !stop.is_set() {
-            // The tick comes before the claim, so a job that is due now is claimed at once.
-            match self.tick(None).await {
-                Ok(0) => {}
-                Ok(n) => log(&format!("scheduled {n} job(s)")),
-                Err(error) => log(&format!("error: {}", crate::error::describe_db(&error))),
+            // The tick comes before the claim, so a job that is due now is claimed at once. Only
+            // one slot ticks per poll interval, so ticks do not grow with the concurrency.
+            if self.tick_due() {
+                match self.tick(None).await {
+                    Ok(0) => {}
+                    Ok(n) => log(&format!("scheduled {n} job(s)")),
+                    Err(error) => log(&format!("error: {}", crate::error::describe_db(&error))),
+                }
             }
             match self.run_one(&worker, &stop).await {
                 Ok(Some(_)) => continue,
@@ -483,7 +504,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
 
     use forgebase_core::document::Document;
     use forgebase_core::value::Value;
@@ -634,6 +654,16 @@ mod tests {
         one(db, "SELECT count(*)::text FROM doc_seen")
             .await
             .remove(0)
+    }
+
+    #[tokio::test]
+    async fn only_one_tick_is_due_per_poll_interval_whatever_the_slots() {
+        let (_db, _lab, mut worker) = setup(Duration::from_secs(5)).await;
+        Arc::get_mut(&mut worker).expect("sole owner").config.poll = Duration::from_secs(3600);
+        // The first slot to ask ticks; the other slots of the interval do not.
+        assert!(worker.tick_due());
+        assert!(!worker.tick_due());
+        assert!(!worker.tick_due());
     }
 
     #[tokio::test]

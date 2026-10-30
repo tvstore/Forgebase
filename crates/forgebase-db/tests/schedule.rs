@@ -126,9 +126,14 @@ async fn a_tick_enqueues_a_due_schedule_with_the_due_time_and_the_scheduler_acto
     let mut client = db.pool.get().await.expect("connection");
     let registry = registry();
     assert_eq!(
-        schedule::tick(&mut **client, &registry, &known(), None)
-            .await
-            .expect("tick"),
+        schedule::tick(
+            &mut **client,
+            &registry,
+            &known(),
+            Some(OffsetDateTime::UNIX_EPOCH)
+        )
+        .await
+        .expect("tick"),
         0
     );
 
@@ -152,9 +157,14 @@ async fn a_tick_enqueues_a_due_schedule_with_the_due_time_and_the_scheduler_acto
     );
     // Ticking again enqueues nothing more.
     assert_eq!(
-        schedule::tick(&mut **client, &registry, &known(), None)
-            .await
-            .expect("tick"),
+        schedule::tick(
+            &mut **client,
+            &registry,
+            &known(),
+            Some(OffsetDateTime::UNIX_EPOCH)
+        )
+        .await
+        .expect("tick"),
         0
     );
     assert_eq!(one(&db, "SELECT count(*)::text FROM fb_job").await, "1");
@@ -179,9 +189,14 @@ async fn missed_ticks_are_not_caught_up() {
         1
     );
     assert_eq!(
-        schedule::tick(&mut **client, &registry(), &known, None)
-            .await
-            .expect("tick"),
+        schedule::tick(
+            &mut **client,
+            &registry(),
+            &known,
+            Some(OffsetDateTime::UNIX_EPOCH)
+        )
+        .await
+        .expect("tick"),
         0
     );
     assert_eq!(
@@ -456,7 +471,12 @@ async fn purge_sessions_deletes_expired_sessions_only() {
     assert_eq!(auth::purge_sessions(&**client, 2).await.expect("purge"), 1);
     assert_eq!(auth::purge_sessions(&**client, 2).await.expect("purge"), 0);
     assert_eq!(
-        db.rows("SELECT count(*)::text FROM fb_session").await,
-        [["2"]]
+        db.rows(
+            "SELECT t FROM unnest(ARRAY['valid', 'almost_idle', 'absolute', 'idle', 'both']) t \
+             WHERE EXISTS (SELECT 1 FROM fb_session \
+                           WHERE token_hash = sha256(convert_to(t, 'UTF8'))) ORDER BY t"
+        )
+        .await,
+        [["almost_idle"], ["valid"]]
     );
 }

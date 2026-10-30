@@ -14,7 +14,8 @@
 //!   child DocType's table has `id`, `parent_id` (foreign key `ON DELETE CASCADE`, indexed) and
 //!   `idx`; a submittable DocType's table has `docstatus` and `amended_from`.
 //! - [`migrate`] and [`migrate_apps`]: both of the above in order, and the SQL data migrations of
-//!   apps (migration 0004, M5.1, ADR 0012).
+//!   apps (migration 0004, M5.1, ADR 0012); [`migrate_all`] adds the sync of the declared
+//!   schedules (M6.2, ADR 0013).
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
 //!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own

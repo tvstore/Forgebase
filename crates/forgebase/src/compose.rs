@@ -92,8 +92,8 @@ impl Composed {
         self.apps.len()
     }
 
-    /// Framework migrations, schema sync, then the app migrations in app order
-    /// ([`forgebase_db::migrate_apps`]).
+    /// Framework migrations, schema sync, the app migrations in app order, then the sync of the
+    /// declared schedules ([`forgebase_db::migrate_all`]).
     pub async fn migrate(
         &self,
         pool: &Pool,
