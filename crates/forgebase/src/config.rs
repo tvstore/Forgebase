@@ -80,7 +80,7 @@ impl Site {
 
     /// The database URL, read from the environment when the site is used. The error names the
     /// site and the variable, never a value.
-    fn database_url(&self) -> Result<String, CliError> {
+    pub(crate) fn database_url(&self) -> Result<String, CliError> {
         self.database_url_from(|name| std::env::var(name).ok())
     }
 

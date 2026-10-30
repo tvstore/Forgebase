@@ -27,6 +27,10 @@ pub enum DbError {
     /// `create_database` cannot use the URL it was given. Never contains the URL.
     #[error("{0}")]
     CreateDatabase(String),
+    /// `pg_environment` or `inspect_database` cannot use the URL or the server's answer. Never
+    /// contains the URL or a value of it.
+    #[error("{0}")]
+    Backup(String),
     /// The connection pool could not be created (for example an invalid database URL).
     #[error("cannot create connection pool: {0}")]
     CreatePool(#[from] deadpool_postgres::CreatePoolError),
@@ -319,6 +323,14 @@ impl From<deadpool_postgres::PoolError> for DbError {
             deadpool_postgres::PoolError::Backend(error) => error.into(),
             other => DbError::Pool(other),
         }
+    }
+}
+
+impl DbError {
+    /// True when the server refused the connection because the database does not exist
+    /// (SQLSTATE 3D000).
+    pub fn is_missing_database(&self) -> bool {
+        matches!(self, DbError::Postgres(e) if e.code() == Some(&SqlState::INVALID_CATALOG_NAME))
     }
 }
 

@@ -19,6 +19,7 @@ use crate::args::{
     ActorArg, Cli, Command, DocCommand, DocTypesDir, SiteCommand, TokenCommand, UserCommand,
     VersionArg,
 };
+use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
 use crate::config::{Config, Site, SiteContext, host_problem};
 use crate::error::CliError;
@@ -162,18 +163,28 @@ async fn site_command(
         SiteCommand::Create {
             name,
             maintenance_db,
+            empty,
             doctypes,
         } => {
             let site = config.find(&name)?;
             // Everything that can be checked without a database is checked before the database
-            // is created.
-            let composed = site_composed(site, apps, &doctypes)?;
+            // is created. `--empty` uses no apps, so there is nothing to check.
+            let composed = if empty {
+                None
+            } else {
+                Some(site_composed(site, apps, &doctypes)?)
+            };
             if !site.create_database(Some(&maintenance_db)).await? {
                 return Err(CliError::Config(format!(
                     "database for site `{name}` already exists; run `forgebase migrate --site {name}`"
                 )));
             }
             write_stdout(&format!("created the database of site `{name}`\n"))?;
+            let Some(composed) = composed else {
+                return write_stdout(&format!(
+                    "the database is empty; restore into it with `forgebase site restore {name} --from FILE`\n"
+                ));
+            };
             let report = migrate_site(site, &composed, &SyncOptions::default())
                 .await
                 .map_err(|error| {
@@ -183,6 +194,12 @@ async fn site_command(
                     ))
                 })?;
             write_stdout(&report)
+        }
+        SiteCommand::Backup { name, out } => {
+            write_stdout(&site_backup(config.find(&name)?, &out).await?)
+        }
+        SiteCommand::Restore { name, from } => {
+            write_stdout(&site_restore(config.find(&name)?, &from).await?)
         }
     }
 }
@@ -637,9 +654,17 @@ async fn serve(
             );
         }
         routing = Sites::configured();
+        // Every site's registry is composed before any pool is opened, so a configuration or
+        // composition error is reported without touching a database. Each site gets the
+        // registry of its own apps.
+        let mut registries = Vec::new();
         for site in sites {
-            // Each site gets the registry of its own apps.
-            let registry = Arc::new(site_composed(site, apps, doctypes)?.registry);
+            registries.push((
+                site,
+                Arc::new(site_composed(site, apps, doctypes)?.registry),
+            ));
+        }
+        for (site, registry) in registries {
             let ctx = site.context(registry, None).await?;
             let state = AppState::new(ctx.pool, ctx.registry, app_config(site.hosts.clone()));
             routing = routing.site(&site.hosts, state).map_err(CliError::Config)?;

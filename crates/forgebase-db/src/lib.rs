@@ -18,6 +18,8 @@
 //!   schedules (M6.2, ADR 0013).
 //! - [`create_database`] and [`recorded_apps`] (M7.2): `CREATE DATABASE` for `site create`, and the
 //!   apps a database records.
+//! - [`pg_environment`] and [`inspect_database`] (M7.3): the `PG*` variables for `pg_dump` and
+//!   `pg_restore`, and the server version and emptiness check of `site backup` and `site restore`.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
 //!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own
@@ -50,6 +52,7 @@
 
 mod app_migrations;
 pub mod auth;
+mod backup;
 mod database;
 mod document;
 mod error;
@@ -65,6 +68,7 @@ mod value;
 pub use app_migrations::{
     AppMigration, AppSpec, AppliedAppMigration, tables_exist as app_migration_tables_exist,
 };
+pub use backup::{DatabaseInfo, EMPTY_CHECK_SQL, inspect_database, pg_environment};
 pub use database::{DEFAULT_MAINTENANCE_DB, create_database, recorded_apps};
 pub use deadpool_postgres::Pool;
 pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
