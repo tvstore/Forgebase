@@ -229,3 +229,44 @@ describe('building requests', () => {
     expect(buildChanges(order, initial, current, all)).toEqual({ ok: true, data: { title: 'New' } });
   });
 });
+
+describe('read_only fields are shown but never sent', () => {
+  const priced = meta([
+    field('title', 'data'),
+    field('total', 'decimal', { precision: 12, scale: 2, read_only: true }),
+    field('lines', 'table', {
+      target: 'line',
+      fields: [field('item', 'data'), field('qty', 'int'), field('amount', 'decimal', { read_only: true })],
+    }),
+  ]);
+  const stored = { title: 'T', total: '30.00', lines: [{ item: 'x', qty: 3, amount: '30.00' }] };
+
+  it('they are shown: the stored value is in the control', () => {
+    const state = stateOf(priced, stored);
+    expect(state.values.total).toBe('30.00');
+    expect(state.tables.lines?.[0]?.values.amount).toBe('30.00');
+  });
+
+  it('a create leaves them out, top level and in rows', () => {
+    const state = stateOf(priced, stored);
+    expect(buildCreate(priced, state)).toEqual({
+      ok: true,
+      data: { title: 'T', lines: [{ item: 'x', qty: 3 }] },
+    });
+  });
+
+  it('an edit leaves them out even when the predicate allows them, and a changed table drops its computed cells', () => {
+    const initial = stateOf(priced, stored);
+    const current = structuredClone(initial);
+    current.values.total = '99.00';
+    if (current.tables.lines?.[0]) current.tables.lines[0].values.qty = '4';
+    expect(buildChanges(priced, initial, current, () => true)).toEqual({
+      ok: true,
+      data: { lines: [{ item: 'x', qty: 4 }] },
+    });
+    // Only the read-only field changed: nothing to send.
+    const only = structuredClone(initial);
+    only.values.total = '99.00';
+    expect(buildChanges(priced, initial, only, () => true)).toEqual({ ok: true, data: {} });
+  });
+});

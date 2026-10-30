@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 use crate::meta::{
-    DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming,
+    DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming, humanize,
 };
 use crate::permission::PermissionRule;
 use crate::series::SeriesPattern;
@@ -23,6 +23,8 @@ struct RawDocType {
     fields: Vec<RawField>,
     #[serde(default)]
     permissions: Vec<RawPermission>,
+    title_field: Option<String>,
+    list_fields: Option<Vec<String>>,
 }
 
 /// A `[[permissions]]` entry; every right defaults to false.
@@ -111,6 +113,8 @@ struct RawField {
     unique: bool,
     #[serde(default)]
     allow_on_submit: bool,
+    #[serde(default)]
+    read_only: bool,
     max_length: Option<u32>,
     precision: Option<u8>,
     scale: Option<u8>,
@@ -135,12 +139,13 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
     for f in raw.fields {
         match convert_type(&f) {
             Ok(field_type) => fields.push(DocField {
-                label: f.label.unwrap_or_else(|| f.name.clone()),
+                label: f.label.unwrap_or_else(|| humanize(&f.name)),
                 name: f.name,
                 field_type,
                 required: f.required,
                 unique: f.unique,
                 allow_on_submit: f.allow_on_submit,
+                read_only: f.read_only,
             }),
             Err(mut e) => {
                 errors.append(&mut e);
@@ -157,6 +162,8 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         is_child: raw.is_child,
         submittable: raw.submittable,
         permissions: raw.permissions.into_iter().map(Into::into).collect(),
+        title_field: raw.title_field,
+        list_fields: raw.list_fields,
     };
     errors.extend(doctype.check(&failed));
     if errors.is_empty() {
@@ -324,8 +331,9 @@ scale = 2
         assert_eq!(d.label, "Customer");
         assert_eq!(d.naming, Naming::Field("email".into()));
         assert_eq!(d.fields.len(), 3);
-        assert_eq!(d.fields[0].label, "email");
+        assert_eq!(d.fields[0].label, "Email");
         assert_eq!(d.fields[1].label, "Account status");
+        assert_eq!(d.fields[2].label, "Credit Limit");
         assert_eq!(
             d.fields[2].field_type,
             FieldType::Decimal {
@@ -533,6 +541,119 @@ scale = 2
                 "{what}"
             );
         }
+    }
+
+    #[test]
+    fn field_labels_default_to_the_humanized_name() {
+        let d = from_toml_str(
+            "name = \"sales_order\"\nlabel = \"Sales Order\"\n[[fields]]\nname = \"order_date\"\ntype = \"date\"\n\
+             [[fields]]\nname = \"qty\"\ntype = \"int\"\nlabel = \"Quantity\"\n",
+        )
+        .unwrap();
+        assert_eq!(d.label, "Sales Order");
+        assert_eq!(d.fields[0].label, "Order Date");
+        assert_eq!(d.fields[1].label, "Quantity");
+    }
+
+    #[test]
+    fn read_only_rules() {
+        let d = from_toml_str(&doc_with_field("type = \"int\"\nread_only = true")).unwrap();
+        assert!(d.fields[0].read_only);
+        let d = from_toml_str(&doc_with_field("type = \"int\"")).unwrap();
+        assert!(!d.fields[0].read_only);
+        assert_eq!(
+            invalid(&doc_with_field(
+                "type = \"int\"\nread_only = true\nrequired = true"
+            )),
+            vec![DefinitionError::ReadOnlyRequired { field: "f".into() }]
+        );
+        assert_eq!(
+            invalid(&doc_with_field(
+                "type = \"table\"\ntarget = \"row\"\nread_only = true"
+            )),
+            vec![DefinitionError::ReadOnlyTable { field: "f".into() }]
+        );
+    }
+
+    #[test]
+    fn title_field_and_list_fields() {
+        let base = "name = \"t\"\nlabel = \"T\"\n";
+        let fields = "[[fields]]\nname = \"a\"\ntype = \"data\"\n[[fields]]\nname = \"b\"\ntype = \"check\"\n\
+                      [[fields]]\nname = \"c\"\ntype = \"text\"\n[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"row\"\n";
+        let plain = from_toml_str(&format!("{base}{fields}")).unwrap();
+        assert_eq!((plain.title_field, plain.list_fields), (None, None));
+        let d = from_toml_str(&format!(
+            "{base}title_field = \"a\"\nlist_fields = [\"a\", \"b\"]\n{fields}"
+        ))
+        .unwrap();
+        assert_eq!(d.title_field.as_deref(), Some("a"));
+        assert_eq!(d.list_fields, Some(vec!["a".to_owned(), "b".to_owned()]));
+
+        let title = |value: &str| invalid(&format!("{base}title_field = \"{value}\"\n{fields}"));
+        assert_eq!(
+            title("nope"),
+            vec![DefinitionError::TitleFieldMissing {
+                field: "nope".into()
+            }]
+        );
+        for (name, found) in [("b", "check"), ("c", "text"), ("rows", "table")] {
+            assert_eq!(
+                title(name),
+                vec![DefinitionError::TitleFieldKind {
+                    field: name.into(),
+                    found
+                }]
+            );
+        }
+        let list = |value: &str| invalid(&format!("{base}list_fields = {value}\n{fields}"));
+        assert_eq!(
+            list("[\"nope\"]"),
+            vec![DefinitionError::ListFieldMissing {
+                field: "nope".into()
+            }]
+        );
+        assert_eq!(
+            list("[\"c\", \"rows\"]"),
+            vec![
+                DefinitionError::ListFieldKind {
+                    field: "c".into(),
+                    found: "text"
+                },
+                DefinitionError::ListFieldKind {
+                    field: "rows".into(),
+                    found: "table"
+                },
+            ]
+        );
+        assert_eq!(
+            list("[\"a\", \"a\"]"),
+            vec![DefinitionError::DuplicateListField { field: "a".into() }]
+        );
+        assert_eq!(list("[]"), vec![DefinitionError::EmptyListFields]);
+        assert_eq!(
+            list("[\"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\"]").first(),
+            Some(&DefinitionError::TooManyListFields { count: 9, max: 8 })
+        );
+        // Exactly the limit is fine.
+        let names: Vec<String> = (1..=8).map(|i| format!("f{i}")).collect();
+        let mut text = format!("{base}list_fields = {names:?}\n");
+        for name in &names {
+            text.push_str(&format!("[[fields]]\nname = \"{name}\"\ntype = \"int\"\n"));
+        }
+        assert_eq!(from_toml_str(&text).unwrap().list_fields.unwrap().len(), 8);
+    }
+
+    #[test]
+    fn title_field_and_list_fields_are_refused_on_a_child() {
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\ntitle_field = \"a\"\nlist_fields = [\"a\"]\n\
+                     [[fields]]\nname = \"a\"\ntype = \"data\"\n";
+        assert_eq!(
+            invalid(child),
+            vec![
+                DefinitionError::ChildWithDeskKey { key: "title_field" },
+                DefinitionError::ChildWithDeskKey { key: "list_fields" },
+            ]
+        );
     }
 
     #[test]

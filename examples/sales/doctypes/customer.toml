@@ -1,8 +1,12 @@
 # A DocType of the `sales` example app (examples/sales). Used by the README quick start.
 # Format: docs/blueprint/architecture.md section 3 ("DocType file format").
+# Labels are the humanized field names ("Full Name", "Loyalty Points", ...) unless a field sets `label`.
 name = "customer"
 label = "Customer"
 naming = { field = "email" }
+# How the desk names a customer and which columns its list shows after `name` (UX.1).
+title_field = "full_name"
+list_fields = ["full_name", "customer_group", "tier"]
 
 [[fields]]
 name = "email"

@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-29 (owner decisions of the M3 plan; implementation details of M3.1 separated below)
 
+Status note (2026-10-30): the clean-up job for `fb_login_failure` rows and expired sessions is implemented by [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md) (`forgebase.purge_login_failures`, `forgebase.purge_sessions`).
+
 ## Context
 
 M3 adds users, authorization and a REST API (see [milestones](../blueprint/milestones.md#m3-auth-permissions-rest-api) and the [security model](../blueprint/security-model.md)). Before permissions (M3.2) and HTTP (M3.3) can be built, Forgebase needs a way to store users and credentials, to start and end sessions, to issue API tokens for machine clients, and to resist password guessing. [ADR 0005](0005-http-stack.md) chose axum on tokio; the security model already leans towards opaque server-side sessions and Argon2id, and avoids JWT for first-party browser sessions because of revocation.

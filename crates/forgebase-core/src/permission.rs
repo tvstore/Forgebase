@@ -256,6 +256,8 @@ mod tests {
             is_child: false,
             submittable: true,
             permissions,
+            title_field: None,
+            list_fields: None,
         }
     }
 

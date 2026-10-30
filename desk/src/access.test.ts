@@ -63,6 +63,14 @@ describe('read-only rules (docstatus x allow_on_submit x field kind x rights)', 
     expect(readOnly(1, lines)).toBe(true);
   });
 
+  it('a read_only field of the metadata is read-only for everyone, also on a new document', () => {
+    const total = field('total', 'decimal', { read_only: true });
+    const m = meta([field('title', 'data'), total]);
+    expect(fieldReadOnly(ctx({ isNew: true }), m, total)).toBe(true);
+    expect(fieldReadOnly(ctx({ submittable: false }), m, total)).toBe(true);
+    expect(fieldReadOnly(ctx({ isNew: true }), m, m.fields[0] as typeof total)).toBe(false);
+  });
+
   it('a cancelled document is read-only', () => {
     for (const f of submittableMeta.fields) expect(readOnly(2, f)).toBe(true);
     expect(hasEditableField(ctx({ docStatus: 2 }), submittableMeta)).toBe(false);

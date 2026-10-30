@@ -127,6 +127,22 @@ cargo run -p sales -- doc delete sales_order "$NAME" --version 4
 
 `doc submit`, `doc cancel` and `doc amend` take `--actor` like the other commands and no data; the output of a submittable DocType includes `docstatus` (0, 1 or 2) and `amended_from`. `docstatus` and `amended_from` cannot be set through `--data`.
 
+A DocType file can also say how the desk should show it (UX.1). A field without `label` gets its humanized name (`order_date` is "Order Date"; write `label = "Quantity"` where that is not good English), `read_only = true` marks a field that only hooks may write (a client that sends a value for it is refused with a 422; it cannot be `required` or a `table`), and `title_field` and `list_fields` name the field that names a document and the columns of the list:
+
+```toml
+name = "sales_order"
+label = "Sales Order"
+title_field = "customer"
+list_fields = ["customer", "order_date", "total"]
+
+[[fields]]
+name = "total"
+type = "decimal"
+precision = 12
+scale = 2
+read_only = true   # computed by a hook; a client must not send it
+```
+
 DocTypes are TOML files, one per DocType, in the `doctypes/` directory of an app (embedded in its binary) or in the directory given by `--doctypes` of the stock binary (see [examples/sales/doctypes/customer.toml](examples/sales/doctypes/customer.toml) and the [file format](docs/blueprint/architecture.md#doctype-file-format)). A `link` field names its target DocType (`target = "customer_group"`); in JSON a link is the target document's name, and the database enforces it with a foreign key. A `table` field names a child DocType (`is_child = true`, see [sales_order.toml](examples/sales/doctypes/sales_order.toml) and [sales_order_item.toml](examples/sales/doctypes/sales_order_item.toml)); in JSON it is an array of row objects. A child DocType belongs to exactly one parent and has no commands of its own. A `submittable = true` DocType also has a docstatus and `doc submit`, `doc cancel` and `doc amend` (next section); `naming = { series = "SO-.YYYY.-.#####" }` names documents `SO-2026-00001`, `SO-2026-00002`, ... from a counter that is incremented in the same transaction as the insert, so numbers have no gaps per rendered prefix (date parts are the UTC date of the transaction; DocTypes whose patterns render the same prefix share one counter and see gaps, so give each DocType a distinct prefix). `--data -` reads the JSON from standard input. Decimal values are JSON strings (any form `rust_decimal` parses, such as `"1e3"` or `".5"`), dates are `YYYY-MM-DD`, datetimes are RFC 3339 with microsecond precision (finer digits are truncated). Duplicate JSON keys: the last one wins. Output keys are sorted alphabetically. DocType files: `*.toml` directly in the directory, hidden files skipped, not recursive. The tool prints the stored document as JSON; errors go to standard error as `error: ...` with exit code 1 (2 for a usage error). The `--actor` option (default `cli`) names the trusted **system context** the `doc` commands run as: it is recorded as owner / modified_by on insert, update, submit, cancel and amend, and given to the hooks (on delete it is only given to hooks, not stored); the tool has no authentication, and no permission rule applies to it (see "Permissions" below). The stock `forgebase` binary registers no lifecycle hooks; hooks are Rust code of an app built with the `forgebase` crate, which is why the `sales` binary computes `amount` and `total` and checks submits (see [Apps](#apps) and [ADR 0009](docs/adr/0009-lifecycle-pipeline-and-hooks.md)).
 
 ### List documents
