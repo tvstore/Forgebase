@@ -50,6 +50,12 @@ npx playwright install chromium                    # downloads the Chromium of t
 npx playwright test                                # E2E_BASE_URL (default http://localhost:8000), E2E_PASSWORD
 ```
 
+To take screenshots of the desk (for a pull request that changes how it looks), run the screenshot script against the same server. It is skipped unless `SCREENSHOTS=1`, adds sample documents to the scratch database, and does not commit anything:
+
+```sh
+cd desk && SCREENSHOTS=1 SCREENSHOT_DIR=/tmp/desk-shots npx playwright test screenshots   # login, home, list and form at 1280, 800 and 375 px
+```
+
 If you already have a Chromium, skip the install and set `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chromium`. The test can be run again on the same database (it creates new orders each time). Stop the server and drop the scratch database afterwards.
 
 ## PostgreSQL for tests

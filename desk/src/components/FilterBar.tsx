@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { NO_VALUE_OPS, buildFilters, focusAfterRemove, opsFor } from '../filters';
 import type { FilterField, FilterRow, FocusTarget, Op } from '../filters';
@@ -14,6 +13,9 @@ interface Props {
   onApply: (filters: string | null) => void;
 }
 
+/** How long after the last change the filters are applied. */
+export const APPLY_DELAY_MS = 400;
+
 /** A yes/no field always shows a choice, so it starts with one. */
 const defaultValue = (field: FilterField): string => (field.type === 'check' ? 'true' : '');
 
@@ -23,18 +25,51 @@ function newRow(fields: FilterField[]): FilterRow | null {
   return field && op ? { field: field.name, op, value: defaultValue(field) } : null;
 }
 
-/** A filter bar: add and remove rows of field, operator and value; Apply builds the JSON. */
+/** The `filters` text of complete rows ('' for none); null while a row is incomplete or wrong. */
+function textOf(rows: FilterRow[], fields: FilterField[]): string | null {
+  const built = buildFilters(rows, fields);
+  if (!built.ok) return null;
+  return built.filters.length === 0 ? '' : JSON.stringify(built.filters);
+}
+
+/**
+ * A filter bar: add and remove rows of field, operator and value. There is no Apply button: a
+ * short moment after the last change, the rows are applied when they are all complete; while one
+ * is not (a new row has no value yet) the bar says what is missing and nothing is applied.
+ */
 export function FilterBar({ fields, initial, initialKey, onApply }: Props) {
   const [rows, setRows] = useState<FilterRow[]>(initial);
-  const [error, setError] = useState<string | null>(null);
+  // The `filters` text the address holds, or that this bar applied last.
+  const [applied, setApplied] = useState(() => textOf(initial, fields) ?? initialKey);
   // Follow the address (back button, a new link) without remounting the form, which would drop
-  // the keyboard focus: adjust the state while rendering when `initialKey` changed.
+  // the keyboard focus: adjust the state while rendering when `initialKey` changed, unless the
+  // change is the bar's own.
   const [seenKey, setSeenKey] = useState(initialKey);
   if (seenKey !== initialKey) {
     setSeenKey(initialKey);
-    setRows(initial);
-    setError(null);
+    const fromAddress = textOf(initial, fields) ?? initialKey;
+    if (fromAddress !== applied) {
+      setRows(initial);
+      setApplied(fromAddress);
+    }
   }
+
+  const built = useMemo(() => buildFilters(rows, fields), [rows, fields]);
+  const text = textOf(rows, fields);
+  const hint = built.ok ? null : `Not applied yet: ${built.error}.`;
+
+  const latest = useRef(onApply);
+  useEffect(() => {
+    latest.current = onApply;
+  });
+  useEffect(() => {
+    if (text === null || text === applied) return;
+    const timer = window.setTimeout(() => {
+      setApplied(text);
+      latest.current(text === '' ? null : text);
+    }, APPLY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [text, applied]);
 
   // Keyboard focus after Remove (its button is gone) and Add filter.
   const form = useRef<HTMLFormElement>(null);
@@ -62,17 +97,6 @@ export function FilterBar({ fields, initial, initialKey, onApply }: Props) {
     setRows((current) => current.filter((_, i) => i !== index));
   };
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const built = buildFilters(rows, fields);
-    if (!built.ok) {
-      setError(built.error);
-      return;
-    }
-    setError(null);
-    onApply(built.filters.length === 0 ? null : JSON.stringify(built.filters));
-  };
-
   const add = () => {
     const row = newRow(fields);
     if (!row) return;
@@ -81,7 +105,7 @@ export function FilterBar({ fields, initial, initialKey, onApply }: Props) {
   };
 
   return (
-    <form className="filters" ref={form} onSubmit={submit}>
+    <form className="filters" ref={form} onSubmit={(e) => e.preventDefault()}>
       <fieldset>
         <legend>Filters</legend>
         {rows.map((row, index) => {
@@ -126,6 +150,7 @@ export function FilterBar({ fields, initial, initialKey, onApply }: Props) {
               )}
               <button
                 type="button"
+                className="btn btn-ghost btn-small"
                 aria-label={`Remove filter ${number}`}
                 onClick={() => remove(index)}
               >
@@ -135,18 +160,11 @@ export function FilterBar({ fields, initial, initialKey, onApply }: Props) {
           );
         })}
         <div className="filter-actions">
-          <button type="button" ref={addButton} onClick={add}>
-            Add filter
+          <button type="button" className="btn btn-small" ref={addButton} onClick={add}>
+            <span aria-hidden="true">+ </span>Add filter
           </button>
-          <button type="submit" className="primary">
-            Apply filters
-          </button>
+          {hint ? <span className="hint">{hint}</span> : null}
         </div>
-        {error ? (
-          <p role="alert" className="error">
-            {error}
-          </p>
-        ) : null}
       </fieldset>
     </form>
   );

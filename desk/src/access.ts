@@ -64,6 +64,18 @@ export function hasEditableField(ctx: DocContext, meta: DocTypeMeta): boolean {
   return meta.fields.some((f) => !fieldReadOnly(ctx, meta, f));
 }
 
+/**
+ * True when the form shows a "required" marker: some required field (or required column of a
+ * Table field) can be edited in the current state. A required field that is shown as a value
+ * (read-only, a submitted document) needs no marker and no legend.
+ */
+export function hasEditableRequired(ctx: DocContext, meta: DocTypeMeta): boolean {
+  return meta.fields.some((f) => {
+    if (fieldReadOnly(ctx, meta, f)) return false;
+    return f.type === 'table' ? (f.fields ?? []).some((c) => c.required && !c.read_only) || f.required : f.required;
+  });
+}
+
 export type LifecycleAction = 'submit' | 'cancel' | 'amend' | 'delete';
 
 /**
@@ -98,4 +110,31 @@ export function lifecycleActions(ctx: DocContext): LifecycleAction[] {
  */
 export function isAddressable(name: string): boolean {
   return name !== '' && name !== '.' && name !== '..';
+}
+
+/** How a header button is drawn: the one main action is `primary`, the rest `secondary`. */
+export type Emphasis = 'primary' | 'secondary';
+
+export interface HeaderActions {
+  /** Null: the user cannot change the document, so there is no Save. */
+  save: Emphasis | null;
+  /** Null: no submit right, or not a draft of a submittable DocType (see {@link lifecycleActions}). */
+  submit: Emphasis | null;
+  /** The other lifecycle actions, for the "More" menu. */
+  more: LifecycleAction[];
+}
+
+/**
+ * The buttons of the form header. Save is primary for a new document and while there are unsaved
+ * changes; Submit is primary for a saved draft (with unsaved changes it stays, secondary, and asks
+ * to save first). Visibility follows {@link lifecycleActions} and `canSave` exactly: nothing the
+ * user has no right for is offered.
+ */
+export function headerActions(ctx: DocContext, dirty: boolean, canSave: boolean): HeaderActions {
+  const actions = lifecycleActions(ctx);
+  return {
+    save: !canSave ? null : ctx.isNew || dirty ? 'primary' : 'secondary',
+    submit: !actions.includes('submit') ? null : dirty ? 'secondary' : 'primary',
+    more: actions.filter((a) => a !== 'submit'),
+  };
 }

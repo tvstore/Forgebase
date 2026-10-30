@@ -1,52 +1,65 @@
-import { useEffect, useState } from 'react';
+import type { DocTypes } from '../App';
+import { EmptyState } from '../components/EmptyState';
+import { Skeleton } from '../components/Skeleton';
+import { groupByApp } from '../nav';
+import { listHref, newHref } from '../router';
 
-import { ApiError, getMeta } from '../api';
-import { listHref } from '../router';
-import type { DocTypeSummary } from '../types';
-
-type State = { doctypes: DocTypeSummary[] } | { error: string } | null;
-
-/** The DocTypes the user can read, from `GET /api/v1/meta`. */
-export function Home() {
-  const [state, setState] = useState<State>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getMeta().then(
-      (doctypes) => {
-        if (!cancelled) setState({ doctypes });
-      },
-      (e: unknown) => {
-        if (!cancelled) setState({ error: e instanceof ApiError ? e.message : 'Cannot reach the server.' });
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
+/** The DocTypes the user can read, as one card per app, each with a "New" shortcut when allowed. */
+export function Home({ doctypes }: { doctypes: DocTypes }) {
   return (
-    <main>
-      <h1>Document types</h1>
-      {state === null ? <p>Loading...</p> : null}
-      {state && 'error' in state ? (
-        <p role="alert" className="error">
-          {state.error}
+    <div className="page">
+      <header className="page-head">
+        <div>
+          <h1>Home</h1>
+          <p className="subtitle">Choose a document type to work with.</p>
+        </div>
+      </header>
+      {doctypes.status === 'loading' ? (
+        <div className="card-grid" aria-busy="true">
+          <div className="card">
+            <Skeleton lines={3} />
+          </div>
+          <div className="card">
+            <Skeleton lines={3} />
+          </div>
+        </div>
+      ) : null}
+      {doctypes.status === 'error' ? (
+        <p role="alert" className="alert">
+          {doctypes.message}
         </p>
       ) : null}
-      {state && 'doctypes' in state ? (
-        state.doctypes.length === 0 ? (
-          <p>You cannot read any document type.</p>
+      {doctypes.status === 'ready' ? (
+        doctypes.list.length === 0 ? (
+          <EmptyState title="Nothing to open yet">
+            You cannot read any document type. Ask an administrator to give your account a role with access.
+          </EmptyState>
         ) : (
-          <ul className="doctypes">
-            {state.doctypes.map((d) => (
-              <li key={d.name}>
-                <a href={listHref(d.name)}>{d.label}</a>
-              </li>
+          <div className="card-grid">
+            {groupByApp(doctypes.list).map((group) => (
+              <section key={group.app} className="card" aria-labelledby={`app-${group.app}`}>
+                <h2 id={`app-${group.app}`} className="card-title">
+                  {group.label}
+                </h2>
+                <ul className="doctype-list">
+                  {group.doctypes.map((d) => (
+                    <li key={d.name}>
+                      <a className="doctype-link" href={listHref(d.name)}>
+                        {d.label}
+                      </a>
+                      {d.rights.create !== 'none' ? (
+                        <a className="btn btn-small" href={newHref(d.name)} aria-label={`New ${d.label}`}>
+                          <span aria-hidden="true">+ </span>New
+                        </a>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ))}
-          </ul>
+          </div>
         )
       ) : null}
-    </main>
+    </div>
   );
 }

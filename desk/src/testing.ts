@@ -27,6 +27,7 @@ export const rights = (all: Partial<Rights> = {}): Rights => ({
 export const meta = (fields: FieldMeta[], extra: Partial<DocTypeMeta> = {}): DocTypeMeta => ({
   name: 'order',
   label: 'Order',
+  app: null,
   naming: 'random',
   submittable: false,
   title_field: null,

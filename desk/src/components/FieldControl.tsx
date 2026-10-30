@@ -30,11 +30,13 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
     'aria-label': ariaLabel,
   };
   const text = typeof value === 'string' ? value : '';
+  // A value that is not there (computed by the server, not yet known) shows a dash, not a hole.
+  const dash = readOnly ? '\u2014' : undefined;
 
   switch (field.type) {
     case 'text':
       return (
-        <textarea {...common} rows={4} value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
+        <textarea {...common} rows={4} placeholder={dash} value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
       );
     case 'check':
       return (
@@ -77,6 +79,7 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
           {...common}
           type="number"
           step="1"
+          placeholder={dash}
           value={text}
           readOnly={readOnly}
           // A number control reports "" for text it cannot read (for example "e"): keep a marker
@@ -87,7 +90,7 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
     case 'decimal':
       // Text, not a number control: the value is sent as a string (no float rounding).
       return (
-        <input {...common} type="text" inputMode="decimal" value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
+        <input {...common} type="text" inputMode="decimal" placeholder={dash} value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
       );
     case 'date':
       return <input {...common} type="date" value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />;
@@ -104,6 +107,7 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
           {...common}
           type="text"
           maxLength={field.max_length}
+          placeholder={dash}
           value={text}
           readOnly={readOnly}
           onChange={(e) => onChange(e.target.value)}

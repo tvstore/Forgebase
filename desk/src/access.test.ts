@@ -4,6 +4,8 @@ import {
   docStatusOf,
   fieldReadOnly,
   hasEditableField,
+  hasEditableRequired,
+  headerActions,
   isAddressable,
   lifecycleActions,
   mayChange,
@@ -108,6 +110,34 @@ describe('read-only rules (docstatus x allow_on_submit x field kind x rights)', 
   });
 });
 
+describe('the required marker', () => {
+  const required = meta(
+    [
+      field('customer', 'link', { required: true }),
+      field('remarks', 'text', { allow_on_submit: true }),
+      field('lines', 'table', { target: 'line', fields: [field('item', 'data', { required: true })] }),
+    ],
+    { submittable: true },
+  );
+
+  it('shows for a draft and a new document that have an editable required field', () => {
+    expect(hasEditableRequired(ctx({ isNew: true }), required)).toBe(true);
+    expect(hasEditableRequired(ctx({ docStatus: 0 }), required)).toBe(true);
+  });
+
+  it('is not needed once every required field is shown as a value', () => {
+    expect(hasEditableRequired(ctx({ docStatus: 1 }), required)).toBe(false); // submitted: only remarks is editable
+    expect(hasEditableRequired(ctx({ docStatus: 2 }), required)).toBe(false);
+    expect(hasEditableRequired(ctx({ rights: rights({ read: 'all' }) }), required)).toBe(false); // no write right
+  });
+
+  it('counts a required column of an editable table, and none when nothing is required', () => {
+    const tableOnly = meta([field('lines', 'table', { target: 'line', fields: [field('item', 'data', { required: true })] })]);
+    expect(hasEditableRequired(ctx({ submittable: false }), tableOnly)).toBe(true);
+    expect(hasEditableRequired(ctx(), meta([field('a', 'data')]))).toBe(false);
+  });
+});
+
 describe('lifecycle buttons (docstatus x rights x submittable)', () => {
   const full = rights({ read: 'all', write: 'all', delete: 'all', submit: 'all', cancel: 'all', amend: 'all' });
 
@@ -166,5 +196,29 @@ describe('names that cannot be put in a REST path', () => {
     for (const name of ['a', '...', '.a', 'a.', 'SO-2026-00001', 'a/b', '%2e%2e', 'a b', '日本', '..\\x']) {
       expect(isAddressable(name), name).toBe(true);
     }
+  });
+});
+
+describe('header actions (the main action and the More menu)', () => {
+  const full = ctx();
+
+  it('makes Save the main action for a new document and while there are unsaved changes', () => {
+    expect(headerActions(ctx({ isNew: true }), false, true)).toEqual({ save: 'primary', submit: null, more: [] });
+    expect(headerActions(full, true, true)).toEqual({ save: 'primary', submit: 'secondary', more: ['delete'] });
+  });
+
+  it('makes Submit the main action for a saved draft', () => {
+    expect(headerActions(full, false, true)).toEqual({ save: 'secondary', submit: 'primary', more: ['delete'] });
+  });
+
+  it('puts Cancel and Amend in the menu, and offers no Submit for a submitted document', () => {
+    expect(headerActions(ctx({ docStatus: 1 }), false, true)).toEqual({ save: 'secondary', submit: null, more: ['cancel'] });
+    expect(headerActions(ctx({ docStatus: 2 }), false, false)).toEqual({ save: null, submit: null, more: ['amend', 'delete'] });
+  });
+
+  it('offers only what the rights allow', () => {
+    const clerk = ctx({ rights: rights({ read: 'all', write: 'all', create: 'all' }) });
+    expect(headerActions(clerk, false, true)).toEqual({ save: 'secondary', submit: null, more: [] });
+    expect(headerActions(clerk, false, false)).toEqual({ save: null, submit: null, more: [] });
   });
 });

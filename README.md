@@ -235,7 +235,7 @@ Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message"
 
 ### Desk
 
-The desk is a React + TypeScript app in `desk/` (no UI component library; only `react` and `react-dom` at runtime). `forgebase serve` serves the **built** desk on the same origin when `FORGEBASE_DESK_DIR` is set (unset: no desk, `/desk/*` is a 404). It has a login page, the list of DocTypes the user can read, a **list view** per DocType (paging, sorting, filters) and a **form view** generated from the DocType metadata: native controls per field type (a Link field suggests names as you type, a Table field is a grid of rows), Save (only the changed fields are sent), and for a submittable DocType the **Submit**, **Cancel**, **Amend** and **Delete** buttons, shown only when the user has the right and the document's status allows it (the API enforces every right again). Field errors of the server are shown on the fields, a version conflict offers a Reload and keeps your edits, and leaving a form with unsaved changes asks first.
+The desk is a React + TypeScript app in `desk/` (no UI component library; only `react` and `react-dom` at runtime). `forgebase serve` serves the **built** desk on the same origin when `FORGEBASE_DESK_DIR` is set (unset: no desk, `/desk/*` is a 404). It has a login page, a home of cards per app, a sidebar of the DocTypes the user can read grouped by app, breadcrumbs, a **list view** per DocType (the title of each document, the columns the DocType file chooses, a status badge, a quick search, filters that apply as you change them, paging, sorting) and a **form view** generated from the DocType metadata: native controls per field type (a Link field suggests names as you type, a Table field is a grid of rows), Save (only the changed fields are sent), and for a submittable DocType the **Submit**, **Cancel**, **Amend** and **Delete** buttons, shown only when the user has the right and the document's status allows it (the API enforces every right again). Field errors of the server are shown on the fields, a version conflict offers a Reload and keeps your edits, and leaving a form with unsaved changes asks first. Save is the main action (Ctrl/Cmd+S works too), Submit is the main action of a saved draft, and Cancel, Amend and Delete are in a More menu and ask first; a toast confirms what was done. The look is one small stylesheet with design tokens (the Forgebase yellow as the only accent); the layout works from 320 px up.
 
 ```sh
 # Build the desk (Node.js ^20.19.0 || >=22.12.0; desk/.npmrc ignores dependency install scripts): writes desk/dist
@@ -251,7 +251,7 @@ cd desk && npm run dev
 
 The desk keeps no secret in the browser except the HttpOnly session cookie: the CSRF token lives in memory and is recovered after a reload with `GET /api/v1/session`. What the desk may show is decided by `GET /api/v1/meta` and `GET /api/v1/meta/{doctype}` (only DocTypes the user can read, with the user's rights); the API enforces every right again. A document named `.` or `..` cannot be opened in the desk (a browser resolves those path segments before the request is sent); every other name is URL-encoded. The routes, the form view design, the static-serving rules and the Content-Security-Policy are in the [architecture](docs/blueprint/architecture.md#11-desk-reports-workflow) and the [security model](docs/blueprint/security-model.md#the-http-layer-implemented-in-m33).
 
-**Smoke test.** One Playwright test (Chromium) drives the built desk against a real server: login, list, create, edit and submit a sales order, and a user without the submit right (CI job `e2e`). To run it locally you need a PostgreSQL 16 server, an **empty** scratch database, the built desk and Chromium:
+**Smoke test.** One Playwright test (Chromium) drives the built desk against a real server: login, home, list, search, create, save, edit and submit a sales order, the More menu, no horizontal scroll at 375 and 320 px, and a user without the submit right (CI job `e2e`). To run it locally you need a PostgreSQL 16 server, an **empty** scratch database, the built desk and Chromium:
 
 ```sh
 export FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/fb_e2e   # an empty scratch database
@@ -259,6 +259,12 @@ cargo build -p forgebase && (cd desk && npm ci && npm run build)
 desk/e2e/seed.sh                                   # migrates, creates the users e2e_manager and e2e_clerk and a customer (stock binary and `--doctypes`: it adds a role that only the e2e test uses)
 FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/forgebase serve --doctypes target/e2e/doctypes &
 cd desk && npx playwright install chromium && npx playwright test   # or set PLAYWRIGHT_CHROMIUM_EXECUTABLE to an installed Chromium
+```
+
+**Screenshots.** `desk/e2e/screenshots.spec.ts` adds a few sample documents (draft, submitted and cancelled orders) and takes the login page, home, list and form at 1280, 800 and 375 px (and the list at 320 px, a submitted form at 375 px); it also checks that no page scrolls sideways on a phone. It is skipped unless `SCREENSHOTS=1`, so CI does not run it, and the images are not committed:
+
+```sh
+cd desk && SCREENSHOTS=1 SCREENSHOT_DIR=/tmp/desk-shots npx playwright test screenshots   # same server and database as the smoke test
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks. To get oriented, read the blueprint in this order: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [milestones](docs/blueprint/milestones.md). Contributors and agents must follow [AGENTS.md](AGENTS.md).
