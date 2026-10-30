@@ -228,6 +228,12 @@ The owner asked for a smoother, more elegant desk: *"apa bisa ui dibuat lebih sm
 
 Order of the work, as the information session set it: M8.1 (done), then UX.4, then M8.2 to M8.5, then M9.1 to M9.5.
 
+**Licence notices with the build (2026-10-30, information session).** The owner approved the recommendation with *"setujui rekomendasi putusanmu"*: ship Inter's OFL-1.1 text and the Lucide ISC notice with the built desk (`dist/THIRD-PARTY-LICENSES.txt`), included in the M8.3 pull request, with a test that keeps the copy current. The same approval covers a cosmetic fix (a list's primary column header shows one label, the title field's label) and confirms that the native date input format stays as it is (no custom date picker).
+
+| Decision | Recorded in |
+|---|---|
+| Ship `THIRD-PARTY-LICENSES.txt` (Inter OFL-1.1, Lucide) in `desk/dist/`; refreshed on a font or icon upgrade. | [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.4, "Licence notices"), [maintenance policy](blueprint/maintenance-policy.md), [dependency evaluation §12](blueprint/dependency-evaluation.md#12-frontend) |
+
 ### M9 Integration (2026-10-30, "setuju semua rencana mu"; information session)
 
 The owner approved the M9 plan in the information session (the same *"setuju semua rencana mu"* as UX.4). **M9 starts after M8 is Done**; this section is the only record of its decisions until the M9 pull requests land (the plan itself is in the information session). They build on M3 (auth, API tokens, permissions), M5 (apps, the public API), M6 (jobs and the outbox), M7 (sites) and M8. The owner's thinking applies: a small explicit public API, deny by default, no runtime code, extension through apps only, and a significant dependency is an owner decision (decisions 6 and 9 are that approval). Not in M9: GraphQL, RPC by dotted path, guest endpoints, inbound webhook receivers, OAuth or SSO, a webhook UI in the desk, Excel, CSV import of child tables, sync between sites. M10 needs a new plan.

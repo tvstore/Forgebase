@@ -87,9 +87,9 @@ describe('listColumns', () => {
     expect(columns.find((c) => c.key === 'docstatus')?.label).toBe('Status');
   });
 
-  it('names the primary column after the title field, with "Name" muted under it', () => {
+  it('names the primary column after the title field alone', () => {
     const columns = listColumns(meta([field('a', 'data')], false, { title_field: 'a' }));
-    expect(columns[0]).toMatchObject({ key: 'name', label: 'A', sub: 'Name' });
+    expect(columns[0]).toEqual({ key: 'name', label: 'A', type: 'data' });
     const plain = listColumns(meta([field('a', 'data')]));
     expect(plain[0]).toEqual({ key: 'name', label: 'Name', type: 'data' });
   });

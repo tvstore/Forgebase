@@ -21,8 +21,6 @@ export interface Column {
   type: FieldType;
   /** A Link column: the DocType it points to (its cells show the target's title when there is one). */
   target?: string;
-  /** A muted second line of the header: what the column sorts by when `label` is the title field. */
-  sub?: string;
 }
 
 export interface Sort {
@@ -56,7 +54,7 @@ export const MODIFIED_KEY = 'modified_at';
  * `name` first (the primary cell), then `list_fields` of the metadata (or, when it names none,
  * the first five fields that are not Table or Text), then the status of a submittable DocType, the
  * owner and `modified_at`. The title field is not repeated: the primary cell already shows it, and its
- * header carries the title field's label (with "Name" muted under it, as in the cells).
+ * header carries the title field's label alone (the key is shown only in the cells, muted under the title).
  */
 export function listColumns(meta: DocTypeMeta): Column[] {
   const known = new Map(meta.fields.map((f) => [f.name, f]));
@@ -75,7 +73,7 @@ export function listColumns(meta: DocTypeMeta): Column[] {
   return [
     titleField === undefined
       ? { key: NAME_KEY, label: 'Name', type: 'data' as const }
-      : { key: NAME_KEY, label: titleField.label, type: 'data' as const, sub: 'Name' },
+      : { key: NAME_KEY, label: titleField.label, type: 'data' as const },
     ...(meta.list_fields === null ? fields.slice(0, MAX_FIELD_COLUMNS) : fields),
     ...(hasStatus(meta)
       ? [{ key: meta.workflow ? WORKFLOW_KEY : STATUS_KEY, label: 'Status', type: 'data' as const }]

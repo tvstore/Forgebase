@@ -992,10 +992,6 @@
     @apply mt-1 hidden;
   }
 
-  .sort-sub {
-    @apply block text-left text-xs font-normal;
-  }
-
   @media (max-width: 599px) {
     .status-inline {
       @apply flex w-fit;

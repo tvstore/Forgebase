@@ -556,7 +556,6 @@ export function List({ doctype, params, username, isAdmin }: Props) {
                           onClick={() => go({ ...state, sort: nextSort(state.sort, column.key), offset: 0 })}
                         >
                           {column.label}
-                          {column.sub ? <span className="sort-sub">{column.sub}</span> : null}
                           {sorted ? <span aria-hidden="true">{state.sort.desc ? ' \u25BC' : ' \u25B2'}</span> : null}
                         </button>
                       </th>
