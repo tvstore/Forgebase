@@ -1,6 +1,6 @@
 # 0012 App model and public API boundary
 
-- Status: Accepted. Public surface extended by M6.1 and M6.2 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)) and M8.1 (see [ADR 0015](0015-workflow-states-and-transitions.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
+- Status: Accepted. Public surface extended by M6.1 and M6.2 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)), M8.1 (see [ADR 0015](0015-workflow-states-and-transitions.md)) and M8.4 (see [ADR 0016](0016-query-reports-read-only-execution.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
 - Date: 2026-10-29
 
 ## Context
@@ -73,6 +73,20 @@ The app name `forgebase` is reserved for the framework's own jobs (a startup err
 | `DocTypeHooks::before_transition(&self, ctx, &mut Document)` | The new hook point, with a default that does nothing: it runs after the permission checks and before `validate`, `before_submit` and `before_cancel` of the move; it may veto, change values and enqueue jobs. |
 
 The workflow itself (`Workflow`, `WorkflowState`, `Transition` and the rest of `forgebase-core::workflow`) is **not** re-exported: an app writes it in the DocType file (`[workflow]`), and the types stay internal like the other metadata types. `Documents` (the job API) has no `transition` in M8.1.
+
+### Public surface update (M8.4)
+
+[ADR 0016](0016-query-reports-read-only-execution.md) (the M8 plan, owner decisions of 2026-10-30) adds these items. Nothing else becomes public; the existing items are unchanged.
+
+| Item | Purpose |
+|---|---|
+| `Report` (`sql(&str)`, `label`, `roles`, `param`, `column`, `timeout`, `max_rows`; `#[non_exhaustive]`, no public fields) | An app-defined SQL report: trusted SQL compiled into the binary, the roles that may run it, typed parameters and columns. Parameters and columns are positional (`$1..$n` and the result columns in order). Limits default to 30 s and 10 000 rows and may be raised to 300 s and 100 000. |
+| `Param` (`data`, `int`, `decimal`, `date`, `check`, `link(name, doctype)`, `select(name, &[options])`; `label`, `required`, `default_value`; `#[non_exhaustive]`) | A typed parameter, checked like the field of the same kind and always bound. |
+| `Column` (`data`, `int`, `decimal`, `date`, `datetime`, `check`, `link(name, doctype)`; `label`; `#[non_exhaustive]`) | A typed result column; the SQL type must fit the kind (checked by `migrate`). |
+| `App::report(name, Report)` | Defines a report, known as `<app>.<name>`. Every mistake is a startup error. |
+| `testing::check_reports(&Forgebase, &TestDb) -> Vec<String>` (feature `testing`) | The static check of the reports' SQL that `forgebase migrate` runs after the migrations; an app's tests can run it. `TestDb::migrate` runs it too. |
+
+The definition types (`ReportDef` and the rest of `forgebase-core::report`) and the execution (`forgebase-db::reports`) are **not** re-exported. `Value`, `Decimal` and `Date` (already public) are what `Param::default_value` takes.
 
 ## Implementation details (M5.1)
 
