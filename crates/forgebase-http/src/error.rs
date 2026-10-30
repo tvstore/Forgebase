@@ -101,7 +101,11 @@ impl ApiError {
     /// A 500 with a generic message. The real error goes to standard error only.
     pub fn internal(error: &dyn Display) -> Self {
         // Standard error is the server's own log; the client learns nothing.
-        eprintln!("internal error: {error}");
+        // Ignore a failed write: a closed standard error must not panic a request.
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!("internal error: {error}\n"),
+        );
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

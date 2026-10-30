@@ -504,6 +504,14 @@ fn cli_per_site() {
     succeeds(&world.run(&["job", "enqueue", "forgebase.purge_jobs", "--site", "a"]));
 }
 
+/// Reads a child's standard output to its end in the background, so a line it prints can never
+/// block it or meet a closed pipe.
+fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+    });
+}
+
 /// A running `forgebase serve`, killed when dropped.
 struct Server {
     child: Child,
@@ -525,6 +533,8 @@ impl Server {
             .strip_prefix("listening on http://")
             .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
             .to_owned();
+        // The site lines follow; keep reading until the server stops.
+        drain(reader);
         Server { child, address }
     }
 
@@ -698,10 +708,11 @@ fn worker_per_site() {
         )
     };
 
-    let worker_a = world
+    let mut worker_a = world
         .command(&["worker", "--site", "a"])
         .spawn()
         .expect("worker a");
+    drain(worker_a.stdout.take().expect("stdout"));
     wait_until("site a's worker to run the built-in job", || {
         status(&world.a, purge).as_deref() == Some("done")
     });
@@ -728,10 +739,11 @@ fn worker_per_site() {
     );
 
     // B's worker runs it: the job's handler inserts an `extra_item` of B.
-    let worker_b = world
+    let mut worker_b = world
         .command(&["worker", "--site", "b"])
         .spawn()
         .expect("worker b");
+    drain(worker_b.stdout.take().expect("stdout"));
     wait_until("site b's worker to run extra.stamp", || {
         status(&world.b, "extra.stamp").as_deref() == Some("done")
     });

@@ -664,15 +664,16 @@ async fn serve(
         .map_err(|e| CliError::Config(format!("cannot listen on {listen}: {e}")))?;
     let address = listener.local_addr().map_err(CliError::Serve)?;
     let signals = stop_signals().map_err(CliError::Serve)?;
-    write_stdout(&format!("listening on http://{address}\n"))?;
+    // The server's own announcements: a closed standard output must not stop a running server.
+    announce(&format!("listening on http://{address}\n"));
     for line in lines {
-        write_stdout(&line)?;
+        announce(&line);
     }
     if let Some(dir) = &desk_dir {
-        write_stdout(&format!(
+        announce(&format!(
             "serving the desk from {} at /desk/\n",
             dir.display()
-        ))?;
+        ));
     }
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = forgebase_http::serve(listener, routing, async {
@@ -926,6 +927,12 @@ fn print_document(stored: &StoredDocument) -> Result<(), CliError> {
     let text =
         serde_json::to_string_pretty(&json).map_err(forgebase_http::json::JsonError::Serialize)?;
     write_stdout(&format!("{text}\n"))
+}
+
+/// Writes a line of a long-running command (`serve`) to standard output and ignores a failure,
+/// so that a closed pipe never takes the server down.
+fn announce(text: &str) {
+    let _ = write_stdout(text);
 }
 
 /// Writes to standard output without panicking on a closed pipe.
