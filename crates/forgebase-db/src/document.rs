@@ -1441,7 +1441,7 @@ pub(crate) fn access_to(
 }
 
 /// The owner a statement must be limited to (`AND "owner" = $n`) for this access.
-fn owner_scope(access: Access, caller: &Caller) -> Option<&str> {
+pub(crate) fn owner_scope(access: Access, caller: &Caller) -> Option<&str> {
     (access == Access::OwnerOnly).then(|| caller.name())
 }
 

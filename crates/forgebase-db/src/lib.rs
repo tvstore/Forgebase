@@ -61,6 +61,7 @@ mod document;
 mod error;
 mod ident;
 pub mod jobs;
+mod link_titles;
 mod list;
 mod migrate;
 mod plan;
@@ -79,6 +80,7 @@ pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, u
 pub use error::DbError;
 pub use forgebase_core::permission::Caller;
 pub use ident::quote_ident;
+pub use link_titles::{LinkTitles, link_titles};
 pub use list::{
     DEFAULT_LIMIT, Filter, FilterOp, ListQuery, MAX_IN_VALUES, MAX_LIMIT, Sort, column_type, list,
 };

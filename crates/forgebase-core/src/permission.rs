@@ -290,6 +290,7 @@ mod tests {
             permissions,
             title_field: None,
             list_fields: None,
+            icon: None,
             workflow: None,
         }
     }
