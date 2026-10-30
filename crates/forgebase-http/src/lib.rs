@@ -6,9 +6,14 @@
 //!
 //! # Request pipeline
 //!
-//! 1. **Host validation** ([`AppConfig::allowed_hosts`]) runs first, on every route and every
-//!    error, including login, unknown paths and wrong methods. A missing, repeated or unknown
-//!    `Host` is `400 invalid_host`.
+//! 1. **Host routing** ([`Sites`]) runs first, on every route and every error, including login,
+//!    unknown paths and wrong methods. A missing, repeated or malformed `Host` is
+//!    `400 invalid_host`. The `Host` then selects the site, and the request is handled by that
+//!    site's own router, state and database: with a config file a well-formed host that no site
+//!    owns is `404 not_found` ("no such site"); in the implicit single-site mode
+//!    ([`Sites::implicit`], no config file) a host outside [`AppConfig::allowed_hosts`] stays
+//!    `400 invalid_host`, the protection against DNS rebinding. `X-Forwarded-Host` and
+//!    `Forwarded` are never read: a reverse proxy must pass the original `Host`.
 //! 2. **Authentication** (resource routes and logout): `Authorization: token <key>:<secret>` is
 //!    checked with `validate_api_token`; **if the header is present the cookie is ignored**.
 //!    Without it the `fb_session` cookie is checked with `validate_session`. Anything else is the
@@ -44,7 +49,7 @@
 //!
 //! With [`AppConfig::desk_dir`] set, `GET /desk/`, `/desk/index.html` and `/desk/assets/{name}`
 //! serve the built desk from that directory (see the `desk` module for the allow-list and the
-//! headers). The Host check applies to them like to every route.
+//! headers). The Host routing applies to them like to every route.
 
 mod auth;
 mod desk;
@@ -53,6 +58,7 @@ pub mod json;
 mod meta;
 mod routes;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::ops::DerefMut;
 use std::path::PathBuf;
@@ -61,21 +67,23 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{CACHE_CONTROL, HOST, X_CONTENT_TYPE_OPTIONS};
-use axum::http::{HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use forgebase_core::meta::Registry;
 use forgebase_db::Pool;
 use tokio::sync::Semaphore;
+use tower::ServiceExt;
 
 use crate::error::ApiError;
 
 /// Settings of the HTTP API.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    /// The host names the server answers to (case-insensitive, port ignored), for example
-    /// `localhost` or `erp.example.com`. An IPv6 address is written with brackets (`[::1]`).
+    /// The host names the implicit single site answers to (case-insensitive, port ignored), for
+    /// example `localhost` or `erp.example.com`. An IPv6 address is written with brackets
+    /// (`[::1]`). Read only by [`Sites::implicit`]; with a config file each site has its own
+    /// hosts (see [`Sites::site`]).
     pub allowed_hosts: Vec<String>,
     /// Add `Secure` to the session cookie. `false` is for local development over plain HTTP only.
     pub secure_cookies: bool,
@@ -103,7 +111,8 @@ impl Default for AppConfig {
     }
 }
 
-/// Shared state of the router: the connection pool, the DocType registry and the settings.
+/// The state of **one site**: its connection pool, the DocType registry and the settings. A
+/// router built from it can only reach that site's database.
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Inner>,
@@ -113,19 +122,12 @@ struct Inner {
     pool: Pool,
     registry: Arc<Registry>,
     config: AppConfig,
-    /// Allowed hosts, lower-cased.
-    hosts: Vec<String>,
     logins: Semaphore,
 }
 
 impl AppState {
     /// Creates the state. The registry must be the one the database schema was synced with.
     pub fn new(pool: Pool, registry: Arc<Registry>, config: AppConfig) -> Self {
-        let hosts = config
-            .allowed_hosts
-            .iter()
-            .map(|h| h.trim().to_ascii_lowercase())
-            .collect();
         let logins = Semaphore::new(login_permits(
             config.max_concurrent_logins,
             pool.status().max_size,
@@ -135,7 +137,6 @@ impl AppState {
                 pool,
                 registry,
                 config,
-                hosts,
                 logins,
             }),
         }
@@ -174,8 +175,103 @@ fn login_permits(configured: usize, pool_max_size: usize) -> usize {
     configured.min((pool_max_size / 2).max(1)).max(1)
 }
 
-/// Builds the router with every route and the Host check.
+/// The sites a server answers for, by `Host` (M7.1, ADR 0014). Every site has its own
+/// [`AppState`]: pool, registry and login limit. There is no shared pool, so a request for one
+/// site can only reach that site's database.
+pub struct Sites {
+    /// Lower-cased host name to the router of its site.
+    routes: HashMap<String, Router>,
+    /// What a well-formed `Host` that no site owns gets.
+    unknown_host: UnknownHost,
+}
+
+#[derive(Clone, Copy)]
+enum UnknownHost {
+    /// Implicit single-site mode: `400 invalid_host` (the DNS-rebinding allow-list).
+    Invalid,
+    /// Config file: `404 not_found`, "no such site".
+    NotFound,
+}
+
+impl Sites {
+    /// The implicit single site (no config file): it answers to
+    /// [`AppConfig::allowed_hosts`] of `state`, and any other host is `400 invalid_host`.
+    pub fn implicit(state: AppState) -> Self {
+        let hosts = state.config().allowed_hosts.clone();
+        let router = site_router(state);
+        let routes = hosts
+            .iter()
+            .map(|h| (h.trim().to_ascii_lowercase(), router.clone()))
+            .collect();
+        Self {
+            routes,
+            unknown_host: UnknownHost::Invalid,
+        }
+    }
+
+    /// No site yet, for a config file: add them with [`Sites::site`]. A well-formed host that no
+    /// site owns is `404 not_found`.
+    pub fn configured() -> Self {
+        Self {
+            routes: HashMap::new(),
+            unknown_host: UnknownHost::NotFound,
+        }
+    }
+
+    /// Adds a site that answers to `hosts` (case-insensitive, no port). A host that another
+    /// site already owns is an error: one host is one site.
+    pub fn site(mut self, hosts: &[String], state: AppState) -> Result<Self, String> {
+        let router = site_router(state);
+        for host in hosts {
+            let host = host.trim().to_ascii_lowercase();
+            if self.routes.insert(host.clone(), router.clone()).is_some() {
+                return Err(format!("host {host} belongs to more than one site"));
+            }
+        }
+        Ok(self)
+    }
+
+    /// The router of the site `headers` name, or the error response.
+    fn pick(&self, headers: &HeaderMap) -> Result<Router, ApiError> {
+        let invalid = || {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_host",
+                "invalid Host header",
+            )
+        };
+        let mut values = headers.get_all(HOST).iter();
+        let (Some(value), None) = (values.next(), values.next()) else {
+            return Err(invalid());
+        };
+        let host = host_part(value.to_str().map_err(|_| invalid())?);
+        if let Some(router) = self.routes.get(&host) {
+            return Ok(router.clone());
+        }
+        match self.unknown_host {
+            UnknownHost::NotFound if is_wellformed_host(&host) => Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no such site",
+            )),
+            _ => Err(invalid()),
+        }
+    }
+}
+
+/// Builds the router of the implicit single site (see [`Sites::implicit`]).
 pub fn router(state: AppState) -> Router {
+    sites_router(Sites::implicit(state))
+}
+
+/// Builds the router that routes by `Host` to the router of each site, and adds the headers
+/// every response gets.
+pub fn sites_router(sites: Sites) -> Router {
+    Router::new().fallback(dispatch).with_state(Arc::new(sites))
+}
+
+/// The routes of one site, without the Host routing (that is [`dispatch`]).
+fn site_router(state: AppState) -> Router {
     let limit = state.config().body_limit_bytes;
     let mut router = Router::new()
         .route("/api/v1/login", post(routes::login))
@@ -222,41 +318,30 @@ pub fn router(state: AppState) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(limit))
-        // Added last, so it is the outermost layer: it runs before everything else.
-        .layer(middleware::from_fn_with_state(state.clone(), check_host))
         .with_state(state)
 }
 
 /// Serves the API on `listener` until `shutdown` completes (in-flight requests finish).
 pub async fn serve(
     listener: tokio::net::TcpListener,
-    state: AppState,
+    sites: Sites,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(state))
+    axum::serve(listener, sites_router(sites))
         .with_graceful_shutdown(shutdown)
         .await
 }
 
-/// Rejects a request whose `Host` is missing, repeated or not allowed, then adds the headers
-/// every response gets.
-async fn check_host(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let mut hosts = request.headers().get_all(HOST).iter();
-    let allowed = match (hosts.next(), hosts.next()) {
-        (Some(value), None) => value
-            .to_str()
-            .is_ok_and(|v| state.inner.hosts.iter().any(|h| *h == host_part(v))),
-        _ => false,
-    };
-    let mut response = if allowed {
-        next.run(request).await
-    } else {
-        ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_host",
-            "invalid Host header",
-        )
-        .into_response()
+/// The outermost layer, for every request: picks the site by `Host` (before anything else runs,
+/// authentication included), hands the request to that site's router and adds the headers every
+/// response gets.
+async fn dispatch(State(sites): State<Arc<Sites>>, request: Request) -> Response {
+    let mut response = match sites.pick(request.headers()) {
+        Ok(router) => match router.oneshot(request).await {
+            Ok(response) => response,
+            Err(infallible) => match infallible {},
+        },
+        Err(error) => error.into_response(),
     };
     let headers = response.headers_mut();
     // `no-store` unless the handler chose a policy (only the hashed desk assets do).
@@ -265,6 +350,21 @@ async fn check_host(State(state): State<AppState>, request: Request, next: Next)
     }
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     response
+}
+
+/// True for a host (as [`host_part`] leaves it) that is a plausible name or address: letters,
+/// digits, `-`, `.` and `_`, or a bracketed IPv6 address. Anything else is a malformed `Host`.
+fn is_wellformed_host(host: &str) -> bool {
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return !inner.is_empty()
+            && inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
+    }
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
 }
 
 /// The host of a `Host` header value, lower-cased, without the port.
@@ -290,7 +390,7 @@ fn is_port(text: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, AppState, host_part, login_permits, router};
+    use super::{AppConfig, AppState, Sites, host_part, login_permits, router, sites_router};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use forgebase_core::meta::Registry;
@@ -349,6 +449,121 @@ mod tests {
             .await
             .expect("body");
         assert!(String::from_utf8_lossy(&body).contains("too_many_logins"));
+    }
+
+    async fn status(
+        router: &axum::Router,
+        host: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().uri("/api/v1/nothing");
+        if let Some(host) = host {
+            builder = builder.header("host", host);
+        }
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("infallible");
+        // Every answer, the refusals included, carries the response headers.
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    fn state() -> AppState {
+        AppState::new(
+            lazy_pool(2),
+            Arc::new(Registry::new()),
+            AppConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_implicit_site_answers_400_to_every_host_it_does_not_own() {
+        let router = router(state());
+        // An owned host reaches the site's router (an unknown route is its own 404).
+        let (owned, body) = status(&router, Some("LocalHost:8000"), &[]).await;
+        assert_eq!(owned, StatusCode::NOT_FOUND);
+        assert!(body.contains("no such route"), "{body}");
+        for host in [
+            None,
+            Some("evil.example"),
+            Some("bad host"),
+            Some("localhost:80@evil.com"),
+        ] {
+            let (code, body) = status(&router, host, &[]).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{host:?}");
+            assert!(body.contains("invalid_host"), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_sites_an_unknown_host_is_404_and_a_malformed_one_is_400() {
+        let sites = Sites::configured()
+            .site(&["a.test".to_owned(), "A2.test".to_owned()], state())
+            .expect("a")
+            .site(&["b.test".to_owned()], state())
+            .expect("b");
+        let router = sites_router(sites);
+        // Both sites' hosts reach a site router (whose unknown route is "no such route").
+        for host in ["a.test", "a2.test:8000", "B.TEST"] {
+            let (code, body) = status(&router, Some(host), &[]).await;
+            assert_eq!(code, StatusCode::NOT_FOUND, "{host}");
+            assert!(body.contains("no such route"), "{body}");
+        }
+        // No site owns it: a generic 404 envelope.
+        for host in ["c.test", "localhost", "[::1]", "10.0.0.1:80"] {
+            let (code, body) = status(&router, Some(host), &[]).await;
+            assert_eq!(code, StatusCode::NOT_FOUND, "{host}");
+            assert!(
+                body.contains("\"not_found\"") && body.contains("no such site"),
+                "{body}"
+            );
+        }
+        // Missing, malformed and non-UTF-8 hosts stay 400.
+        for host in [
+            None,
+            Some(""),
+            Some("bad host"),
+            Some("a.test:80@evil.com"),
+            Some("a.test/x"),
+        ] {
+            let (code, body) = status(&router, host, &[]).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{host:?}");
+            assert!(body.contains("invalid_host"), "{body}");
+        }
+        // Forwarding headers never choose the site.
+        let forwarded = [("x-forwarded-host", "a.test"), ("forwarded", "host=a.test")];
+        let (code, body) = status(&router, Some("c.test"), &forwarded).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(
+            body.contains("\"not_found\"") && !body.contains("no such route"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn one_host_is_one_site() {
+        let result = Sites::configured()
+            .site(&["a.test".to_owned()], state_sync())
+            .and_then(|s| s.site(&["A.test".to_owned()], state_sync()));
+        assert!(result.err().expect("refused").contains("a.test"));
+    }
+
+    fn state_sync() -> AppState {
+        AppState::new(
+            lazy_pool(2),
+            Arc::new(Registry::new()),
+            AppConfig::default(),
+        )
     }
 
     #[test]

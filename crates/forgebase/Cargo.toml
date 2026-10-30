@@ -31,9 +31,11 @@ forgebase-http.workspace = true
 axum = { workspace = true, optional = true }
 clap.workspace = true
 rust_decimal.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing", "formatting"] }
+toml.workspace = true
 tower = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 

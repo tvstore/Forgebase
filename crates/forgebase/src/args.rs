@@ -7,11 +7,23 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 
 /// Forgebase command-line tool.
 ///
-/// Database commands read the connection URL from the `FORGEBASE_DATABASE_URL` environment
-/// variable (`postgres://user:password@host:port/database`).
+/// Database commands work on one site, which is one database. Without a config file there is one
+/// site, `default`, and its connection URL comes from the `FORGEBASE_DATABASE_URL` environment
+/// variable (`postgres://user:password@host:port/database`). With a config file (`--config`)
+/// the sites are listed in it, each naming the environment variable that holds its URL.
 #[derive(Debug, Parser)]
 #[command(name = "forgebase", version)]
 pub struct Cli {
+    /// The config file (`forgebase.toml`) that lists the sites. Also read from the environment
+    /// variable `FORGEBASE_CONFIG`; this option wins. It is never looked for in the current
+    /// directory. Without one, the only site is `default`.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+    /// The site a database command works on. Required when the config file has several sites,
+    /// except for `serve`, which serves every site without it. Optional with one site, and
+    /// without a config file (where only `default` exists).
+    #[arg(long, global = true, value_name = "NAME")]
+    pub site: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }

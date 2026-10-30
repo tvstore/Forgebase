@@ -82,6 +82,7 @@ mod args;
 mod builder;
 mod builtin;
 mod compose;
+mod config;
 mod doctypes;
 mod documents;
 mod error;

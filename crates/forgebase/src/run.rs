@@ -11,13 +11,14 @@ use forgebase_db::{DbError, ListQuery, StoredDocument, SyncOptions};
 
 use std::sync::Arc;
 
-use forgebase_http::{AppConfig, AppState};
+use forgebase_http::{AppConfig, AppState, Sites};
 
 use crate::app::App;
 use crate::args::{
-    ActorArg, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
+    ActorArg, Cli, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
 };
 use crate::compose::{Composed, compose};
+use crate::config::{Config, Site, SiteContext, host_problem};
 use crate::error::CliError;
 use crate::job_cmd::job;
 use crate::new_app::new_app;
@@ -30,13 +31,22 @@ use forgebase_http::json::{
 /// The system actor of commands that have no `--actor` (`doc get`, `doc list`): they only read.
 const DEFAULT_ACTOR: &str = "cli";
 
-/// Environment variable with the PostgreSQL URL.
-const DATABASE_URL_VAR: &str = "FORGEBASE_DATABASE_URL";
+/// The environment variable with the path of the config file (the option `--config` wins).
+const CONFIG_VAR: &str = "FORGEBASE_CONFIG";
 
 /// Runs one command with the apps compiled into the binary. Every command first checks that
 /// the apps (and the `--doctypes` directory) fit together; a startup error ends it with exit
 /// code 1.
-pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
+///
+/// A database command works on exactly one site (`serve` on one or all), chosen from the config
+/// file and `--site` before anything else is done. The site gives the command its pool; there is
+/// no other way to reach a database.
+pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
+    let Cli {
+        config,
+        site,
+        command,
+    } = cli;
     // The one command that needs neither the apps nor a database.
     if let Command::NewApp {
         name,
@@ -47,7 +57,14 @@ pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
         let created = new_app(name, forgebase_path, dir)?;
         return write_stdout(&crate::new_app::report(&created));
     }
-    let url = database_url()?;
+    let config = load_config(config)?;
+    let site = site.as_deref();
+    match command {
+        Command::Serve { doctypes } => return serve(&config, site, &doctypes, apps).await,
+        Command::NewApp { .. } => unreachable!("handled above"),
+        _ => {}
+    }
+    let site = config.select(site)?;
     match command {
         Command::Migrate {
             doctypes,
@@ -55,57 +72,79 @@ pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
             lock_timeout_ms,
         } => {
             let composed = composed(apps, &doctypes)?;
-            let pool = forgebase_db::connect(&url).await?;
+            let ctx = site
+                .context(Arc::new(composed.registry.clone()), None)
+                .await?;
             let options = SyncOptions {
                 dry_run,
                 lock_timeout: Duration::from_millis(lock_timeout_ms),
             };
-            let report = composed.migrate(&pool, &options).await?;
+            let report = composed.migrate(&ctx.pool, &options).await?;
             write_stdout(&migrate_report(&report, dry_run, composed.app_count()))
         }
-        Command::Doc(command) => execute(&url, prepare(command, apps)?).await,
+        Command::Doc(command) => {
+            let (registry, operation) = prepare(command, apps)?;
+            let ctx = site.context(Arc::new(registry), None).await?;
+            execute(&ctx, operation).await
+        }
         Command::User(command) => {
-            compose(apps, None)?;
-            user(&url, command).await
+            let ctx = site.context(startup_registry(apps)?, None).await?;
+            user(&ctx, command).await
         }
         Command::Token(command) => {
-            compose(apps, None)?;
-            token(&url, command).await
+            let ctx = site.context(startup_registry(apps)?, None).await?;
+            token(&ctx, command).await
         }
-        Command::Serve { doctypes } => serve(&url, &doctypes, apps).await,
         Command::Worker {
             doctypes,
             concurrency,
-        } => worker(&url, &doctypes, apps, concurrency).await,
+        } => worker(site, &doctypes, apps, concurrency).await,
         Command::Job(command) => {
-            let composed = compose(apps, None)?;
-            job(&url, &composed.registry, command).await
+            let ctx = site.context(startup_registry(apps)?, None).await?;
+            job(&ctx, command).await
         }
-        Command::NewApp { .. } => unreachable!("handled above"),
+        Command::Serve { .. } | Command::NewApp { .. } => unreachable!("handled above"),
     }
 }
 
+/// The config file named by `--config` or `FORGEBASE_CONFIG` (the option wins), else the
+/// implicit single site. The current directory is never searched.
+fn load_config(option: Option<std::path::PathBuf>) -> Result<Config, CliError> {
+    let path = option.or_else(|| {
+        std::env::var_os(CONFIG_VAR)
+            .filter(|v| !v.is_empty())
+            .map(Into::into)
+    });
+    match path {
+        Some(path) => Config::load(&path),
+        None => Ok(Config::implicit()),
+    }
+}
+
+/// Checks that the apps fit together (every command does) and returns their registry, for the
+/// commands that need no DocType directory.
+fn startup_registry(apps: &[App]) -> Result<Arc<Registry>, CliError> {
+    Ok(Arc::new(compose(apps, None)?.registry))
+}
+
 /// A document operation with its input already read and checked, so that nothing touches the
-/// database when the DocType, the JSON or standard input is wrong.
+/// database when the DocType, the JSON or standard input is wrong. It runs against the registry
+/// of the site context.
 enum Operation {
     Insert {
-        registry: Registry,
         doctype: String,
         input: Input,
         actor: String,
     },
     Get {
-        registry: Registry,
         doctype: String,
         name: String,
     },
     List {
-        registry: Registry,
         doctype: String,
         query: ListQuery,
     },
     Update {
-        registry: Registry,
         doctype: String,
         name: String,
         expected_version: i64,
@@ -113,7 +152,6 @@ enum Operation {
         actor: String,
     },
     Delete {
-        registry: Registry,
         doctype: String,
         name: String,
         expected_version: i64,
@@ -122,7 +160,6 @@ enum Operation {
     /// Submit, cancel or amend: a document operation without data.
     Status {
         kind: StatusKind,
-        registry: Registry,
         doctype: String,
         name: String,
         expected_version: i64,
@@ -137,45 +174,58 @@ enum StatusKind {
     Amend,
 }
 
-fn prepare(command: DocCommand, apps: &[App]) -> Result<Operation, CliError> {
-    Ok(match command {
+/// The DocType directory option and the DocType name of a `doc` command.
+fn target(command: &DocCommand) -> (&DocTypesDir, &str) {
+    match command {
         DocCommand::Insert {
-            doctype,
-            doctypes,
-            data,
-            actor,
-        } => {
-            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
-            let input = parse_input(&registry, &found, &read_data(&data.data)?)?;
-            Operation::Insert {
-                registry,
-                doctype: found.name,
-                input,
-                actor: actor.actor,
-            }
+            doctype, doctypes, ..
         }
-        DocCommand::Get {
-            doctype,
-            name,
-            doctypes,
-        } => {
-            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
-            Operation::Get {
-                registry,
-                doctype: found.name,
-                name,
-            }
+        | DocCommand::Get {
+            doctype, doctypes, ..
         }
+        | DocCommand::List {
+            doctype, doctypes, ..
+        }
+        | DocCommand::Update {
+            doctype, doctypes, ..
+        }
+        | DocCommand::Submit {
+            doctype, doctypes, ..
+        }
+        | DocCommand::Cancel {
+            doctype, doctypes, ..
+        }
+        | DocCommand::Amend {
+            doctype, doctypes, ..
+        }
+        | DocCommand::Delete {
+            doctype, doctypes, ..
+        } => (doctypes, doctype),
+    }
+}
+
+/// Checks a `doc` command and reads its input. Returns the registry it was checked against and
+/// the operation.
+fn prepare(command: DocCommand, apps: &[App]) -> Result<(Registry, Operation), CliError> {
+    let (dir, doctype) = target(&command);
+    let (registry, found) = find_doctype(apps, dir, doctype)?;
+    let doctype = found.name.clone();
+    let operation = match command {
+        DocCommand::Insert { data, actor, .. } => Operation::Insert {
+            doctype,
+            input: parse_input(&registry, &found, &read_data(&data.data)?)?,
+            actor: actor.actor,
+        },
+        DocCommand::Get { name, .. } => Operation::Get { doctype, name },
         DocCommand::List {
-            doctype,
-            doctypes,
             filter,
             sort,
             limit,
             offset,
-        } => {
-            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
-            let query = ListQuery {
+            ..
+        } => Operation::List {
+            doctype,
+            query: ListQuery {
                 filters: match filter {
                     Some(text) => parse_filters(&found, &text)?,
                     None => Vec::new(),
@@ -183,136 +233,85 @@ fn prepare(command: DocCommand, apps: &[App]) -> Result<Operation, CliError> {
                 sort: parse_sort(&sort)?,
                 limit,
                 offset,
-            };
-            Operation::List {
-                registry,
-                doctype: found.name,
-                query,
-            }
-        }
+            },
+        },
         DocCommand::Update {
-            doctype,
             name,
             version,
-            doctypes,
             data,
             actor,
-        } => {
-            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
-            let input = parse_input(&registry, &found, &read_data(&data.data)?)?;
-            Operation::Update {
-                registry,
-                doctype: found.name,
-                name,
-                expected_version: version.expected_version,
-                input,
-                actor: actor.actor,
-            }
-        }
+            ..
+        } => Operation::Update {
+            doctype,
+            name,
+            expected_version: version.expected_version,
+            input: parse_input(&registry, &found, &read_data(&data.data)?)?,
+            actor: actor.actor,
+        },
         DocCommand::Submit {
-            doctype,
             name,
             version,
-            doctypes,
             actor,
-        } => status(
-            apps,
-            StatusKind::Submit,
-            doctype,
-            name,
-            version,
-            doctypes,
-            actor,
-        )?,
+            ..
+        } => status(StatusKind::Submit, doctype, name, version, actor),
         DocCommand::Cancel {
-            doctype,
             name,
             version,
-            doctypes,
             actor,
-        } => status(
-            apps,
-            StatusKind::Cancel,
-            doctype,
-            name,
-            version,
-            doctypes,
-            actor,
-        )?,
+            ..
+        } => status(StatusKind::Cancel, doctype, name, version, actor),
         DocCommand::Amend {
-            doctype,
             name,
             version,
-            doctypes,
             actor,
-        } => status(
-            apps,
-            StatusKind::Amend,
-            doctype,
-            name,
-            version,
-            doctypes,
-            actor,
-        )?,
+            ..
+        } => status(StatusKind::Amend, doctype, name, version, actor),
         DocCommand::Delete {
-            doctype,
             name,
             version,
-            doctypes,
             actor,
-        } => {
-            let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
-            Operation::Delete {
-                registry,
-                doctype: found.name,
-                name,
-                expected_version: version.expected_version,
-                actor: actor.actor,
-            }
-        }
-    })
+            ..
+        } => Operation::Delete {
+            doctype,
+            name,
+            expected_version: version.expected_version,
+            actor: actor.actor,
+        },
+    };
+    Ok((registry, operation))
 }
 
 fn status(
-    apps: &[App],
     kind: StatusKind,
     doctype: String,
     name: String,
     version: VersionArg,
-    doctypes: DocTypesDir,
     actor: ActorArg,
-) -> Result<Operation, CliError> {
-    let (registry, found) = find_doctype(apps, &doctypes, &doctype)?;
-    Ok(Operation::Status {
+) -> Operation {
+    Operation::Status {
         kind,
-        registry,
-        doctype: found.name,
+        doctype,
         name,
         expected_version: version.expected_version,
         actor: actor.actor,
-    })
+    }
 }
 
-async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
-    let pool = forgebase_db::connect(url).await?;
-    let mut client = pool.get().await.map_err(DbError::from)?;
+async fn execute(site: &SiteContext, operation: Operation) -> Result<(), CliError> {
+    let registry = &*site.registry;
+    let mut client = site.pool.get().await.map_err(DbError::from)?;
     let client = &mut **client;
     let stored = match operation {
-        Operation::List {
-            registry,
-            doctype,
-            query,
-        } => {
+        Operation::List { doctype, query } => {
             let caller = Caller::system(DEFAULT_ACTOR);
             let documents =
-                forgebase_db::list(&*client, &registry, &doctype, &caller, &query).await?;
+                forgebase_db::list(&*client, registry, &doctype, &caller, &query).await?;
             let json = documents_to_json(&documents)?;
             let text = serde_json::to_string_pretty(&json)
                 .map_err(forgebase_http::json::JsonError::Serialize)?;
             return write_stdout(&format!("{text}\n"));
         }
         Operation::Insert {
-            registry,
             doctype,
             input,
             actor,
@@ -322,22 +321,12 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
                 values: input.values,
                 tables: input.tables,
             };
-            forgebase_db::insert(
-                client,
-                &registry,
-                &doctype,
-                document,
-                &Caller::system(actor),
-            )
-            .await?
+            forgebase_db::insert(client, registry, &doctype, document, &Caller::system(actor))
+                .await?
         }
-        Operation::Get {
-            registry,
-            doctype,
-            name,
-        } => forgebase_db::get(
+        Operation::Get { doctype, name } => forgebase_db::get(
             client,
-            &registry,
+            registry,
             &doctype,
             &name,
             &Caller::system(DEFAULT_ACTOR),
@@ -345,7 +334,6 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
         .await?
         .ok_or(DbError::NotFound { doctype, name })?,
         Operation::Update {
-            registry,
             doctype,
             name,
             expected_version,
@@ -358,7 +346,7 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
             };
             forgebase_db::update(
                 client,
-                &registry,
+                registry,
                 &doctype,
                 &name,
                 expected_version,
@@ -369,7 +357,6 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
         }
         Operation::Status {
             kind,
-            registry,
             doctype,
             name,
             expected_version,
@@ -380,35 +367,20 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
             let caller = Caller::system(actor);
             match kind {
                 StatusKind::Submit => {
-                    forgebase_db::submit(
-                        client,
-                        &registry,
-                        doctype,
-                        name,
-                        expected_version,
-                        &caller,
-                    )
-                    .await?
+                    forgebase_db::submit(client, registry, doctype, name, expected_version, &caller)
+                        .await?
                 }
                 StatusKind::Cancel => {
-                    forgebase_db::cancel(
-                        client,
-                        &registry,
-                        doctype,
-                        name,
-                        expected_version,
-                        &caller,
-                    )
-                    .await?
+                    forgebase_db::cancel(client, registry, doctype, name, expected_version, &caller)
+                        .await?
                 }
                 StatusKind::Amend => {
-                    forgebase_db::amend(client, &registry, doctype, name, expected_version, &caller)
+                    forgebase_db::amend(client, registry, doctype, name, expected_version, &caller)
                         .await?
                 }
             }
         }
         Operation::Delete {
-            registry,
             doctype,
             name,
             expected_version,
@@ -416,7 +388,7 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
         } => {
             return Ok(forgebase_db::delete(
                 client,
-                &registry,
+                registry,
                 &doctype,
                 &name,
                 expected_version,
@@ -430,13 +402,12 @@ async fn execute(url: &str, operation: Operation) -> Result<(), CliError> {
 
 /// Runs a `user` command. The password (if any) is read from standard input before the database
 /// is touched, and never printed.
-async fn user(url: &str, command: UserCommand) -> Result<(), CliError> {
+async fn user(site: &SiteContext, command: UserCommand) -> Result<(), CliError> {
     let password = match &command {
         UserCommand::Create { .. } | UserCommand::SetPassword { .. } => Some(read_password()?),
         _ => None,
     };
-    let pool = forgebase_db::connect(url).await?;
-    let mut client = pool.get().await.map_err(DbError::from)?;
+    let mut client = site.pool.get().await.map_err(DbError::from)?;
     let client = &mut **client;
     let password = password.as_deref().unwrap_or_default();
     let text = match command {
@@ -478,16 +449,24 @@ async fn user(url: &str, command: UserCommand) -> Result<(), CliError> {
 /// How long `serve` waits for open connections after the first stop signal.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Runs `serve`: the HTTP API until Ctrl-C or SIGTERM. Prints the listening address (never the
+/// Runs `serve`: the HTTP API until Ctrl-C or SIGTERM. Prints the listening address (never a
 /// database URL or any secret). It does not run migrations.
+///
+/// Without a config file it serves the implicit site `default` for the hosts of
+/// `FORGEBASE_ALLOWED_HOSTS`. With one it serves every site (or only `--site`), one pool per
+/// site, and routes each request by its `Host` to the site that owns the host.
 ///
 /// The first signal stops accepting connections and lets running requests finish, for at most
 /// [`SHUTDOWN_GRACE`]; a second signal, or the end of the grace period, exits at once.
-async fn serve(url: &str, doctypes: &DocTypesDir, apps: &[App]) -> Result<(), CliError> {
-    let registry = composed(apps, doctypes)?.registry;
+async fn serve(
+    config: &Config,
+    site: Option<&str>,
+    doctypes: &DocTypesDir,
+    apps: &[App],
+) -> Result<(), CliError> {
+    let registry = Arc::new(composed(apps, doctypes)?.registry);
+    let sites = config.serve_set(site)?;
     let listen = env_or("FORGEBASE_LISTEN", "127.0.0.1:8000");
-    let hosts = env_or("FORGEBASE_ALLOWED_HOSTS", "localhost,127.0.0.1");
-    let allowed_hosts = parse_allowed_hosts(&hosts)?;
     let insecure = std::env::var("FORGEBASE_DEV_INSECURE_COOKIES").is_ok_and(|v| v == "1");
     if insecure {
         let _ = writeln!(
@@ -497,28 +476,58 @@ async fn serve(url: &str, doctypes: &DocTypesDir, apps: &[App]) -> Result<(), Cl
         );
     }
     let desk_dir = desk_dir()?;
-    let config = AppConfig {
+    let app_config = |allowed_hosts: Vec<String>| AppConfig {
         allowed_hosts,
         secure_cookies: !insecure,
         desk_dir: desk_dir.clone(),
         ..AppConfig::default()
     };
-    let pool = forgebase_db::connect(url).await?;
+    let mut routing;
+    let mut lines = Vec::new();
+    if config.is_configured() {
+        if std::env::var("FORGEBASE_ALLOWED_HOSTS").is_ok_and(|v| !v.trim().is_empty()) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: FORGEBASE_ALLOWED_HOSTS is ignored: the hosts come from the config file"
+            );
+        }
+        routing = Sites::configured();
+        for site in sites {
+            let ctx = site.context(registry.clone(), None).await?;
+            let state = AppState::new(ctx.pool, ctx.registry, app_config(site.hosts.clone()));
+            routing = routing.site(&site.hosts, state).map_err(CliError::Config)?;
+            lines.push(format!("site {}: {}\n", site.name, site.hosts.join(", ")));
+        }
+    } else {
+        let hosts = env_or("FORGEBASE_ALLOWED_HOSTS", "localhost,127.0.0.1");
+        let allowed_hosts = parse_allowed_hosts(&hosts)?;
+        let [site] = sites.as_slice() else {
+            unreachable!("the implicit config has one site");
+        };
+        let ctx = site.context(registry, None).await?;
+        routing = Sites::implicit(AppState::new(
+            ctx.pool,
+            ctx.registry,
+            app_config(allowed_hosts),
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .map_err(|e| CliError::Config(format!("cannot listen on {listen}: {e}")))?;
     let address = listener.local_addr().map_err(CliError::Serve)?;
     let signals = stop_signals().map_err(CliError::Serve)?;
     write_stdout(&format!("listening on http://{address}\n"))?;
+    for line in lines {
+        write_stdout(&line)?;
+    }
     if let Some(dir) = &desk_dir {
         write_stdout(&format!(
             "serving the desk from {} at /desk/\n",
             dir.display()
         ))?;
     }
-    let state = AppState::new(pool, Arc::new(registry), config);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = forgebase_http::serve(listener, state, async {
+    let server = forgebase_http::serve(listener, routing, async {
         let _ = stopped.await;
     });
     run_until_stopped(server, stop, signals, SHUTDOWN_GRACE)
@@ -531,7 +540,7 @@ async fn serve(url: &str, doctypes: &DocTypesDir, apps: &[App]) -> Result<(), Cl
 /// The pool has `concurrency + 2` connections: each running job holds one for its transaction,
 /// and a claim or the record of a failure needs one briefly while the handlers hold theirs.
 async fn worker(
-    url: &str,
+    site: &Site,
     doctypes: &DocTypesDir,
     apps: &[App],
     concurrency: u32,
@@ -540,10 +549,13 @@ async fn worker(
     let size = usize::try_from(concurrency)
         .unwrap_or(usize::MAX)
         .saturating_add(2);
-    let pool = forgebase_db::connect_sized(url, Some(size)).await?;
+    // The pool of the worker is sized by its concurrency, not by the `pool_size` of the site.
+    let ctx = site
+        .context(Arc::new(composed.registry.clone()), Some(size))
+        .await?;
     let signals = stop_signals().map_err(CliError::Serve)?;
     let worker = Worker::new(
-        pool,
+        ctx.pool,
         composed.registry,
         composed.jobs,
         composed.schedules,
@@ -591,17 +603,9 @@ fn parse_allowed_hosts(text: &str) -> Result<Vec<String>, CliError> {
         ));
     }
     for host in &hosts {
-        // `[::1]` is a host name with colons; anything after its `]`, or a colon outside
-        // brackets, is a port (or an unbracketed IPv6 address).
-        let bad = if host.starts_with('[') {
-            !host.ends_with(']')
-        } else {
-            host.contains(':')
-        };
-        if bad {
+        if let Some(problem) = host_problem(host) {
             return Err(CliError::Config(format!(
-                "FORGEBASE_ALLOWED_HOSTS entry {host:?} must be a host name without a port \
-                 (the port of the Host header is ignored; write IPv6 as [::1])"
+                "FORGEBASE_ALLOWED_HOSTS entry {host:?} {problem}"
             )));
         }
     }
@@ -682,9 +686,8 @@ fn env_or(name: &str, default: &str) -> String {
 }
 
 /// Runs a `token` command. `create` prints `key:secret` and nothing else.
-async fn token(url: &str, command: TokenCommand) -> Result<(), CliError> {
-    let pool = forgebase_db::connect(url).await?;
-    let client = pool.get().await.map_err(DbError::from)?;
+async fn token(site: &SiteContext, command: TokenCommand) -> Result<(), CliError> {
+    let client = site.pool.get().await.map_err(DbError::from)?;
     let client = &**client;
     match command {
         TokenCommand::Create { username } => {
@@ -711,13 +714,6 @@ fn read_password() -> Result<String, CliError> {
         line.pop();
     }
     Ok(line)
-}
-
-fn database_url() -> Result<String, CliError> {
-    match std::env::var(DATABASE_URL_VAR) {
-        Ok(url) if !url.is_empty() => Ok(url),
-        _ => Err(CliError::MissingDatabaseUrl(DATABASE_URL_VAR)),
-    }
 }
 
 /// The apps of the binary plus the `--doctypes` directory, composed into one registry.
