@@ -106,6 +106,23 @@ impl Composed {
         self.apps.iter().any(|a| a.name == name)
     }
 
+    /// How many reports the composed apps define.
+    pub fn report_count(&self) -> usize {
+        self.registry.reports().count()
+    }
+
+    /// Prepares the SQL of every report against the database and returns one message per report
+    /// that does not fit what it declares ([`forgebase_db::check_reports`]). Run after the
+    /// migrations: the statements read the tables they create.
+    pub async fn check_reports(&self, pool: &Pool) -> Result<Vec<String>, DbError> {
+        let reports: Vec<_> = self.registry.reports().collect();
+        if reports.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = pool.get().await?;
+        forgebase_db::check_reports(&mut client, &reports).await
+    }
+
     /// Framework migrations, schema sync, the app migrations in app order, then the sync of the
     /// declared schedules ([`forgebase_db::migrate_all`]).
     pub async fn migrate(

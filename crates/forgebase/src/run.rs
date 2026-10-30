@@ -146,11 +146,20 @@ async fn migrate_site(
             ctx.site.name
         );
     }
-    Ok(migrate_report(
-        &report,
-        options.dry_run,
-        composed.app_count(),
-    ))
+    let mut text = migrate_report(&report, options.dry_run, composed.app_count());
+    // The reports read the tables the migrations create, so they are checked after them, and
+    // never in a dry run (nothing was applied, so the tables may not be there).
+    let reports = composed.report_count();
+    if reports > 0 && !options.dry_run {
+        let problems = composed.check_reports(&ctx.pool).await?;
+        if !problems.is_empty() {
+            // What was applied is reported first: the migrations are committed.
+            write_stdout(&text)?;
+            return Err(DbError::ReportCheck(problems).into());
+        }
+        let _ = writeln!(text, "reports: {reports} checked");
+    }
+    Ok(text)
 }
 
 /// Runs a `site` command. They take the site as an argument, so `--site` is refused.

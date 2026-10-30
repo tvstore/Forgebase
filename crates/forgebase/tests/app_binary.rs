@@ -11,7 +11,7 @@ use std::process::{Command, ExitCode, Output, Stdio};
 use forgebase::testing::TestDb;
 use forgebase::{
     App, DocTypeFile, DocTypeHooks, Document, Forgebase, HookContext, HookError, JobContext,
-    JobError, JobFuture, JobHandler, MigrationFile, Value,
+    JobError, JobFuture, JobHandler, MigrationFile, Param, Report, Value,
 };
 
 const BINARY_VAR: &str = "FORGEBASE_TEST_BINARY";
@@ -73,6 +73,21 @@ fn crm() -> App {
         .migrations(&[SEED])
 }
 
+/// `crm` with a report on its customers. The bad one declares one column where the SQL returns
+/// two.
+fn crm_with_report(valid: bool) -> App {
+    let mut report = Report::sql(
+        "SELECT name, title FROM doc_customer WHERE ($1::text IS NULL OR name = $1);\n",
+    )
+    .roles(&["Manager"])
+    .param(Param::link("customer", "customer"))
+    .column(forgebase::Column::link("customer", "customer"));
+    if valid {
+        report = report.column(forgebase::Column::data("title"));
+    }
+    crm().report("totals", report)
+}
+
 fn sales() -> App {
     App::new("sales")
         .depends_on(&["crm"])
@@ -83,6 +98,8 @@ fn main() -> ExitCode {
     match std::env::var(BINARY_VAR).as_deref() {
         Ok("good") => Forgebase::new().app(crm()).app(sales()).run(),
         // `sales` before `crm`: a startup error.
+        Ok("reports_ok") => Forgebase::new().app(crm_with_report(true)).run(),
+        Ok("reports_bad") => Forgebase::new().app(crm_with_report(false)).run(),
         Ok("broken") => Forgebase::new().app(sales()).app(crm()).run(),
         _ => {
             drive();
@@ -281,6 +298,60 @@ fn drive() {
         assert!(out.stdout.is_empty());
     }
 
+    runtime.block_on(db.cleanup());
+    reports(&runtime);
+}
+
+/// The check of the reports' SQL at `migrate` (M8.4): after the migrations, never in a dry run,
+/// and a mismatch is exit code 1 with the migrations kept.
+fn reports(runtime: &tokio::runtime::Runtime) {
+    let db = runtime.block_on(TestDb::new());
+    let ok = Run {
+        mode: "reports_ok",
+        url: db.url(),
+    };
+    // A dry run keeps nothing, so the tables the SQL reads may not exist: it checks nothing.
+    let out = succeeds(&ok.go(&["migrate", "--dry-run"], None));
+    assert!(!out.contains("reports:"), "{out}");
+    let out = succeeds(&ok.go(&["migrate"], None));
+    assert!(out.ends_with("reports: 1 checked\n"), "{out}");
+    runtime.block_on(db.cleanup());
+
+    let db = runtime.block_on(TestDb::new());
+    let bad = Run {
+        mode: "reports_bad",
+        url: db.url(),
+    };
+    let out = bad.go(&["migrate"], None);
+    assert_eq!(out.status.code(), Some(1));
+    // What was applied is reported, and it stays applied.
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("framework migrations: 9 applied")
+            && stdout.contains("app migrations: 1 applied\n  crm 0001 seed\n"),
+        "{stdout}"
+    );
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.starts_with(
+            "error: the migrations were applied, but 1 report(s) do not fit their SQL:\n"
+        ) && stderr.contains("report `crm.totals`: the SQL returns 2 column(s) but 1 are declared")
+            && stderr.contains("fix the report and run migrate again"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("doc_customer"),
+        "the SQL is not printed: {stderr}"
+    );
+    let rows = runtime.block_on(db.rows("SELECT name FROM fb_app"));
+    assert_eq!(rows, vec![vec!["crm".to_owned()]]);
+    let again = bad.go(&["migrate"], None);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(
+        text(&again.stdout).contains("app migrations: up to date"),
+        "{}",
+        text(&again.stdout)
+    );
     runtime.block_on(db.cleanup());
 }
 
