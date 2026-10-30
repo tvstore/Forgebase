@@ -341,7 +341,16 @@ test('the recent documents of one user are not shown to the next user of the tab
 
   // Logged out and in again as someone else, in the same tab: nothing of the first user is left.
   await logout(page);
-  await login(page, 'e2e_clerk');
+  // Log in again WITHOUT navigating: a page load would wipe the in-memory list by itself and the
+  // test would prove nothing. The marker shows that it is still the same document.
+  await page.evaluate(() => {
+    (window as unknown as { __sameDocument?: boolean }).__sameDocument = true;
+  });
+  await page.getByLabel('Username').fill('e2e_clerk');
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Log in' }).click();
+  await expect(page.getByRole('heading', { name: 'Home', level: 1 })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument)).toBe(true);
   await page.keyboard.press('Control+k');
   await expect(bar).toBeVisible();
   await expect(bar.getByRole('group', { name: 'Recent' })).toHaveCount(0);
