@@ -30,6 +30,15 @@ export function actionLayout(actions: AvailableAction[], dirty: boolean): Action
   };
 }
 
+/**
+ * The actions were fetched for one version of the document. After a transition, save or reload the
+ * document has a new version and the old actions may no longer apply (an action name can repeat in
+ * a multi-level approval), so they must not be used until the new ones arrive.
+ */
+export function actionsAreCurrent(fetchedForVersion: number | null, documentVersion: number): boolean {
+  return fetchedForVersion !== null && fetchedForVersion === documentVersion;
+}
+
 /** The history entries shown first, before "Show all". */
 export const HISTORY_SHOWN = 20;
 

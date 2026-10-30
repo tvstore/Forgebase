@@ -28,7 +28,7 @@ import { saveShortcut } from '../shortcut';
 import { stateBadge } from '../status';
 import { exactTime, relativeTime } from '../time';
 import type { DocTypeMeta, DocumentRow, FieldMeta } from '../types';
-import { actionLayout } from '../workflow';
+import { actionLayout, actionsAreCurrent } from '../workflow';
 import { ActivityCard } from './ActivityCard';
 import type { HistoryState } from './ActivityCard';
 import { Badge } from './Badge';
@@ -68,7 +68,7 @@ interface Failure {
 /** The workflow actions this caller may take now; kept while a refresh runs, so the buttons do not flicker. */
 type Available =
   | { status: 'loading' }
-  | { status: 'ready'; state: string | null; actions: AvailableAction[] }
+  | { status: 'ready'; version: number; state: string | null; actions: AvailableAction[] }
   | { status: 'error' };
 
 const TRANSITION_VERB: Record<Transition, string> = {
@@ -149,13 +149,13 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
     let cancelled = false;
     getTransitions(meta.name, name).then(
       (answer) => {
-        if (!cancelled) setAvailable({ status: 'ready', state: answer.state, actions: answer.transitions });
+        if (!cancelled) setAvailable({ status: 'ready', version, state: answer.state, actions: answer.transitions });
       },
       (e: unknown) => {
         if (cancelled) return;
         if (e instanceof ApiError && e.status === 404) {
           // The document is gone (deleted or no longer readable): no actions, the same message as a failed save.
-          setAvailable({ status: 'ready', state: null, actions: [] });
+          setAvailable({ status: 'ready', version, state: null, actions: [] });
           setFailure({ message: e.message, details: [] });
         } else {
           setAvailable({ status: 'error' });
@@ -337,17 +337,17 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
 
   /** A workflow action always asks first; with unsaved changes it asks to save first (its button is disabled then). */
   const askAction = (action: AvailableAction) => {
-    if (busy || name === null || needSave()) return;
+    if (busy || name === null || !actionsCurrent || needSave()) return;
     setAsking({ kind: 'workflow', action });
   };
 
   const takeAction = (action: AvailableAction) => {
-    if (busy || name === null) return;
+    if (busy || name === null || !actionsCurrent) return;
     setAsking(null);
     void run('moved', async () => {
       try {
         const result = await workflowTransition(meta.name, name, action.action, version);
-        toast(`${action.action}: ${action.to}`);
+        toast(`${action.action}: ${String(result.workflow_state ?? action.to)}`);
         adopt(result);
         // The button that was used is gone: put the focus on the heading, which names the document.
         headingRef.current?.focus();
@@ -425,8 +425,13 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
 
   const badge = stateBadge(meta, doc ?? {});
   const layout = actionLayout(available.status === 'ready' ? available.actions : [], dirty);
+  // Actions fetched for an older version are shown (the layout stays) but disabled until the new ones arrive.
+  const fetchedFor = available.status === 'ready' ? available.version : null;
+  const actionsCurrent = actionsAreCurrent(fetchedFor, version);
+  const actionsOff = layout.blocked || !actionsCurrent;
   const saveFirstId = `${idBase}-save-first`;
-  const fromState = (available.status === 'ready' ? available.state : null) ?? String(doc?.workflow_state ?? '');
+  const fromState =
+    (available.status === 'ready' && actionsCurrent ? available.state : null) ?? String(doc?.workflow_state ?? '');
   const movingName = shown !== null && shown.title !== '' ? shown.title : docName;
 
   /** A workflow action as a header button; while there are unsaved changes it is disabled and secondary. */
@@ -435,7 +440,7 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
       key={action.action}
       type="button"
       className={primary && !layout.blocked ? 'btn btn-primary' : 'btn'}
-      aria-disabled={busy || layout.blocked || undefined}
+      aria-disabled={busy || actionsOff || undefined}
       aria-describedby={layout.blocked ? saveFirstId : undefined}
       title={layout.blocked ? 'Save first' : undefined}
       onClick={() => askAction(action)}
@@ -507,7 +512,8 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
                       key={action.action}
                       type="button"
                       className="menu-item"
-                      aria-disabled={busy || layout.blocked || undefined}
+                      aria-disabled={busy || actionsOff || undefined}
+                      aria-describedby={layout.blocked ? saveFirstId : undefined}
                       title={layout.blocked ? 'Save first' : undefined}
                       onClick={() => askAction(action)}
                     >

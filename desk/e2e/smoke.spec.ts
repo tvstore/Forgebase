@@ -492,14 +492,23 @@ test('a clerk sends a purchase request for approval and a manager approves it', 
   await dialog.getByRole('button', { name: 'Back' }).click();
   await expect(dialog).toHaveCount(0);
 
-  // Confirm: the version is sent with the action.
+  // Confirm: the version is sent with the action. The new actions are delayed, so the old ones
+  // (fetched for the old version) are visible for a while: they must be disabled, not usable.
+  await page.route('**/transitions', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await route.continue();
+  });
   await sendButton.click();
   const request = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/transition'));
   await dialog.getByRole('button', { name: 'Confirm' }).click();
   expect(JSON.parse((await request).postData() ?? '{}')).toEqual({ action: 'Submit for Approval', version: 2 });
   await expect(toast(page, 'Submit for Approval: Pending Approval')).toBeVisible();
   await expect(statusBadge(page)).toHaveText('Pending Approval');
+  await expect(sendButton).toBeDisabled(); // still the old action: the new list is in flight
+  await sendButton.click({ force: true });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(sendButton).toHaveCount(0);
+  await page.unroute('**/transitions');
   await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0); // not the clerk's action
   await expect(history(page)).toHaveCount(1);
   await expect(history(page).first()).toContainText('e2e_clerk Submit for Approval');

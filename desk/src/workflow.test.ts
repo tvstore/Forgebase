@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AvailableAction, HistoryEntry } from './api';
-import { actionLayout, HISTORY_CAP, HISTORY_SHOWN, historyView } from './workflow';
+import { actionLayout, actionsAreCurrent, HISTORY_CAP, HISTORY_SHOWN, historyView } from './workflow';
 
 const action = (name: string): AvailableAction => ({ action: name, to: `${name} state` });
 
@@ -27,6 +27,14 @@ describe('actionLayout', () => {
   it('blocks every action while the form has unsaved changes, and only then', () => {
     expect(actionLayout([action('A')], true).blocked).toBe(true);
     expect(actionLayout([action('A')], false).blocked).toBe(false);
+  });
+});
+
+describe('actionsAreCurrent', () => {
+  it('trusts actions only for the version they were fetched for', () => {
+    expect(actionsAreCurrent(3, 3)).toBe(true);
+    expect(actionsAreCurrent(2, 3)).toBe(false);
+    expect(actionsAreCurrent(null, 3)).toBe(false);
   });
 });
 
