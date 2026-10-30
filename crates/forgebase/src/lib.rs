@@ -66,10 +66,13 @@
 //!
 //! Without a config file there is one site, `default`. With `--config forgebase.toml` (or
 //! `FORGEBASE_CONFIG`) there are the sites listed in it, **one database each** (ADR 0014): a
-//! name, host names, and the name of the environment variable that holds the database URL.
-//! `--site NAME` picks the site of a database command (required with several sites, except for
-//! `serve`, which serves all of them and routes by `Host`). The public API of this crate is
-//! unchanged: sites are a matter of the command line and the config file.
+//! name, host names, the name of the environment variable that holds the database URL and,
+//! optionally, the `apps` installed on the site (a subset of the binary's apps, closed under
+//! `depends_on`; absent means all). `--site NAME` picks the site of a database command (required
+//! with several sites, except for `serve`, which serves all of them and routes by `Host`).
+//! `forgebase site list` shows the sites and `forgebase site create NAME` creates a site's
+//! database and migrates it. The public API of this crate is unchanged: sites are a matter of
+//! the command line and the config file.
 //!
 //! The binary is a trusted local tool: `doc` commands run as the **system context**
 //! (`Caller::System` in `forgebase-core`), so no permission rules apply to them, and
