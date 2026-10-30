@@ -4,7 +4,7 @@
    are in @theme below; the contrast ratios (WCAG AA) are in docs/blueprint/architecture.md, §11.
 
    Structure: the existing semantic class names are kept and defined in @layer components with
-   @apply and the theme tokens, so the TSX did not change and behaviour stays the same. New desk
+   @apply and the theme tokens, so the TSX keeps its class names (only `Badge` and `TableGrid` changed slightly) and behaviour stays the same. New desk
    work (M8) may use utility classes directly where that reads better. */
 
 @import 'tailwindcss';

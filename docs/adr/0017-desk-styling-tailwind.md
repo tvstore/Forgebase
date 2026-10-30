@@ -16,7 +16,7 @@ The decisions below are the owner's.
 - **T3. The system font stack.** No web font, so no external request (CSP).
 - **T4. UX.3 comes before M8.1.** The M8 desk work uses this theme.
 
-How it is built (implementation, not a decision): the tokens are in the `@theme` block of `desk/src/styles.css`; the existing semantic class names are kept and defined in `@layer components` with `@apply` and the tokens, so the TSX did not change and behaviour stays the same; new desk work (M8) may use utility classes directly where that reads better. There is one style system, not two. Class names that are chosen at run time are full literal strings (`Badge`), because Tailwind finds classes by scanning the source. Contrast ratios are recorded in [architecture, section 11](../blueprint/architecture.md#11-desk-reports-workflow).
+How it is built (implementation, not a decision): the tokens are in the `@theme` block of `desk/src/styles.css`; the existing semantic class names are kept and defined in `@layer components` with `@apply` and the tokens, so the TSX keeps its class names (only `Badge` and `TableGrid` changed slightly) and behaviour stays the same; new desk work (M8) may use utility classes directly where that reads better. There is one style system, not two. Class names that are chosen at run time are full literal strings (`Badge`), because Tailwind finds classes by scanning the source. Contrast ratios are recorded in [architecture, section 11](../blueprint/architecture.md#11-desk-reports-workflow).
 
 ## Alternatives considered
 

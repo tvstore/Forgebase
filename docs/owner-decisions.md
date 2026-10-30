@@ -192,12 +192,13 @@ where its details live.
 | One worker per site. | [ADR 0014](adr/0014-multi-site-database-per-site.md) |
 | Backup and restore with `pg_dump` and `pg_restore`. | [ADR 0014](adr/0014-multi-site-database-per-site.md) |
 
-### UX.3 Tailwind and corporate palette, and M8 Workflow and reports (2026-10-30, "oke setuju semua dengan plan mu"; information session, not yet recorded in the repository)
+### UX.3 Tailwind and corporate palette, and M8 Workflow and reports (2026-10-30, "oke setuju semua dengan plan mu"; information session)
 
 These decisions were approved in the information session. Their ADRs and milestone entries are written by the UX.3 and
-M8 pull requests; until then this table is the only record, and the current records (architecture §11, milestones)
-describe the state before these decisions.
-T1 to T3 are now recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.3, [#31](https://github.com/agilma/Forgebase/pull/31)); the M8 rows are still planned.
+M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.3,
+[#31](https://github.com/agilma/Forgebase/pull/31)); T4 (UX.3 before M8.1) is recorded in ADR 0017 and the
+[milestones](blueprint/milestones.md). The M8 rows are still planned: until their pull requests land, this table is
+their only record.
 
 | Decision | Recorded in |
 |---|---|
