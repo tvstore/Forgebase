@@ -105,6 +105,7 @@ mod job_cmd;
 mod jobs;
 mod new_app;
 mod report;
+mod reports;
 mod run;
 mod schedule;
 mod worker;
@@ -117,6 +118,7 @@ pub use builder::Forgebase;
 pub use compose::StartupError;
 pub use documents::{Documents, FilterOp, ListQuery, StoredDocument};
 pub use jobs::{JobContext, JobError, JobFuture, JobHandler, JobOptions};
+pub use reports::{Column, Param, Report};
 pub use schedule::Schedule;
 
 // What a hook needs to read and change a document. These are the types of `forgebase-core`.

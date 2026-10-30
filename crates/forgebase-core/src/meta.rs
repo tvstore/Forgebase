@@ -8,6 +8,7 @@ use crate::document::DocStatus;
 use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
 use crate::permission::{self, PermissionRule, Right};
+use crate::report::ReportDef;
 use crate::series::{SeriesError, SeriesPattern};
 use crate::workflow::{MAX_NAME_LEN, Move, Workflow};
 
@@ -1342,6 +1343,8 @@ pub struct Registry {
     /// The full names (`<app>.<job>`) of the background jobs the binary knows. Names only: the
     /// registry knows nothing about handlers.
     jobs: BTreeSet<String>,
+    /// The query reports (M8.4, ADR 0016) of the apps, by full name (`<app>.<name>`).
+    reports: BTreeMap<String, ReportDef>,
 }
 
 impl fmt::Debug for Registry {
@@ -1357,6 +1360,7 @@ impl fmt::Debug for Registry {
             .field("doctypes", &self.doctypes)
             .field("hooks", &hook_counts)
             .field("jobs", &self.jobs)
+            .field("reports", &self.reports.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -1381,6 +1385,29 @@ impl Registry {
     /// The known job names, in name order.
     pub fn job_names(&self) -> impl Iterator<Item = &str> {
         self.jobs.iter().map(String::as_str)
+    }
+
+    /// Records a query report under its full name (`<app>.<name>`). Returns `false`, and keeps
+    /// the report it has, when the name is already taken. The report is not checked here
+    /// ([`ReportDef::problems`]).
+    pub fn add_report(&mut self, report: ReportDef) -> bool {
+        match self.reports.entry(report.full_name()) {
+            std::collections::btree_map::Entry::Occupied(_) => false,
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(report);
+                true
+            }
+        }
+    }
+
+    /// The report with this full name (`<app>.<name>`).
+    pub fn report(&self, full_name: &str) -> Option<&ReportDef> {
+        self.reports.get(full_name)
+    }
+
+    /// Every report, in full-name order.
+    pub fn reports(&self) -> impl Iterator<Item = &ReportDef> {
+        self.reports.values()
     }
 
     /// Validates and adds a DocType. Fails with every definition problem found

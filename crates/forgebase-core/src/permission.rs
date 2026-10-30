@@ -243,6 +243,19 @@ pub fn evaluate(doctype: &DocType, caller: &Caller, right: Right) -> Access {
     access
 }
 
+/// Whether `caller` may run a query report (M8.4, ADR 0016) that names `roles`: the system
+/// context and an administrator always may; anyone else needs one of the roles. A report with
+/// no roles is run by nobody else (deny by default). **Row-level rules do not apply inside a
+/// report**: this is the whole access check.
+pub fn can_run_report(roles: &[String], caller: &Caller) -> bool {
+    match caller {
+        Caller::System { .. } => true,
+        Caller::User { roles: have, .. } => {
+            caller.bypasses_permissions() || roles.iter().any(|r| have.contains(r))
+        }
+    }
+}
+
 /// Decides how far `caller` may take `transition` of the workflow of `doctype` (M8.1, ADR
 /// 0015, the transition-role rule that extends ADR 0011): **the role and the right**.
 ///
@@ -313,6 +326,21 @@ mod tests {
             Right::Amend => rule.amend = true,
         }
         rule
+    }
+
+    #[test]
+    fn a_report_is_for_its_roles_the_administrator_and_the_system() {
+        let roles = vec!["Manager".to_owned()];
+        assert!(can_run_report(&roles, &user(&["Manager"])));
+        assert!(can_run_report(&roles, &user(&["Clerk", "Manager"])));
+        assert!(!can_run_report(&roles, &user(&["Clerk"])));
+        assert!(!can_run_report(&roles, &user(&["manager"])));
+        assert!(!can_run_report(&roles, &user(&[])));
+        assert!(can_run_report(&roles, &user(&[ADMINISTRATOR])));
+        assert!(can_run_report(&roles, &Caller::system("cli")));
+        // No roles: only the callers that bypass.
+        assert!(!can_run_report(&[], &user(&["Manager"])));
+        assert!(can_run_report(&[], &user(&[ADMINISTRATOR])));
     }
 
     #[test]

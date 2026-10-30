@@ -5,7 +5,7 @@
 //! depends on no other Forgebase crate.
 //! See ADR 0002 and `docs/blueprint/architecture.md`.
 //!
-//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3, M2.4, M3.2 and M8.1):
+//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3, M2.4, M3.2, M8.1 and M8.4):
 //!
 //! - [`ident`]: identifier rules and table naming for DocTypes and fields.
 //! - [`meta`]: the DocType model, [`DocType::from_toml_str`](meta::DocType::from_toml_str) and the
@@ -31,6 +31,7 @@ pub mod hooks;
 pub mod ident;
 pub mod meta;
 pub mod permission;
+pub mod report;
 pub mod series;
 pub mod value;
 pub mod workflow;
