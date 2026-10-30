@@ -313,6 +313,8 @@ error: invalid app setup:
 
 An unknown job name in `ctx.enqueue` is found at run time, not at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
 
+Running your app for real (several sites, a reverse proxy, workers, upgrades, backups and restores) is in the [operations guide](operations.md).
+
 ## The public API boundary
 
 Apps depend on the `forgebase` crate **only**. `forgebase-core`, `forgebase-db` and `forgebase-http` are internal: they change without notice, and an app that uses them will break. `forgebase` re-exports everything an app needs (the list is in [ADR 0012](../adr/0012-app-model-and-public-api-boundary.md#the-public-surface-crate-root-of-forgebase)): `App`, `Forgebase`, `doctypes!`, `migrations!`, `DocTypeHooks`, `HookContext`, `HookError`, `Operation`, `Document`, `Value` and the helpers of `forgebase::testing` (enable the cargo feature `testing` in `[dev-dependencies]` only, as the template does, so it is not in your binary). The version is 0.x: the API may still change between minor versions, and every change is in the [changelog](../../CHANGELOG.md). If you need something that is not exported, ask for it; do not work around it.
