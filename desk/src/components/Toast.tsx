@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { CircleCheckIcon, XIcon } from '../icons';
+
 /** How long a toast stays when nobody closes it. */
 export const TOAST_MS = 5000;
 
@@ -53,9 +55,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div className="toasts" role="status" aria-live="polite">
         {items.map((t) => (
           <div className="toast" key={t.id}>
+            <CircleCheckIcon size={18} className="icon" />
             <span>{t.message}</span>
             <button type="button" className="toast-close" aria-label="Dismiss" onClick={() => dismiss(t.id)}>
-              <span aria-hidden="true">×</span>
+              <XIcon size={16} />
             </button>
           </div>
         ))}

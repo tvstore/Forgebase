@@ -2,6 +2,8 @@ import { useEffect, useId, useState } from 'react';
 
 import { listDocuments } from '../api';
 import { suggestionParams } from '../links';
+import { linkTitle } from '../linkTitles';
+import type { LinkTitles } from '../linkTitles';
 
 interface Props {
   id: string;
@@ -9,7 +11,8 @@ interface Props {
   target: string;
   value: string;
   onChange: (value: string) => void;
-  readOnly: boolean;
+  /** The titles of linked documents: the title of the typed name is shown under the input. */
+  titles?: LinkTitles;
   required: boolean;
   invalid: boolean;
   describedBy?: string;
@@ -20,18 +23,19 @@ interface Props {
 const DEBOUNCE_MS = 250;
 
 /**
- * A Link field: a text input with the native suggestion list (`<input list>` and `<datalist>`).
+ * A Link field: a text input with the native suggestion list (`<input list>` and `<datalist>`),
+ * and the target's title under it when the API gave one for the typed name.
  * The suggestions are the target's names that start with what was typed (`suggestionParams`);
  * the user may type any name and the server decides. A target the user cannot read (403) or any
  * other failure simply gives no suggestions.
  */
-export function LinkInput({ id, target, value, onChange, readOnly, required, invalid, describedBy, ariaLabel }: Props) {
+export function LinkInput({ id, target, value, onChange, titles, required, invalid, describedBy, ariaLabel }: Props) {
   const listId = useId();
   const [names, setNames] = useState<string[]>([]);
   const [focused, setFocused] = useState(false);
 
   useEffect(() => {
-    if (readOnly || !focused) return;
+    if (!focused) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
       listDocuments(target, suggestionParams(value)).then(
@@ -47,16 +51,17 @@ export function LinkInput({ id, target, value, onChange, readOnly, required, inv
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [target, value, readOnly, focused]);
+  }, [target, value, focused]);
+
+  const title = titles ? linkTitle(titles, target, value) : undefined;
 
   return (
     <>
       <input
         id={id}
         type="text"
-        list={readOnly ? undefined : listId}
+        list={listId}
         value={value}
-        readOnly={readOnly}
         aria-required={required || undefined}
         aria-invalid={invalid || undefined}
         aria-describedby={describedBy}
@@ -66,13 +71,12 @@ export function LinkInput({ id, target, value, onChange, readOnly, required, inv
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
       />
-      {readOnly ? null : (
-        <datalist id={listId}>
-          {names.map((name) => (
-            <option key={name} value={name} />
-          ))}
-        </datalist>
-      )}
+      <datalist id={listId}>
+        {names.map((name) => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
+      {title === undefined ? null : <span className="link-title">{title}</span>}
     </>
   );
 }

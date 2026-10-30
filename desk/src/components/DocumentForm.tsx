@@ -1,22 +1,36 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
+import type { FormEvent } from 'react';
 
-import { ApiError, createDocument, deleteDocument, getDocument, transitionDocument, updateDocument } from '../api';
+import {
+  ApiError,
+  createDocument,
+  deleteDocument,
+  getDocument,
+  getDocumentWithTitles,
+  transitionDocument,
+  updateDocument,
+} from '../api';
 import type { Transition } from '../api';
 import { docStatusLabel, docStatusOf, fieldReadOnly, hasEditableField, hasEditableRequired, headerActions } from '../access';
 import type { DocContext, LifecycleAction } from '../access';
 import { conflictMessage, isStaleCode, mapDetails } from '../errors';
-import { blankState, buildChanges, buildCreate, changedFields, errorKey, stateOf } from '../fields';
+import { blankState, buildChanges, buildCreate, changedFields, emptyValue, errorKey, stateOf } from '../fields';
 import type { Errors, FormState, FormValue } from '../fields';
+import type { LinkTitles } from '../linkTitles';
+import { recordRecent } from '../recent';
 import { formHref, listHref, navigate, setNavigationBlocker } from '../router';
-import { formatCell, rowTitle } from '../listing';
+import { rowTitle } from '../listing';
+import { initials } from '../people';
 import { saveShortcut } from '../shortcut';
 import { statusBadge } from '../status';
+import { exactTime, relativeTime } from '../time';
 import type { DocTypeMeta, DocumentRow, FieldMeta } from '../types';
 import { Badge } from './Badge';
 import { Dialog } from './Dialog';
 import { FieldControl } from './FieldControl';
 import { MenuButton } from './MenuButton';
+import { PageHeader } from './PageHeader';
+import { ReadOnlyField } from './ReadOnlyValue';
 import { TableGrid } from './TableGrid';
 import { useToast } from './Toast';
 
@@ -24,6 +38,8 @@ interface Props {
   meta: DocTypeMeta;
   /** The stored document, or null for a new one. */
   initial: DocumentRow | null;
+  /** The titles of the documents it links to (only those the user may read). */
+  initialTitles: LinkTitles;
   username: string;
 }
 
@@ -67,8 +83,11 @@ const ACTION_LABEL: Record<LifecycleAction, string> = {
  * controls is `FormState` (strings and booleans); the conversion to JSON and the change
  * detection are in fields.ts and the rules in access.ts (both tested without a DOM).
  */
-export function DocumentForm({ meta, initial, username }: Props) {
+export function DocumentForm({ meta, initial, initialTitles, username }: Props) {
   const [doc, setDoc] = useState<DocumentRow | null>(initial);
+  const [titles, setTitles] = useState<LinkTitles>(initialTitles);
+  // The clock of the relative times in the info panel; it moves on when the document is replaced.
+  const [now, setNow] = useState(() => new Date());
   const [saved, setSaved] = useState<FormState>(() => (initial ? stateOf(meta, initial) : blankState(meta)));
   const [state, setState] = useState<FormState>(saved);
   const [errors, setErrors] = useState<Errors>({});
@@ -153,6 +172,15 @@ export function DocumentForm({ meta, initial, username }: Props) {
     setErrors({});
     setFailure(null);
     setStale(false);
+    setNow(new Date());
+    // The titles of what the new version links to (a link may have changed). Best effort: without
+    // them the form shows the names, as it did before.
+    if (typeof next.name === 'string') {
+      getDocumentWithTitles(meta.name, next.name).then(
+        (fresh) => setTitles(fresh.titles),
+        () => {},
+      );
+    }
   };
 
   /** `verb` completes "The document was not ..." (saved, submitted, ...). */
@@ -300,7 +328,7 @@ export function DocumentForm({ meta, initial, username }: Props) {
   };
 
   // The heading is the title field's value (as in the list), the name muted under it.
-  const shown = doc === null ? null : rowTitle(doc, meta);
+  const shown = doc === null ? null : rowTitle(doc, meta, titles);
   const title = shown === null ? `New ${meta.label}` : shown.title === '' ? meta.label : shown.title;
   const docName = name ?? 'this document';
 
@@ -309,7 +337,17 @@ export function DocumentForm({ meta, initial, username }: Props) {
     .filter((f) => f.type === 'table' && errors[errorKey(f.name)] !== undefined)
     .map((f) => `${f.label}: ${errors[errorKey(f.name)]}`);
 
+  // The command bar lists the documents opened in this tab.
+  const recentName = shown?.name;
+  const recentTitle = shown?.title;
+  useEffect(() => {
+    if (recentName) recordRecent({ doctype: meta.name, name: recentName, title: recentTitle || recentName });
+  }, [meta.name, recentName, recentTitle]);
+
   const badge = statusBadge(doc?.docstatus);
+  const detailsId = `${idBase}-details`;
+  const columnFields = meta.fields.filter((f) => f.type !== 'table');
+  const tableFields = meta.fields.filter((f) => f.type === 'table');
   const requiredShown = canSave && hasEditableRequired(ctx, meta);
 
   return (
@@ -317,57 +355,63 @@ export function DocumentForm({ meta, initial, username }: Props) {
       <p className="visually-hidden" role="status" aria-live="polite">
         {busy ? 'Working...' : ''}
       </p>
-      <form ref={formRef} noValidate onSubmit={save}>
-        <header className="doc-head">
-          <div className="doc-title">
+      <form ref={formRef} className="doc-form" noValidate onSubmit={save}>
+        <PageHeader
+          title={
             <h1 ref={headingRef} tabIndex={-1}>
               {title}
             </h1>
-            {meta.submittable && !isNew ? (
-              <Badge tone={badge.tone} className="status-badge">
-                {badge.label}
-              </Badge>
-            ) : null}
-            {isNew || dirty ? <Badge tone="warning">{isNew ? 'Not saved' : 'Unsaved changes'}</Badge> : null}
-            {shown !== null && shown.title !== shown.name ? <p className="doc-title-name">{shown.name}</p> : null}
-          </div>
-          <div className="doc-actions">
-            {header.save ? (
-              <button
-                type="submit"
-                className={header.save === 'primary' ? 'btn btn-primary' : 'btn'}
-                aria-disabled={busy || undefined}
-              >
-                Save
-              </button>
-            ) : null}
-            {header.submit ? (
-              <button
-                type="button"
-                className={header.submit === 'primary' ? 'btn btn-primary' : 'btn'}
-                aria-disabled={busy || undefined}
-                onClick={() => lifecycle('submit')}
-              >
-                Submit
-              </button>
-            ) : null}
-            {header.more.length > 0 ? (
-              <MenuButton label="More" ariaLabel="More actions">
-                {header.more.map((action) => (
-                  <button
-                    key={action}
-                    type="button"
-                    className={action === 'delete' ? 'menu-item menu-danger' : 'menu-item'}
-                    aria-disabled={busy || undefined}
-                    onClick={() => lifecycle(action)}
-                  >
-                    {ACTION_LABEL[action]}
-                  </button>
-                ))}
-              </MenuButton>
-            ) : null}
-          </div>
-        </header>
+          }
+          meta={
+            <>
+              {meta.submittable && !isNew ? (
+                <Badge tone={badge.tone} className="status-badge">
+                  {badge.label}
+                </Badge>
+              ) : null}
+              {isNew || dirty ? <Badge tone="warning">{isNew ? 'Not saved' : 'Unsaved changes'}</Badge> : null}
+              {shown !== null && shown.title !== shown.name ? <p className="doc-title-name">{shown.name}</p> : null}
+            </>
+          }
+          actions={
+            <>
+              {header.save ? (
+                <button
+                  type="submit"
+                  className={header.save === 'primary' ? 'btn btn-primary' : 'btn'}
+                  aria-disabled={busy || undefined}
+                >
+                  Save
+                </button>
+              ) : null}
+              {header.submit ? (
+                <button
+                  type="button"
+                  className={header.submit === 'primary' ? 'btn btn-primary' : 'btn'}
+                  aria-disabled={busy || undefined}
+                  onClick={() => lifecycle('submit')}
+                >
+                  Submit
+                </button>
+              ) : null}
+              {header.more.length > 0 ? (
+                <MenuButton label="More" ariaLabel="More actions">
+                  {header.more.map((action) => (
+                    <button
+                      key={action}
+                      type="button"
+                      className={action === 'delete' ? 'menu-item menu-danger' : 'menu-item'}
+                      aria-disabled={busy || undefined}
+                      onClick={() => lifecycle(action)}
+                    >
+                      {ACTION_LABEL[action]}
+                    </button>
+                  ))}
+                </MenuButton>
+              ) : null}
+            </>
+          }
+        />
 
         {failure ? (
           <div role="alert" tabIndex={-1} ref={alertRef} className="alert">
@@ -451,25 +495,90 @@ export function DocumentForm({ meta, initial, username }: Props) {
           </Dialog>
         ) : null}
 
-        {isNew && !canSave ? (
-          <p role="alert" className="alert">
-            You cannot create {meta.label} documents.
-          </p>
-        ) : (
-          <section className="card form-card" aria-label={`${meta.label} fields`}>
-            {requiredShown ? <p className="hint required-hint">* required</p> : null}
-            <div className="fields">
-              {meta.fields.map((field) => {
-                const id = `${idBase}-${field.name}`;
-                const message = errors[errorKey(field.name)];
-                const readOnly = readOnlyOf(field);
-                if (field.type === 'table') {
+        <div className="doc-grid">
+          <div className="doc-main">
+            {isNew && !canSave ? (
+              <p role="alert" className="alert">
+                You cannot create {meta.label} documents.
+              </p>
+            ) : (
+              <>
+                {columnFields.length > 0 ? (
+                  <section className="card details-card" aria-labelledby={detailsId}>
+                    <h2 id={detailsId}>Details</h2>
+                    {requiredShown ? <p className="hint required-hint">* required</p> : null}
+                    <div className="fields">
+                      {columnFields.map((field) => {
+                        const id = `${idBase}-${field.name}`;
+                        const message = errors[errorKey(field.name)];
+                        if (readOnlyOf(field)) {
+                          return (
+                            <ReadOnlyField
+                              key={field.name}
+                              field={field}
+                              value={state.values[field.name] ?? emptyValue(field)}
+                              titles={titles}
+                              className={field.type === 'text' ? 'field-wide' : undefined}
+                            />
+                          );
+                        }
+                        const control = (
+                          <FieldControl
+                            id={id}
+                            field={field}
+                            value={state.values[field.name] ?? ''}
+                            onChange={(value) => setValue(field.name, value)}
+                            titles={titles}
+                            invalid={message !== undefined}
+                            describedBy={message ? `${id}-error` : undefined}
+                          />
+                        );
+                        const label = (
+                          <label htmlFor={id}>
+                            {field.label}
+                            {field.required ? <span aria-hidden="true"> *</span> : null}
+                          </label>
+                        );
+                        const classes = [
+                          'field',
+                          field.type === 'check' ? 'field-check' : '',
+                          field.type === 'text' ? 'field-wide' : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' ');
+                        return (
+                          <div key={field.name} className={classes}>
+                            {field.type === 'check' ? (
+                              <>
+                                {control}
+                                {label}
+                              </>
+                            ) : (
+                              <>
+                                {label}
+                                {control}
+                              </>
+                            )}
+                            {message ? (
+                              <p id={`${id}-error`} className="field-error">
+                                {message}
+                              </p>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ) : null}
+                {tableFields.map((field) => {
+                  const id = `${idBase}-${field.name}`;
+                  const readOnly = readOnlyOf(field);
                   return (
-                    <fieldset key={field.name} className="field-wide table-field">
-                      <legend>
+                    <section key={field.name} className="card table-card" aria-labelledby={`${id}-title`}>
+                      <h2 id={`${id}-title`}>
                         {field.label}
                         {field.required && !readOnly ? <span aria-hidden="true"> *</span> : null}
-                      </legend>
+                      </h2>
                       <TableGrid
                         field={field}
                         rows={state.tables[field.name] ?? []}
@@ -483,98 +592,82 @@ export function DocumentForm({ meta, initial, username }: Props) {
                         }}
                         readOnly={readOnly}
                         errors={errors}
+                        titles={titles}
                         idBase={id}
                       />
-                    </fieldset>
+                    </section>
                   );
-                }
-                const control = (
-                  <FieldControl
-                    id={id}
-                    field={field}
-                    value={state.values[field.name] ?? ''}
-                    onChange={(value) => setValue(field.name, value)}
-                    readOnly={readOnly}
-                    invalid={message !== undefined}
-                    describedBy={message ? `${id}-error` : undefined}
-                  />
-                );
-                const label = (
-                  <label htmlFor={id}>
-                    {field.label}
-                    {field.required && !readOnly ? <span aria-hidden="true"> *</span> : null}
-                  </label>
-                );
-                const classes = [
-                  'field',
-                  field.type === 'check' ? 'field-check' : '',
-                  field.type === 'text' ? 'field-wide' : '',
-                  readOnly ? 'is-readonly' : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
-                return (
-                  <div key={field.name} className={classes}>
-                    {field.type === 'check' ? (
-                      <>
-                        {control}
-                        {label}
-                      </>
-                    ) : (
-                      <>
-                        {label}
-                        {control}
-                      </>
-                    )}
-                    {message ? (
-                      <p id={`${id}-error`} className="field-error">
-                        {message}
-                      </p>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
+                })}
+              </>
+            )}
+          </div>
+          {doc ? <DocumentInfo meta={meta} doc={doc} now={now} /> : null}
+        </div>
       </form>
-
-      {doc ? <Details meta={meta} doc={doc} /> : null}
     </div>
   );
 }
 
-/** The standard columns, read-only. */
-function Details({ meta, doc }: { meta: DocTypeMeta; doc: DocumentRow }) {
-  const rows: [string, ReactNode][] = [
-    ['Owner', String(doc.owner ?? '')],
-    ['Created', formatCell(doc.created_at, 'datetime')],
-    ['Modified by', String(doc.modified_by ?? '')],
-    ['Modified', formatCell(doc.modified_at, 'datetime')],
-    ['Version', String(doc.version ?? '')],
-  ];
-  if (meta.submittable) {
-    rows.push(['Document status', docStatusLabel(docStatusOf(doc.docstatus))]);
-    if (typeof doc.amended_from === 'string') {
-      rows.push([
-        'Amended from',
-        <a key="a" href={formHref(meta.name, doc.amended_from)}>
-          {doc.amended_from}
-        </a>,
-      ]);
-    }
-  }
+/**
+ * The info panel: who made the document and when, who changed it last and when, the version and,
+ * for a submittable DocType, its status and what it amends. Times are relative, with the exact
+ * local time on hover. The workflow history will be added here (M8.2).
+ */
+function DocumentInfo({ meta, doc, now }: { meta: DocTypeMeta; doc: DocumentRow; now: Date }) {
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+  const owner = text(doc.owner);
+  const created = text(doc.created_at);
+  const modified = text(doc.modified_at);
+  const when = (iso: string) =>
+    iso === '' ? null : (
+      <time dateTime={iso} title={exactTime(iso)}>
+        {relativeTime(iso, now)}
+      </time>
+    );
   return (
-    <section aria-labelledby="details-heading" className="card details">
-      <h2 id="details-heading">Details</h2>
-      <dl>
-        {rows.map(([term, value]) => (
-          <div key={term}>
-            <dt>{term}</dt>
-            <dd>{value}</dd>
+    <aside className="doc-side" aria-label="Document information">
+      <section className="card info" aria-labelledby="info-heading">
+        <h2 id="info-heading">Document</h2>
+        <dl>
+          <div>
+            <dt>Created by</dt>
+            <dd>
+              <span className="person">
+                <span className="avatar-sm" aria-hidden="true">
+                  {initials(owner)}
+                </span>
+                <span>{owner}</span>
+              </span>
+              {when(created)}
+            </dd>
           </div>
-        ))}
-      </dl>
-    </section>
+          <div>
+            <dt>Last modified</dt>
+            <dd>
+              {when(modified)}
+              <span className="info-by">by {text(doc.modified_by)}</span>
+            </dd>
+          </div>
+          <div>
+            <dt>Version</dt>
+            <dd>{String(doc.version ?? '')}</dd>
+          </div>
+          {meta.submittable ? (
+            <div>
+              <dt>Document status</dt>
+              <dd>{docStatusLabel(docStatusOf(doc.docstatus))}</dd>
+            </div>
+          ) : null}
+          {meta.submittable && typeof doc.amended_from === 'string' ? (
+            <div>
+              <dt>Amended from</dt>
+              <dd>
+                <a href={formHref(meta.name, doc.amended_from)}>{doc.amended_from}</a>
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+      </section>
+    </aside>
   );
 }

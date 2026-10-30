@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { ChevronDownIcon } from '../icons';
+
 interface Props {
   /** The visible text of the button. */
   label: ReactNode;
@@ -61,7 +63,7 @@ export function MenuButton({ label, ariaLabel, align = 'end', className, childre
         onClick={() => setOpen((o) => !o)}
       >
         {label}
-        <span className="caret" aria-hidden="true" />
+        <ChevronDownIcon size={14} className="icon" />
       </button>
       {open ? (
         <div

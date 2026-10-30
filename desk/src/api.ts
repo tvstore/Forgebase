@@ -5,6 +5,8 @@
 // was rotated by another tab) refreshes it once and is retried once.
 
 import { isAddressable } from './access';
+import { parseLinkTitles } from './linkTitles';
+import type { LinkTitles } from './linkTitles';
 import type { DocTypeMeta, DocTypeSummary, DocumentRow, SessionInfo } from './types';
 
 const CSRF_HEADER = 'X-Forgebase-CSRF';
@@ -45,6 +47,8 @@ interface Options {
   refresh?: boolean;
   /** Internal: this request is the retry after a CSRF refresh. */
   retried?: boolean;
+  /** Returns the whole answer (`data` and the keys beside it) instead of `data` only. */
+  envelope?: boolean;
 }
 
 async function parse(response: Response): Promise<unknown> {
@@ -102,7 +106,7 @@ async function request<T>(method: string, path: string, options: Options = {}): 
   });
   const payload = await parse(response);
 
-  if (response.ok) return (payload as { data: T } | undefined)?.data as T;
+  if (response.ok) return options.envelope ? (payload as T) : ((payload as { data: T } | undefined)?.data as T);
 
   const error = toError(response.status, payload);
   if (error.status === 403 && error.code === 'csrf_failed' && method !== 'GET' && !options.retried) {
@@ -176,6 +180,28 @@ export function listDocuments(doctype: string, params: ListParams): Promise<Docu
   );
 }
 
+/** A page of documents with the titles of the documents they link to (`link_titles=1`, UX.4). */
+export interface TitledList {
+  rows: DocumentRow[];
+  titles: LinkTitles;
+}
+
+/** [`listDocuments`] that also asks for the titles of the linked documents the user may read. */
+export async function listDocumentsWithTitles(doctype: string, params: ListParams): Promise<TitledList> {
+  const query = new URLSearchParams();
+  if (params.filters) query.set('filters', params.filters);
+  if (params.sort) query.set('sort', params.sort);
+  query.set('limit', String(params.limit));
+  query.set('offset', String(params.offset));
+  query.set('link_titles', '1');
+  const answer = await request<{ data?: DocumentRow[]; link_titles?: unknown }>(
+    'GET',
+    `/api/v1/resource/${encodeURIComponent(doctype)}?${query.toString()}`,
+    { envelope: true },
+  );
+  return { rows: answer?.data ?? [], titles: parseLinkTitles(answer?.link_titles) };
+}
+
 /**
  * The path of a document. A name that cannot be put in a path segment (`.`, `..`, empty: see
  * `isAddressable`) is refused here, so the desk never requests a wrong URL; the form view shows
@@ -188,6 +214,22 @@ function documentPath(doctype: string, name: string): string {
 
 export function getDocument(doctype: string, name: string): Promise<DocumentRow> {
   return request<DocumentRow>('GET', documentPath(doctype, name));
+}
+
+/** A document with the titles of the documents it links to (`link_titles=1`, UX.4). */
+export interface TitledDocument {
+  doc: DocumentRow;
+  titles: LinkTitles;
+}
+
+/** [`getDocument`] that also asks for the titles of the linked documents the user may read. */
+export async function getDocumentWithTitles(doctype: string, name: string): Promise<TitledDocument> {
+  const answer = await request<{ data: DocumentRow; link_titles?: unknown }>(
+    'GET',
+    `${documentPath(doctype, name)}?link_titles=1`,
+    { envelope: true },
+  );
+  return { doc: answer.data, titles: parseLinkTitles(answer.link_titles) };
 }
 
 /** `POST`: creates a document (201); the answer is the stored document with its generated name. */

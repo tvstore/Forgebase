@@ -13,7 +13,8 @@
 # test: `amount` and `total` (read_only, computed by those hooks) stay empty here. It then migrates, and creates:
 #   - e2e_manager, role "Sales Manager": every right on sales orders (and customers);
 #   - e2e_clerk, role "Sales Clerk": no submit, cancel, amend or delete right;
-#   - the customer "ada@example.com" for the orders.
+#   - the customer "ada@example.com" (full name "Ada Lovelace", the customer's `title_field`) for the orders:
+#     a Link to it shows that title in the list and the form (UX.4, link titles).
 # Passwords come from E2E_PASSWORD (default below): a throw-away password of a throw-away database.
 # Start the server with:  forgebase serve --doctypes "$E2E_DIR/doctypes"
 set -euo pipefail

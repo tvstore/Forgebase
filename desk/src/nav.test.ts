@@ -9,6 +9,7 @@ const d = (name: string, label: string, app: string | null): DocTypeSummary => (
   name,
   label,
   app,
+  icon: null,
   submittable: false,
   rights: rights({ read: 'all' }),
 });

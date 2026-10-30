@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
 
 import { isAddressable } from '../access';
-import { ApiError, getDocTypeMeta, getDocument } from '../api';
+import { ApiError, getDocTypeMeta, getDocumentWithTitles } from '../api';
 import { DocumentForm } from '../components/DocumentForm';
+import { PageHeader } from '../components/PageHeader';
 import { Skeleton } from '../components/Skeleton';
+import { NO_TITLES } from '../linkTitles';
+import type { LinkTitles } from '../linkTitles';
 import { listHref } from '../router';
 import type { DocTypeMeta, DocumentRow } from '../types';
 
@@ -18,7 +21,7 @@ interface Props {
 type Load =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; meta: DocTypeMeta; doc: DocumentRow | null };
+  | { status: 'ready'; meta: DocTypeMeta; doc: DocumentRow | null; titles: LinkTitles };
 
 const message = (e: unknown): string =>
   e instanceof ApiError ? e.message : 'Cannot reach the server.';
@@ -34,8 +37,8 @@ export function Form({ doctype, docName, username }: Props) {
     let cancelled = false;
     const work = async (): Promise<Load> => {
       const meta = await getDocTypeMeta(doctype);
-      const doc = docName === null ? null : await getDocument(doctype, docName);
-      return { status: 'ready', meta, doc };
+      const titled = docName === null ? null : await getDocumentWithTitles(doctype, docName);
+      return { status: 'ready', meta, doc: titled?.doc ?? null, titles: titled?.titles ?? NO_TITLES };
     };
     work().then(
       (next) => {
@@ -53,7 +56,7 @@ export function Form({ doctype, docName, username }: Props) {
   if (!addressable) {
     return (
       <div className="page">
-        <h1>Cannot open this document</h1>
+        <PageHeader title={<h1>Cannot open this document</h1>} />
         <p role="alert" className="alert">
           The document name {JSON.stringify(docName)} cannot be opened in the desk: a REST path cannot
           address a document named "." or "..".
@@ -67,7 +70,7 @@ export function Form({ doctype, docName, username }: Props) {
   if (load.status === 'loading') {
     return (
       <div className="page" aria-busy="true">
-        <h1>Loading...</h1>
+        <PageHeader title={<h1>Loading...</h1>} />
         <Skeleton lines={6} />
       </div>
     );
@@ -75,7 +78,7 @@ export function Form({ doctype, docName, username }: Props) {
   if (load.status === 'error') {
     return (
       <div className="page">
-        <h1>Cannot open this page</h1>
+        <PageHeader title={<h1>Cannot open this page</h1>} />
         <p role="alert" className="alert">
           {load.message}
         </p>
@@ -85,5 +88,5 @@ export function Form({ doctype, docName, username }: Props) {
       </div>
     );
   }
-  return <DocumentForm meta={load.meta} initial={load.doc} username={username} />;
+  return <DocumentForm meta={load.meta} initial={load.doc} initialTitles={load.titles} username={username} />;
 }

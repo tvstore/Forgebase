@@ -3,6 +3,8 @@
 
 import type { FilterField } from './filters';
 import { escapeLike } from './links';
+import { linkDisplay, linkTitle, titleLinkTarget } from './linkTitles';
+import type { LinkTitles } from './linkTitles';
 import type { DocTypeMeta, FieldType } from './types';
 
 /** The page size of the list view. */
@@ -17,6 +19,8 @@ export interface Column {
   key: string;
   label: string;
   type: FieldType;
+  /** A Link column: the DocType it points to (its cells show the target's title when there is one). */
+  target?: string;
   /** A muted second line of the header: what the column sorts by when `label` is the title field. */
   sub?: string;
 }
@@ -35,11 +39,15 @@ export const isNumericColumn = (column: Column): boolean => isNumeric(column.typ
 export const NAME_KEY = 'name';
 /** The status badge column of a submittable DocType. */
 export const STATUS_KEY = 'docstatus';
+/** The owner column: initials in a circle and the user name. */
+export const OWNER_KEY = 'owner';
+/** The column of the last change: a relative time with the exact time on hover. */
+export const MODIFIED_KEY = 'modified_at';
 
 /**
  * `name` first (the primary cell), then `list_fields` of the metadata (or, when it names none,
- * the first five fields that are not Table or Text), then the status of a submittable DocType and
- * `modified_at`. The title field is not repeated: the primary cell already shows it, and its
+ * the first five fields that are not Table or Text), then the status of a submittable DocType, the
+ * owner and `modified_at`. The title field is not repeated: the primary cell already shows it, and its
  * header carries the title field's label (with "Name" muted under it, as in the cells).
  */
 export function listColumns(meta: DocTypeMeta): Column[] {
@@ -54,7 +62,7 @@ export function listColumns(meta: DocTypeMeta): Column[] {
   for (const name of wanted) {
     const f = known.get(name);
     if (!f || f.type === 'table' || f.name === NAME_KEY || f.name === meta.title_field) continue;
-    fields.push({ key: f.name, label: f.label, type: f.type });
+    fields.push({ key: f.name, label: f.label, type: f.type, ...(f.type === 'link' && f.target ? { target: f.target } : {}) });
   }
   return [
     titleField === undefined
@@ -62,16 +70,29 @@ export function listColumns(meta: DocTypeMeta): Column[] {
       : { key: NAME_KEY, label: titleField.label, type: 'data' as const, sub: 'Name' },
     ...(meta.list_fields === null ? fields.slice(0, MAX_FIELD_COLUMNS) : fields),
     ...(meta.submittable ? [{ key: STATUS_KEY, label: 'Status', type: 'data' as const }] : []),
-    { key: 'modified_at', label: 'Modified', type: 'datetime' },
+    { key: OWNER_KEY, label: 'Owner', type: 'data' },
+    { key: MODIFIED_KEY, label: 'Modified', type: 'datetime' },
   ];
 }
 
-/** The primary text of a listed document: the value of the title field, else the name. */
-export function rowTitle(row: Record<string, unknown>, meta: DocTypeMeta): { title: string; name: string } {
+/**
+ * The primary text of a listed document: the value of the title field, else the name. When the
+ * title field is a Link, the target's title is shown instead of its key where the API gave one.
+ */
+export function rowTitle(
+  row: Record<string, unknown>,
+  meta: DocTypeMeta,
+  titles: LinkTitles = {},
+): { title: string; name: string } {
   const name = String(row[NAME_KEY] ?? '');
   const value = meta.title_field === null ? null : row[meta.title_field];
-  const title = typeof value === 'string' && value !== '' ? value : name;
-  return { title, name };
+  const shown = typeof value === 'string' && value !== '' ? linkDisplay(titles, titleLinkTarget(meta), value) : '';
+  return { title: shown !== '' ? shown : name, name };
+}
+
+/** The rows of the page as text for the toolbar: `Showing 1–20` (the list API has no total count). */
+export function showingText(offset: number, count: number): string {
+  return count === 0 ? 'No rows' : `Showing ${offset + 1}–${offset + count}`;
 }
 
 /**
@@ -197,9 +218,13 @@ export function formatDateTime(value: string): string {
   return match ? `${formatDate(match[1] ?? '')}, ${match[2]} UTC` : value;
 }
 
-/** A cell as text. React escapes it; nothing here is ever HTML. */
-export function formatCell(value: unknown, type: FieldType): string {
+/**
+ * A cell as text. React escapes it; nothing here is ever HTML. A Link cell shows the title of its
+ * target when `titles` has one for `target`, else the name as it is.
+ */
+export function formatCell(value: unknown, type: FieldType, target?: string, titles: LinkTitles = {}): string {
   if (value === null || value === undefined) return '';
+  if (type === 'link' && typeof value === 'string') return linkTitle(titles, target, value) ?? value;
   if (type === 'check') return value === true ? 'Yes' : 'No';
   if (typeof value === 'string') {
     if (type === 'datetime') return formatDateTime(value);

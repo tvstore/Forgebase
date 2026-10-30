@@ -6,8 +6,10 @@ import {
   deleteDocument,
   getDocTypeMeta,
   getDocument,
+  getDocumentWithTitles,
   getSession,
   listDocuments,
+  listDocumentsWithTitles,
   login,
   logout,
   setCsrfToken,
@@ -293,5 +295,44 @@ describe('document requests', () => {
     });
     mockFetch(() => json(409, { error: { code: 'conflict', message: 'changed' } }));
     await expect(deleteDocument('note', 'n', 1)).rejects.toMatchObject({ status: 409, code: 'conflict' });
+  });
+});
+
+describe('link titles', () => {
+  it('asks for them on a list and returns the rows with the titles', async () => {
+    mockFetch(() =>
+      json(200, { data: [{ name: 'SO-1', customer: 'C-1' }], link_titles: { customer: { 'C-1': 'Ada' } } }),
+    );
+    const answer = await listDocumentsWithTitles('sales order', { sort: 'name', limit: 21, offset: 0 });
+    expect(answer).toEqual({ rows: [{ name: 'SO-1', customer: 'C-1' }], titles: { customer: { 'C-1': 'Ada' } } });
+    const url = new URL(calls[0]?.url ?? '', 'http://x');
+    expect(url.pathname).toBe('/api/v1/resource/sales%20order');
+    expect(url.searchParams.get('link_titles')).toBe('1');
+    expect(url.searchParams.get('limit')).toBe('21');
+  });
+
+  it('asks for them on one document', async () => {
+    mockFetch(() => json(200, { data: { name: 'SO-1' }, link_titles: { customer: { 'C-1': 'Ada' } } }));
+    const answer = await getDocumentWithTitles('order', 'SO/1');
+    expect(answer).toEqual({ doc: { name: 'SO-1' }, titles: { customer: { 'C-1': 'Ada' } } });
+    expect(calls[0]?.url).toBe('/api/v1/resource/order/SO%2F1?link_titles=1');
+  });
+
+  it('works against a server that sends no titles', async () => {
+    mockFetch(() => json(200, { data: [{ name: 'a' }] }));
+    expect(await listDocumentsWithTitles('order', { limit: 1, offset: 0 })).toEqual({ rows: [{ name: 'a' }], titles: {} });
+    mockFetch(() => json(200, { data: { name: 'a' } }));
+    expect(await getDocumentWithTitles('order', 'a')).toEqual({ doc: { name: 'a' }, titles: {} });
+  });
+
+  it('still reports an error as an ApiError', async () => {
+    mockFetch(() => json(403, { error: { code: 'permission_denied', message: 'no' } }));
+    await expect(getDocumentWithTitles('order', 'a')).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('never touches the plain requests: no link_titles parameter', async () => {
+    mockFetch(() => json(200, { data: [] }));
+    await listDocuments('order', { limit: 5, offset: 0 });
+    expect(calls[0]?.url).not.toContain('link_titles');
   });
 });

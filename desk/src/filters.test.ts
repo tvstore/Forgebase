@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildFilters, focusAfterRemove, opsFor, parseFilters } from './filters';
+import { buildFilters, chipLabel, filterChips, focusAfterRemove, opsFor, parseFilters, withoutFilter } from './filters';
 import type { FilterField, FilterRow } from './filters';
 import type { FieldType } from './types';
 
@@ -162,5 +162,70 @@ describe('focusAfterRemove', () => {
 
   it('moves to "Add filter" when no row remains', () => {
     expect(focusAfterRemove(0, 1)).toEqual({ kind: 'add' });
+  });
+});
+
+describe('filter chips', () => {
+  const row = (field: string, op: FilterRow['op'], value = ''): FilterRow => ({ field, op, value });
+
+  it('words a filter the way the user would', () => {
+    expect(chipLabel(row('tier', '='), fields)).toBe('Tier is ');
+    expect(chipLabel(row('tier', '=', 'a'), fields)).toBe('Tier is a');
+    expect(chipLabel(row('tier', '!=', 'b'), fields)).toBe('Tier is not b');
+    expect(chipLabel(row('qty', '>=', '10'), fields)).toBe('Qty >= 10');
+    expect(chipLabel(row('name', 'like', 'ad%'), fields)).toBe('Name matches ad%');
+    expect(chipLabel(row('name', 'in', 'a, b'), fields)).toBe('Name in a, b');
+    expect(chipLabel(row('customer', 'is null'), fields)).toBe('Customer is empty');
+    expect(chipLabel(row('customer', 'is not null'), fields)).toBe('Customer is not empty');
+  });
+
+  it('shows a yes/no field as Yes or No', () => {
+    expect(chipLabel(row('done', '=', 'true'), fields)).toBe('Done is Yes');
+    expect(chipLabel(row('done', '=', 'false'), fields)).toBe('Done is No');
+  });
+
+  it('falls back to the field name for a field the DocType no longer has', () => {
+    expect(chipLabel(row('gone', '=', 'x'), fields)).toBe('gone is x');
+  });
+
+  const text = JSON.stringify([
+    { field: 'tier', op: '=', value: 'a' },
+    { field: 'qty', op: '>', value: 3 },
+    { field: 'customer', op: 'is null' },
+  ]);
+
+  it('has one chip per filter of the address, in order', () => {
+    expect(filterChips(text, fields)).toEqual([
+      { index: 0, label: 'Tier is a' },
+      { index: 1, label: 'Qty > 3' },
+      { index: 2, label: 'Customer is empty' },
+    ]);
+    expect(filterChips(null, fields)).toEqual([]);
+    expect(filterChips('not json', fields)).toEqual([]);
+  });
+
+  it('removes one filter and keeps the others', () => {
+    const without = (i: number) => JSON.parse(withoutFilter(text, i, fields) ?? 'null');
+    expect(without(0)).toEqual([
+      { field: 'qty', op: '>', value: 3 },
+      { field: 'customer', op: 'is null' },
+    ]);
+    expect(without(1)).toEqual([
+      { field: 'tier', op: '=', value: 'a' },
+      { field: 'customer', op: 'is null' },
+    ]);
+    expect(without(2)).toEqual([
+      { field: 'tier', op: '=', value: 'a' },
+      { field: 'qty', op: '>', value: 3 },
+    ]);
+  });
+
+  it('returns null when the last filter is removed, and the text unchanged for a bad index or text', () => {
+    const one = JSON.stringify([{ field: 'tier', op: '=', value: 'a' }]);
+    expect(withoutFilter(one, 0, fields)).toBeNull();
+    expect(withoutFilter(text, 5, fields)).toBe(text);
+    expect(withoutFilter(text, -1, fields)).toBe(text);
+    expect(withoutFilter(null, 0, fields)).toBeNull();
+    expect(withoutFilter('not json', 0, fields)).toBe('not json');
   });
 });

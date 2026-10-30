@@ -1,4 +1,4 @@
-// The smoke test of the desk (M4.2, extended in UX.2): login -> home -> list -> search -> create
+// The smoke test of the desk (M4.2, extended in UX.2 and UX.4): login -> home -> list -> search -> create
 // (with a child row) -> save (toast) -> edit -> submit (badge) -> the More menu on the example
 // `sales_order` DocType (submittable, naming series, a child table, a Link to `customer`), then a
 // user without the submit right. Home, the list and the form (a draft and a submitted order) are
@@ -6,13 +6,17 @@
 // than the developer's machine does not surprise us. It runs against a real server prepared by seed.sh and checks the
 // M4 exit criteria that need a browser: no secret in browser storage, and an action the user has
 // no right for is hidden (the API refusal itself is tested in Rust: forgebase-http/tests/resources.rs
-// and crates/forgebase-db/tests/permissions.rs; one refused request is repeated here).
+// and crates/forgebase-db/tests/permissions.rs; one refused request is repeated here). UX.4 adds
+// the command bar (Ctrl+K), the filter chips, link titles and reduced motion as small tests of
+// their own, and the link title in the list and the form to the main flow.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 const PASSWORD = process.env.E2E_PASSWORD ?? 'e2e-test-password';
 const CUSTOMER = 'ada@example.com';
+// The seeded customer has a `title_field` (its full name): a Link to it shows that title.
+const CUSTOMER_TITLE = 'Ada Lovelace';
 
 async function login(page: Page, username: string): Promise<void> {
   await page.goto('/desk/');
@@ -72,7 +76,7 @@ async function expectNoSecretsInStorage(page: Page): Promise<void> {
 /** From the sales order list: opens a new sales order and fills it with one row; leaves it unsaved. */
 async function fillNewOrder(page: Page): Promise<void> {
   await page.getByRole('main').getByRole('link', { name: 'New', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'New Sales Order' })).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'New Sales Order', exact: true })).toBeFocused();
 
   // The Link field suggests the names of the target DocType as you type.
   await page.getByLabel('Customer').fill('ada');
@@ -128,12 +132,13 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(page).toHaveURL(/#\/form\/sales_order\/SO-\d{4}-\d{5}$/);
   const name = decodeURIComponent(page.url().split('/').pop() ?? '');
   await expect(toast(page, 'Saved')).toBeVisible(); // success feedback
-  // The heading is the title field (the customer), with the document's name muted under it.
-  await expect(page.getByRole('heading', { name: CUSTOMER, level: 1 })).toBeFocused();
+  // The heading is the title field (the customer, shown by its title), with the document's name
+  // muted under it.
+  await expect(page.getByRole('heading', { name: CUSTOMER_TITLE, level: 1 })).toBeFocused();
   await expect(page.locator('.doc-title-name')).toHaveText(name);
   await expect(statusBadge(page)).toHaveText('Draft');
   await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(name);
-  await expect(page.getByLabel('Customer')).toHaveValue(CUSTOMER);
+  await expect(page.getByLabel('Customer')).toHaveValue(CUSTOMER); // the control holds the key
   await expect(page.getByLabel('Rate, row 1')).toHaveValue('9.50');
   await expect(page.getByRole('button', { name: 'Submit' })).toBeVisible();
   await expect(page.getByText('* required')).toBeVisible(); // a draft has fields to fill in
@@ -186,16 +191,20 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   await expect(statusBadge(page)).toHaveText('Submitted');
   // A submitted order edits only its allow_on_submit field; its table is read-only.
   await expect(page.getByLabel('Remarks')).toBeEditable();
-  await expect(page.getByLabel('Customer')).not.toBeEditable();
+  // A locked value is plain text, not an input: the label is its term and the value, the link's
+  // title with its key muted after it, is its definition.
+  await expect(page.getByLabel('Customer')).toHaveCount(0);
+  await expect(page.getByRole('term').filter({ hasText: 'Customer' })).toHaveText('Customer');
+  const customerValue = page.getByRole('definition').filter({ hasText: CUSTOMER_TITLE });
+  await expect(customerValue).toContainText(CUSTOMER);
   await expect(page.getByRole('button', { name: 'Add row' })).toHaveCount(0);
   await expect(page.getByText('* required')).toHaveCount(0); // every required field is a value now
-  await expect(page.locator('label', { hasText: 'Customer' })).not.toContainText('*');
   await expectNoSecretsInStorage(page);
 
   // The order is in the list, with its status.
   await page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link', { name: 'Sales Order' }).click();
-  // The primary text is the title field (the customer), with the order's name muted beside it.
-  await expect(page.getByRole('row', { name: new RegExp(`${CUSTOMER}.*${name}.*Submitted`) })).toBeVisible();
+  // The primary text is the title field (the customer's title), with the order's name muted beside it.
+  await expect(page.getByRole('row', { name: new RegExp(`${CUSTOMER_TITLE}.*${name}.*Submitted`) })).toBeVisible();
   await page.getByRole('row', { name: new RegExp(name) }).getByRole('cell').first().click({ position: { x: 4, y: 4 } }); // the whole row opens it
   await expect(page).toHaveURL(new RegExp(`#/form/sales_order/${name}$`));
 
@@ -265,4 +274,117 @@ test('login, list, create, edit and submit a sales order; a clerk cannot submit'
   }, draft);
   expect(status).toBe(403);
   await expectNoSecretsInStorage(page);
+});
+
+// ---- UX.4: the command bar --------------------------------------------------------------
+
+test('the command bar opens with Ctrl+K, jumps to a list and a new form, and gives the focus back', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  const bar = page.getByRole('dialog', { name: 'Search or jump to' });
+
+  // Ctrl+K opens it with the focus in its input; typing a DocType's label and Enter opens its list.
+  await page.keyboard.press('Control+k');
+  await expect(bar).toBeVisible();
+  const input = bar.getByRole('combobox');
+  await expect(input).toBeFocused();
+  await input.fill('sales ord');
+  await expect(bar.getByRole('option', { name: 'Go to Sales Order', exact: true })).toBeVisible();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/#\/list\/sales_order$/);
+  await expect(bar).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Sales Order', level: 1 })).toBeVisible();
+
+  // The arrow keys move the active option (aria-activedescendant); Enter opens "New".
+  await page.keyboard.press('Control+k');
+  await input.fill('sales order');
+  const goTo = bar.getByRole('option', { name: 'Go to Sales Order', exact: true });
+  const create = bar.getByRole('option', { name: 'New Sales Order', exact: true });
+  await expect(goTo).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('ArrowDown');
+  await expect(goTo).toHaveAttribute('aria-selected', 'false');
+  // ArrowDown walks the list down to "New".
+  for (let i = 0; i < 10 && (await create.getAttribute('aria-selected')) !== 'true'; i++) {
+    await page.keyboard.press('ArrowDown');
+  }
+  await expect(create).toHaveAttribute('aria-selected', 'true');
+  await expect(input).toHaveAttribute('aria-activedescendant', (await create.getAttribute('id')) ?? '');
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/#\/new\/sales_order$/);
+
+  // Nothing matches: it says so. Escape closes it and the focus returns to the search button.
+  const button = page.getByRole('button', { name: /^Search or jump to/ });
+  await button.click();
+  await expect(bar).toBeVisible();
+  await input.fill('zzz-nothing');
+  await expect(bar.getByText('No matches.')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(bar).toHaveCount(0);
+  await expect(button).toBeFocused();
+  await expectNoSecretsInStorage(page); // the recent documents are in memory only
+});
+
+test('a clerk without create rights is not offered "New" in the command bar', async ({ page }) => {
+  await login(page, 'e2e_clerk');
+  await page.keyboard.press('Control+k');
+  const bar = page.getByRole('dialog', { name: 'Search or jump to' });
+  await bar.getByRole('combobox').fill('customer');
+  await expect(bar.getByRole('option', { name: 'Go to Customer', exact: true })).toBeVisible();
+  await expect(bar.getByRole('option', { name: 'New Customer', exact: true })).toHaveCount(0); // the clerk may only read customers
+});
+
+// ---- UX.4: filter chips and link titles -------------------------------------------------
+
+test('a filter shows as a chip that can be removed; a Link shows its title', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  await page.goto('/desk/#/list/sales_order');
+  await expectLoaded(page);
+
+  // The seeded order's customer link shows its title, not the key.
+  const orders = page.getByRole('row').filter({ hasText: CUSTOMER_TITLE });
+  await expect(orders.first()).toBeVisible();
+  await expect(page.getByRole('row').filter({ hasText: CUSTOMER })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
+  await page.getByRole('button', { name: 'Add filter' }).click();
+  await page.getByLabel('Filter 1 field').selectOption({ label: 'Customer' });
+  await page.getByLabel('Filter 1 value').fill(CUSTOMER);
+  // Applied a moment after the last change: the chip appears and the address holds the filter.
+  const chip = page.getByRole('button', { name: `Remove filter: Customer is ${CUSTOMER}` });
+  await expect(chip).toBeVisible();
+  await expect(page).toHaveURL(/[?&]filters=/);
+  await expect(orders.first()).toBeVisible(); // the orders of that customer are still listed
+
+  await chip.click();
+  await expect(chip).toHaveCount(0);
+  await expect(page).not.toHaveURL(/filters=/);
+  await expect(page.getByLabel('Filter 1 field')).toHaveCount(0); // the removed row left the filter controls
+  await expectLoaded(page);
+});
+
+// ---- UX.4: reduced motion ---------------------------------------------------------------
+
+test('prefers-reduced-motion switches the motion of a dialog off', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  await page.goto('/desk/#/new/sales_order');
+  await page.getByLabel('Remarks').fill('unsaved');
+
+  const durations = async () => {
+    await page.getByRole('link', { name: 'Home' }).click(); // asks about the unsaved changes
+    const dialog = page.getByRole('dialog', { name: 'You have unsaved changes.' });
+    await expect(dialog).toBeVisible();
+    const result = await dialog.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { animation: style.animationDuration, transition: style.transitionDuration };
+    });
+    await page.getByRole('button', { name: 'Stay' }).click();
+    await expect(dialog).toHaveCount(0);
+    return result;
+  };
+
+  // With motion, the dialog fades and scales in...
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  expect((await durations()).animation).not.toBe('0s');
+  // ...and with reduced motion, every animation and transition has no duration.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect(await durations()).toEqual({ animation: '0s', transition: '0s' });
 });

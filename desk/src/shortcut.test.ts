@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { saveShortcut } from './shortcut';
+import { commandKeyHint, commandKeyName, isCommandBarKey, saveShortcut } from './shortcut';
 
 const key = (k: string, extra: Partial<Parameters<typeof saveShortcut>[0]> = {}) => ({
   key: k,
@@ -35,5 +35,29 @@ describe('saveShortcut', () => {
     expect(saveShortcut(key('a', { ctrlKey: true }), dirty)).toBe('ignore');
     expect(saveShortcut(key('s', { ctrlKey: true, shiftKey: true }), dirty)).toBe('ignore');
     expect(saveShortcut(key('s', { ctrlKey: true, altKey: true }), dirty)).toBe('ignore');
+  });
+});
+
+describe('the command bar key', () => {
+  it('is Ctrl+K or Cmd+K, either case', () => {
+    expect(isCommandBarKey(key('k', { ctrlKey: true }))).toBe(true);
+    expect(isCommandBarKey(key('K', { metaKey: true }))).toBe(true);
+  });
+
+  it('is not a plain K, or K with Alt or Shift, or another key', () => {
+    expect(isCommandBarKey(key('k'))).toBe(false);
+    expect(isCommandBarKey(key('k', { ctrlKey: true, altKey: true }))).toBe(false);
+    expect(isCommandBarKey(key('k', { ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(isCommandBarKey(key('s', { ctrlKey: true }))).toBe(false);
+  });
+
+  it('names the key for the platform', () => {
+    expect(commandKeyHint('MacIntel')).toBe('\u2318K');
+    expect(commandKeyHint('iPhone')).toBe('\u2318K');
+    expect(commandKeyHint('Win32')).toBe('Ctrl K');
+    expect(commandKeyHint('Linux x86_64')).toBe('Ctrl K');
+    expect(commandKeyHint('')).toBe('Ctrl K');
+    expect(commandKeyName('MacIntel')).toBe('Cmd+K');
+    expect(commandKeyName('Win32')).toBe('Ctrl+K');
   });
 });

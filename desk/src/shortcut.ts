@@ -30,3 +30,18 @@ export function saveShortcut(event: KeyLike, state: ShortcutState): ShortcutActi
   if (state.dialogOpen) return 'swallow';
   return state.dirty || state.isNew ? 'save' : 'swallow';
 }
+
+/** True for Ctrl+K or Cmd+K: opens the command bar. */
+export function isCommandBarKey(event: KeyLike): boolean {
+  return event.key.toLowerCase() === 'k' && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
+}
+
+/** `⌘K` on Apple platforms, `Ctrl K` elsewhere (`platform` is `navigator.platform` or the user-agent data's). */
+export function commandKeyHint(platform: string): string {
+  return /mac|iphone|ipad|ipod/i.test(platform) ? '⌘K' : 'Ctrl K';
+}
+
+/** The accessible form of [`commandKeyHint`]: "Ctrl+K" or "Cmd+K". */
+export function commandKeyName(platform: string): string {
+  return /mac|iphone|ipad|ipod/i.test(platform) ? 'Cmd+K' : 'Ctrl+K';
+}

@@ -1,11 +1,11 @@
-// Screenshots of the desk for a pull request (UX.2). Skipped unless SCREENSHOTS=1, so CI is not
+// Screenshots of the desk for a pull request (UX.2, UX.4). Skipped unless SCREENSHOTS=1, so CI is not
 // affected. Run it against a server prepared by seed.sh (see CONTRIBUTING.md):
 //
 //   SCREENSHOTS=1 SCREENSHOT_DIR=/some/dir npx playwright test screenshots
 //
 // It adds a few sample documents (customers, and orders that are a draft, submitted and
 // cancelled, so that every status badge shows), then takes the login page, home, list, form (draft and
-// submitted) and the cancel dialog at 1280, 800 and 375 px (and the list at 320 px), and asserts that
+// submitted), the cancel dialog and the command bar at 1280, 800 and 375 px (and the list at 320 px), and asserts that
 // no page scrolls sideways at those phone widths. The PNGs are not
 // committed.
 
@@ -17,6 +17,12 @@ const DIR = process.env.SCREENSHOT_DIR ?? 'test-results/screenshots';
 const WIDTHS = [1280, 800, 375];
 
 test.skip(process.env.SCREENSHOTS !== '1', 'set SCREENSHOTS=1 to take the screenshots');
+
+/** A screenshot taken after the short fade-in and pop-in animations have finished. */
+async function snap(page: Page, path: string): Promise<void> {
+  await page.waitForTimeout(400);
+  await page.screenshot({ path });
+}
 
 async function noSideScroll(page: Page, what: string): Promise<void> {
   const w = await page.evaluate(() => ({
@@ -87,7 +93,7 @@ test('screenshots of login, home, list and form', async ({ page }) => {
     await page.goto('/desk/#/login');
     await expect(page.getByRole('button', { name: 'Log in' })).toBeVisible();
     await noSideScroll(page, `login at ${width}`);
-    await page.screenshot({ path: `${DIR}/login-${width}.png` });
+    await snap(page, `${DIR}/login-${width}.png`);
   }
   // A failed login shows the alert box.
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -95,7 +101,7 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await page.getByLabel('Password').fill('wrong-password');
   await page.getByRole('button', { name: 'Log in' }).click();
   await expect(page.getByRole('alert')).toBeVisible();
-  await page.screenshot({ path: `${DIR}/login-error-1280.png` });
+  await snap(page, `${DIR}/login-error-1280.png`);
 
   await login(page, 'e2e_manager');
   const docs = await seed(page);
@@ -106,31 +112,41 @@ test('screenshots of login, home, list and form', async ({ page }) => {
     await page.goto('/desk/#/');
     await expect(page.getByRole('main').getByRole('link', { name: 'Sales Order', exact: true })).toBeVisible();
     await noSideScroll(page, `home at ${width}`);
-    await page.screenshot({ path: `${DIR}/home-${width}.png` });
+    await snap(page, `${DIR}/home-${width}.png`);
 
     await page.goto('/desk/#/list/sales_order');
     await expect(page.getByRole('row', { name: new RegExp(docs.submitted) })).toBeVisible();
     await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
     await noSideScroll(page, `list at ${width}`);
-    await page.screenshot({ path: `${DIR}/list-${width}.png` });
+    await snap(page, `${DIR}/list-${width}.png`);
 
     await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.draft)}`);
     await expect(page.locator('.status-badge')).toHaveText('Draft');
     await expect(page.getByLabel('Description, row 1')).toBeVisible();
     await noSideScroll(page, `form at ${width}`);
-    await page.screenshot({ path: `${DIR}/form-${width}.png` });
+    await snap(page, `${DIR}/form-${width}.png`);
 
     await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
     await expect(page.locator('.status-badge')).toHaveText('Submitted');
     await noSideScroll(page, `submitted form at ${width}`);
-    await page.screenshot({ path: `${DIR}/form-submitted-${width}.png` });
+    await snap(page, `${DIR}/form-submitted-${width}.png`);
 
     // The dialog (Cancel is a destructive question): on a phone it must fit the screen.
     await page.getByRole('button', { name: 'More actions' }).click();
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await noSideScroll(page, `dialog at ${width}`);
-    await page.screenshot({ path: `${DIR}/dialog-${width}.png` });
+    await snap(page, `${DIR}/dialog-${width}.png`);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // The command bar (Ctrl+K), with a few results.
+    await page.keyboard.press('Control+k');
+    await expect(page.getByRole('dialog', { name: 'Search or jump to' })).toBeVisible();
+    await page.getByRole('combobox').fill('sales');
+    await expect(page.getByRole('option', { name: 'New Sales Order', exact: true })).toBeVisible();
+    await noSideScroll(page, `command bar at ${width}`);
+    await snap(page, `${DIR}/command-bar-${width}.png`);
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
   }
@@ -139,37 +155,44 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/desk/#/list/customer');
   await expect(page.getByRole('row', { name: /Grace Hopper/ })).toBeVisible();
-  await page.screenshot({ path: `${DIR}/list-customer-1280.png` });
+  await snap(page, `${DIR}/list-customer-1280.png`);
 
   await page.goto('/desk/#/list/sales_order?q=zzz');
   await expect(page.getByRole('heading', { name: 'No documents match' })).toBeVisible();
-  await page.screenshot({ path: `${DIR}/list-empty-1280.png` });
+  await snap(page, `${DIR}/list-empty-1280.png`);
 
   await page.goto('/desk/#/list/sales_order');
-  await page.getByRole('button', { name: 'Filters' }).click();
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
   await page.getByRole('button', { name: 'Add filter' }).click();
-  await page.screenshot({ path: `${DIR}/list-filters-1280.png` });
+  await snap(page, `${DIR}/list-filters-1280.png`);
+
+  // An active filter is a chip.
+  const filters = encodeURIComponent(JSON.stringify([{ field: 'owner', op: '=', value: 'e2e_manager' }]));
+  await page.goto(`/desk/#/list/sales_order?filters=${filters}`);
+  await expect(page.getByRole('button', { name: 'Remove filter: Owner is e2e_manager' })).toBeVisible();
+  await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  await snap(page, `${DIR}/list-chips-1280.png`);
 
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
   await expect(page.locator('.status-badge')).toHaveText('Submitted');
   await page.getByRole('button', { name: 'More actions' }).click();
-  await page.screenshot({ path: `${DIR}/form-submitted-menu-1280.png` });
+  await snap(page, `${DIR}/form-submitted-menu-1280.png`);
 
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.cancelled)}`);
   await expect(page.locator('.status-badge')).toHaveText('Cancelled');
-  await page.screenshot({ path: `${DIR}/form-cancelled-1280.png` });
+  await snap(page, `${DIR}/form-cancelled-1280.png`);
 
   await page.goto('/desk/#/new/sales_order');
-  await expect(page.getByRole('heading', { name: 'New Sales Order' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'New Sales Order', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Save' }).click(); // empty: the required field is refused
   await expect(page.getByRole('alert')).toBeVisible();
-  await page.screenshot({ path: `${DIR}/form-new-errors-1280.png` });
+  await snap(page, `${DIR}/form-new-errors-1280.png`);
 
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.draft)}`);
   await page.getByLabel('Remarks').fill('Deliver on Friday.');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.locator('.toast', { hasText: 'Saved' })).toBeVisible();
-  await page.screenshot({ path: `${DIR}/form-saved-toast-1280.png` });
+  await snap(page, `${DIR}/form-saved-toast-1280.png`);
 
   // The smallest phone and a submitted form on a phone (the status badge sits under the title in the list).
   await page.setViewportSize({ width: 320, height: 800 });
@@ -178,11 +201,11 @@ test('screenshots of login, home, list and form', async ({ page }) => {
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
   await expect(page.locator('.toast')).toHaveCount(0, { timeout: 8000 }); // an earlier "Saved" is gone
   await noSideScroll(page, 'list at 320');
-  await page.screenshot({ path: `${DIR}/list-320.png` });
+  await snap(page, `${DIR}/list-320.png`);
 
   await page.setViewportSize({ width: 375, height: 800 });
   await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
   await expect(page.locator('.status-badge')).toHaveText('Submitted');
   await page.getByRole('button', { name: 'Menu' }).click();
-  await page.screenshot({ path: `${DIR}/form-menu-open-375.png` });
+  await snap(page, `${DIR}/form-menu-open-375.png`);
 });
