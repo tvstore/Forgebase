@@ -213,12 +213,16 @@ impl Worker {
                     log(&format!("{label}: the job had already completed (attempt {attempt})"));
                     return Ok(Some(Outcome::Done));
                 }
+                if let Some(Finish::Failed(error)) = ended {
+                    // The task failed just before the abort: record it through the guarded path.
+                    return self.record(&claimed, worker, def, &label, error).await.map(Some);
+                }
                 let client = self.pool.get().await?;
                 if jobs::release(&**client, claimed.id, worker, attempt).await? {
                     log(&format!("{label} released (the worker is stopping)"));
                     return Ok(Some(Outcome::Released));
                 }
-                log(&format!("{label}: the lease was lost, nothing to release"));
+                log(&format!("{label}: the lease was lost or the job had already completed"));
                 return Ok(Some(Outcome::LeaseLost));
             }
         };
@@ -269,7 +273,7 @@ impl Worker {
         .await?;
         if !recorded {
             log(&format!(
-                "{label}: the lease was lost, the failure was not recorded"
+                "{label}: the lease was lost or the job had already completed; the failure was not recorded"
             ));
             return Ok(Outcome::LeaseLost);
         }
@@ -570,7 +574,7 @@ mod tests {
         }
     }
 
-    /// Waits until the job is claimed by `worker` and its handler has inserted its document: the
+    /// Waits until the job is claimed by `worker` and its handler has begun its transaction: the
     /// row is `running` and locked by `worker`, and a backend is idle in a transaction (the
     /// handler sleeps). Returns that backend's pid.
     async fn wait_handler_sleeping(db: &TestDb, worker: &str) -> String {
@@ -648,8 +652,8 @@ mod tests {
             let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
             enqueue(&db, "{\"sleep_ms\": 2000}").await;
             let monitor = async {
-                // The handler has inserted its document (it sleeps); another session takes
-                // the job.
+                // The handler's backend is idle in transaction (it sleeps); another session
+                // takes the job.
                 wait_handler_sleeping(&db, "w").await;
                 db.exec(steal).await;
             };
@@ -674,7 +678,7 @@ mod tests {
     async fn a_timed_out_handler_loses_its_connection_instead_of_returning_it_to_the_pool() {
         let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
         enqueue(&db, "{\"sleep_ms\": 20000}").await;
-        // While the handler sleeps its connection is idle in a transaction (it has inserted).
+        // While the handler sleeps its connection is idle in a transaction (it has begun its transaction).
         let monitor = wait_handler_sleeping(&db, "w");
         let stop = Stop::never();
         let (outcome, pid) = tokio::join!(worker.run_one("w", &stop), monitor);

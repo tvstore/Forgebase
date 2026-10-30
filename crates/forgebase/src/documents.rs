@@ -6,8 +6,8 @@
 //! the lifecycle hooks run as usual; each write (and each enqueue) is one **savepoint** inside
 //! the job's transaction, so a refused write leaves the job's transaction usable and a refused
 //! or failed job rolls all of them back. Reads (`get`, `list`) run directly on the job's
-//! transaction: a failed read aborts it, so the attempt fails and is retried. Jobs enqueued by the hooks of these calls are written in the same
-//! transaction.
+//! transaction: a failed read aborts it, so the attempt fails and is retried. Jobs enqueued by
+//! the hooks of these calls are written in the same transaction.
 
 use std::future::Future;
 use std::pin::Pin;

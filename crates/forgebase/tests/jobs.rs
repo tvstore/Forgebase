@@ -344,7 +344,7 @@ async fn a_failed_attempt_rolls_back_and_retries_after_the_backoff() {
 async fn a_job_is_dead_after_its_attempts_and_a_permanent_error_after_one() {
     let options = JobOptions::new()
         .max_attempts(2)
-        .backoff(Duration::from_millis(10), Duration::from_millis(10));
+        .backoff(Duration::from_secs(3600), Duration::from_secs(3600));
     let binary = support(vec![
         ("flaky", Behavior::InsertThenFail, options),
         ("never", Behavior::Permanent, quick()),
