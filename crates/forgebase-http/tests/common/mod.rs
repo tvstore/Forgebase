@@ -209,6 +209,7 @@ delete = true
 
 const LEDGER_LINE: &str = r#"
 name = "ledger_line"
+label = "Ledger Line"
 is_child = true
 [[fields]]
 name = "qty"

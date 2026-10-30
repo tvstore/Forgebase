@@ -48,7 +48,7 @@ pub fn humanize(name: &str) -> String {
 pub struct DocType {
     /// Identifier, see [`ident::validate_doctype_name`].
     pub name: String,
-    /// Human-readable name. Without a `label` in the TOML file it is [`humanize`]d from `name`.
+    /// Human-readable name. Required in the TOML file, never derived from `name`.
     pub label: String,
     /// How document names are generated.
     pub naming: Naming,

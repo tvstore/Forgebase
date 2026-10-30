@@ -12,7 +12,7 @@ use crate::series::SeriesPattern;
 #[serde(deny_unknown_fields)]
 struct RawDocType {
     name: String,
-    label: Option<String>,
+    label: String,
     /// Kept as a generic value so a malformed `naming` gets a clear message.
     naming: Option<toml::Value>,
     #[serde(default)]
@@ -155,8 +155,8 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
     }
 
     let doctype = DocType {
-        label: raw.label.unwrap_or_else(|| humanize(&raw.name)),
         name: raw.name,
+        label: raw.label,
         naming,
         fields,
         is_child: raw.is_child,
@@ -520,6 +520,7 @@ scale = 2
                 "name = \"t\"\nlabel = \"T\"\n[[fields]]\nname = \"f\"\ntype = \"int\"\nextra = 1\n",
             ),
             ("missing name", "label = \"T\"\n"),
+            ("missing label", "name = \"t\"\n"),
             (
                 "missing field type",
                 "name = \"t\"\nlabel = \"T\"\n[[fields]]\nname = \"f\"\n",
@@ -543,17 +544,15 @@ scale = 2
     }
 
     #[test]
-    fn labels_default_to_the_humanized_name() {
+    fn field_labels_default_to_the_humanized_name() {
         let d = from_toml_str(
-            "name = \"sales_order\"\n[[fields]]\nname = \"order_date\"\ntype = \"date\"\n\
+            "name = \"sales_order\"\nlabel = \"Sales Order\"\n[[fields]]\nname = \"order_date\"\ntype = \"date\"\n\
              [[fields]]\nname = \"qty\"\ntype = \"int\"\nlabel = \"Quantity\"\n",
         )
         .unwrap();
         assert_eq!(d.label, "Sales Order");
         assert_eq!(d.fields[0].label, "Order Date");
         assert_eq!(d.fields[1].label, "Quantity");
-        let d = from_toml_str("name = \"t\"\nlabel = \"Ticket\"\n").unwrap();
-        assert_eq!(d.label, "Ticket");
     }
 
     #[test]

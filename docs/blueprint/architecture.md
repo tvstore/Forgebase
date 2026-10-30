@@ -67,7 +67,7 @@ An `App` is a plain value built by a function: a name, an optional version, `dep
 
 - Metadata file format: **TOML**.
 - `id` is a **UUID v7 generated in the application**.
-- A DocType `name` is a snake_case identifier with a separate `label`; the label is not derived automatically. *Amended by the Desk UX plan (UX-2, owner approval 2026-10-30, delivered in UX.1):* a DocType or field written without a `label` now gets the humanized name as its label (see "DocType file format"); a `label` is still never needed to be unique and an explicit one always wins.
+- A DocType `name` is a snake_case identifier with a separate `label`; the label is not derived automatically.
 - `required` is enforced by application validation, not by a database `NOT NULL`, in M1.
 - M1 field types: Data, Text, Int, Decimal, Check, Date, Datetime, Select. Link arrived in M2.1 and Table in M2.2.
 
@@ -102,7 +102,7 @@ One TOML file per DocType; unknown keys are rejected. Loaded with `DocType::from
 Top-level keys:
 
 - `name` (required): snake_case identifier, `^[a-z][a-z0-9_]*$`, at most 59 bytes.
-- `label` (optional, UX.1): human-readable name. Without it the label is `name` humanized: split on `_`, the first letter of each part in upper case, joined with a space (`sales_order` gives "Sales Order"). An explicit `label` always wins. (Before UX.1 the key was required.)
+- `label` (required): human-readable name, not derived from `name`.
 - `naming` (optional): `"random"` (default), `{ field = "<fieldname>" }` (the named field must be a required, unique Data field) or `{ series = "<pattern>" }` (M2.4, see section 6, "Naming series"; the pattern is validated when the file is loaded). Not allowed in a child DocType.
 - `submittable` (optional, default `false`, M2.4): the DocType has a docstatus and can be submitted, cancelled and amended (section 6). It is a definition error on a child DocType and together with `naming = { field = ... }`.
 - `is_child` (optional, default `false`): a child DocType (M2.2), the row type of a Table field of exactly one other DocType. A child has no `naming` key (its rows have no names), no Table fields (no nesting) and no `unique` fields (uniqueness across all parents is not meaningful), cannot be the target of a Link, and has no CRUD of its own.
