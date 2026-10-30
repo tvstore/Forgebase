@@ -7,6 +7,7 @@ Status: **Proposed** (awaiting owner acceptance). Workflow, approval gates, git 
 Status: **Accepted** (owner decision, 2026-10-28).
 
 - The toolchain is pinned to 1.99.1 in `rust-toolchain.toml`.
+- The CI jobs `check` and `sites` run on `ubuntu-24.04`, not `ubuntu-latest`: they need `pg_dump` and `pg_restore` of the `postgres:16` service's major version, and 24.04 ships `postgresql-client-16` in its own archive (26.04 does not). Re-evaluate when the PostgreSQL floor or the service version changes, or when 24.04 runners are retired.
 - MSRV = pinned stable minus 2 minor releases (currently 1.97). It is declared as the workspace `rust-version` and checked in CI. MSRV rises together with pin bumps and is noted in `CHANGELOG.md`. The dependency set sets a floor (measured: about 1.89 for recommended stack A, 1.94 if sqlx is chosen; see [dependency-evaluation](dependency-evaluation.md#11-supply-chain-tooling-and-msrv)); the window must stay above it.
 - Edition 2024 is confirmed. `Cargo.lock` is committed (the workspace ships binaries).
 

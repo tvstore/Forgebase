@@ -21,7 +21,10 @@ env:
 jobs:
   check:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    # Pinned to 24.04, not ubuntu-latest: the client tools must match the postgres:16 service, and
+    # 24.04 ships postgresql-client-16 in its own archive (26.04 does not). Re-evaluate when the
+    # PostgreSQL floor or the service version changes, or when 24.04 runners are retired.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # The forgebase-db, forgebase-http and forgebase integration tests need PostgreSQL (they create and drop fb_test_* databases).
     # --all-features turns on the `testing` feature of the forgebase crate (its helpers are tested too).
@@ -48,9 +51,9 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
       # The backup tests run the real pg_dump and pg_restore, whose major version must equal the
-      # server's (16): a newer pg_dump writes SQL that the server rejects (the runner image ships
-      # 18). postgresql-client-16 installs to /usr/lib/postgresql/16/bin next to other versions
-      # (the runner's PGDG apt repository has it; a no-op when it is installed already).
+      # server's (16): a newer pg_dump writes SQL that the server rejects (newer runner images
+      # ship 18). postgresql-client-16 installs to /usr/lib/postgresql/16/bin next to other
+      # versions (the Ubuntu 24.04 archive has it; a no-op when it is installed already).
       # FORGEBASE_PG_BIN points there for the rest of the job. The step prints the versions and
       # fails if either is not 16.
       - name: PostgreSQL 16 client tools
@@ -84,7 +87,10 @@ jobs:
   # created by the script (`site create`).
   sites:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    # Pinned to 24.04, not ubuntu-latest: the client tools must match the postgres:16 service, and
+    # 24.04 ships postgresql-client-16 in its own archive (26.04 does not). Re-evaluate when the
+    # PostgreSQL floor or the service version changes, or when 24.04 runners are retired.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
