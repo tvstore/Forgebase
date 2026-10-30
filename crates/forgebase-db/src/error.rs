@@ -362,6 +362,35 @@ pub enum DbError {
     /// reports it as an internal error.
     #[error("job: {0}")]
     Job(String),
+    /// The report does not exist, or the caller may not run it (the same error for both, so a
+    /// caller learns nothing about reports they may not run).
+    #[error("report `{report}` not found")]
+    ReportNotFound {
+        /// The full name asked for.
+        report: String,
+    },
+    /// A report ran over its statement timeout, or waited too long for a lock. Nothing was
+    /// changed. The caller can narrow the parameters.
+    #[error("report `{report}` took too long and was stopped")]
+    ReportTimeout {
+        /// The full name.
+        report: String,
+    },
+    /// A report's SQL tried to write (SQLSTATE 25006): a mistake of the app, not of the caller.
+    /// Nothing was changed. The HTTP API reports it as an internal error.
+    #[error("report `{report}` tried to write, which a report may not do")]
+    ReportReadOnly {
+        /// The full name.
+        report: String,
+    },
+    /// The statement of a report does not have the declared parameters or columns: a mistake of
+    /// the app. The message never contains the SQL.
+    #[error("{0}")]
+    Report(String),
+    /// `forgebase migrate` found reports whose SQL does not fit what they declare, after the
+    /// migrations were applied. One message per problem.
+    #[error("report check failed ({} problem(s))", .0.len())]
+    ReportCheck(Vec<String>),
     /// A lifecycle hook ([`forgebase_core::hooks::DocTypeHooks`]) rejected the operation. The
     /// whole operation was rolled back: nothing was persisted.
     #[error("{hook} hook of DocType `{doctype}` rejected the operation: {message}")]
