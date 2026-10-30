@@ -9,19 +9,26 @@
 // - Development tooling (never shipped) may also use DEV_ONLY: MPL-2.0 (lightningcss, a tool of
 //   Vite; weak copyleft, file level, and nothing of it is in the built desk), BlueOak-1.0.0
 //   (minimatch) and CC-BY-4.0 (caniuse-lite, browser data used by build tools).
+// - OFL-1.1 (the SIL Open Font License) is allowed for FONT packages only (UX.4): a package
+//   from the `@fontsource` or `@fontsource-variable` scope, which ships CSS and woff2 files and no
+//   JavaScript. It is never allowed for code. See docs/blueprint/maintenance-policy.md.
 // - A package with no license, a license expression or any other license fails the check.
 //
 // Limit: the lockfile "dev" flag is only as good as the imports. A dev-only package that is
 // imported from src/ would be bundled into the shipped desk although it is flagged dev here.
 // Reviewers check the imports in src/; there is deliberately no scanner of dist/.
 //
-// It also enforces an owner decision: the only runtime dependencies are react and react-dom.
+// It also enforces an owner decision: the only runtime dependencies are react, react-dom and the
+// self-hosted font (UX.4, U2).
 
 import { readFileSync } from 'node:fs';
 
 const SHIPPED = new Set(['MIT', 'ISC', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause']);
 const DEV_ONLY = new Set([...SHIPPED, 'MPL-2.0', 'BlueOak-1.0.0', 'CC-BY-4.0']);
-const RUNTIME_DEPENDENCIES = ['react', 'react-dom'];
+const RUNTIME_DEPENDENCIES = ['@fontsource-variable/inter', 'react', 'react-dom'];
+// The one license that is allowed for fonts only, and the package scopes that count as fonts.
+const FONT_LICENSE = 'OFL-1.1';
+const FONT_PACKAGE = /^@fontsource(-variable)?\//;
 
 const read = (name) => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
 const lock = read('package-lock.json');
@@ -52,6 +59,8 @@ for (const [path, info] of Object.entries(lock.packages ?? {})) {
   counts.set(key, (counts.get(key) ?? 0) + 1);
   if (typeof license !== 'string') {
     problems.push(`${name}@${info.version}: no license in the lockfile`);
+  } else if (license === FONT_LICENSE && FONT_PACKAGE.test(name)) {
+    // A font package: allowed, shipped or not.
   } else if (!(dev ? DEV_ONLY : SHIPPED).has(license)) {
     problems.push(
       `${name}@${info.version}: license ${license} is not allowed ${dev ? 'for a development package' : 'for a shipped package'}`,
