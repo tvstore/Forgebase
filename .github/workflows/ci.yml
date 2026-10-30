@@ -47,20 +47,27 @@ jobs:
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
-      # The backup tests run the real pg_dump and pg_restore, which must be of version 16 or newer
-      # (the server's). The runner image normally has them; if it does not, install them from
-      # Ubuntu's own repository (noble ships PostgreSQL 16: no extra apt source). The step ends
-      # by printing the versions, so a missing tool fails here with a clear message.
-      - name: PostgreSQL client tools (version 16 or newer)
+      # The backup tests run the real pg_dump and pg_restore, whose major version must equal the
+      # server's (16): a newer pg_dump writes SQL that the server rejects (the runner image ships
+      # 18). postgresql-client-16 installs to /usr/lib/postgresql/16/bin next to other versions
+      # (the runner's PGDG apt repository has it; a no-op when it is installed already).
+      # FORGEBASE_PG_BIN points there for the rest of the job. The step prints the versions and
+      # fails if either is not 16.
+      - name: PostgreSQL 16 client tools
         run: |
           set -eu
-          if ! command -v pg_dump > /dev/null || ! command -v pg_restore > /dev/null \
-             || [ "$(pg_dump --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')" -lt 16 ]; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends postgresql-client-16
-          fi
-          pg_dump --version
-          pg_restore --version
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          bin=/usr/lib/postgresql/16/bin
+          for tool in pg_dump pg_restore; do
+            version="$("$bin/$tool" --version)"
+            echo "$version"
+            case "$version" in
+              "$tool (PostgreSQL) 16."*) ;;
+              *) echo "$tool is not version 16" >&2; exit 1 ;;
+            esac
+          done
+          echo "FORGEBASE_PG_BIN=$bin" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
@@ -72,7 +79,7 @@ jobs:
   # Two sites on one server and a backup restored into a new database (M7.3, ADR 0014): the
   # composed binary of examples/sales_extension with examples/sites/forgebase.toml. The script
   # examples/sites/ci.sh does the work and can be run locally. It needs the client tools
-  # (pg_dump, pg_restore, version 16 or newer) like the `check` job. The URLs are built from the
+  # (pg_dump, pg_restore, version 16, the server's) like the `check` job. The URLs are built from the
   # service container's throwaway credentials; the script never prints them. The databases are
   # created by the script (`site create`).
   sites:
@@ -106,16 +113,21 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
       # Same step as in the `check` job (see the comment there).
-      - name: PostgreSQL client tools (version 16 or newer)
+      - name: PostgreSQL 16 client tools
         run: |
           set -eu
-          if ! command -v pg_dump > /dev/null || ! command -v pg_restore > /dev/null \
-             || [ "$(pg_dump --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')" -lt 16 ]; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends postgresql-client-16
-          fi
-          pg_dump --version
-          pg_restore --version
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          bin=/usr/lib/postgresql/16/bin
+          for tool in pg_dump pg_restore; do
+            version="$("$bin/$tool" --version)"
+            echo "$version"
+            case "$version" in
+              "$tool (PostgreSQL) 16."*) ;;
+              *) echo "$tool is not version 16" >&2; exit 1 ;;
+            esac
+          done
+          echo "FORGEBASE_PG_BIN=$bin" >> "$GITHUB_ENV"
       - run: cargo build --locked -p sales_extension
       - name: Two sites, a backup and a restore
         run: examples/sites/ci.sh

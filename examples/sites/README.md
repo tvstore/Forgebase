@@ -7,7 +7,7 @@ Two sites on one server, and a backup restored into a new database ([ADR 0014](.
 
 ## Run it locally
 
-You need PostgreSQL 16 with a role that has `CREATEDB`, the PostgreSQL client tools (`pg_dump` and `pg_restore`, version 16 or newer), `curl` and `jq`. The three databases are created by the script and must not exist.
+You need PostgreSQL 16 with a role that has `CREATEDB`, the PostgreSQL client tools (`pg_dump` and `pg_restore`, of the server's major version, 16; set `FORGEBASE_PG_BIN` to their directory if another version is first on `PATH`), `curl` and `jq`. The three databases are created by the script and must not exist.
 
 ```sh
 cargo build --locked -p sales_extension

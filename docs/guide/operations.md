@@ -9,7 +9,7 @@ The examples use a binary called `myapp` (your apps compiled together, see [the 
 - **One binary** with its apps. There is no plugin loading: to change the apps you build and deploy a new binary.
 - **The built desk**, a directory (`desk/dist` after `npm run build`), if you want the web interface. `serve` reads it from `FORGEBASE_DESK_DIR`.
 - **PostgreSQL 16 or newer**, one database per site.
-- **The PostgreSQL client tools** (`pg_dump`, `pg_restore`) of the **same or a newer major version than the server**, on the machine that runs the backups. Forgebase does not bundle them. On Debian and Ubuntu the package is `postgresql-client-16` (or the one of your server's major version).
+- **The PostgreSQL client tools** (`pg_dump`, `pg_restore`) of **the same major version as the server** (a newer `pg_dump` can write SQL that the server rejects), on the machine that runs the backups. Forgebase does not bundle them. On Debian and Ubuntu the package is `postgresql-client-16` (or the one of your server's major version).
 - A reverse proxy for TLS (see [Running](#running)). Forgebase itself speaks plain HTTP, and its connection to PostgreSQL has no TLS yet, so keep that link on a local or private network.
 
 ## Configuration
@@ -154,9 +154,9 @@ myapp --config /etc/forgebase/forgebase.toml site backup acme --out /var/backups
 It runs `pg_dump --format=custom --no-owner --no-privileges` against the site's database and prints the file and its size. Things to know:
 
 - **What it contains:** everything in the site's database, including **password hashes, session records and API token digests**. Treat every backup file like the database itself: it is created with mode 0600; keep the directory private, encrypt it where it is stored off the machine (Forgebase does not encrypt it), and delete old copies.
-- It **never overwrites** a file: an existing path is an error (exit 1, "refusing to overwrite"; there is no `--force`). Use a new name each time. A failed backup leaves no file.
+- It **never overwrites** a file: an existing path is an error (exit 1, "refusing to overwrite"; there is no `--force`). Use a new name each time. The dump is written to `FILE.partial` and given its final name only when it is complete, so a failed backup leaves nothing, and a backup that is killed (SIGINT, SIGTERM) can leave only `FILE.partial`, never a partial `FILE`. The next backup to that path says that an earlier backup was interrupted; remove the `.partial` file.
 - The connection reaches `pg_dump` through `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, and `PGSSLMODE` when the URL sets one), never on the command line, where `ps` would show the password. Other `PG*` variables of your environment (`PGSERVICE`, `PGPASSFILE`, `PGOPTIONS`, ...) are not passed on. A URL option that these variables cannot express (more than one host, `options`, `application_name`, `connect_timeout`, ...) is an error that names the option.
-- `pg_dump` must be of the same or a newer major version than the server; otherwise the command refuses and names both versions. It works while the site is running (a consistent snapshot).
+- `pg_dump` must have the same major version as the server; otherwise (older or newer) the command refuses and names both versions. It works while the site is running (a consistent snapshot).
 
 Schedule it outside Forgebase, with cron or a systemd timer, and keep what you need. **Retention is your job.** A minimal script:
 
@@ -185,9 +185,9 @@ myapp --config /etc/forgebase/forgebase.toml migrate --site acme
 
 (With the separated roles above, create the empty database with `CREATE DATABASE acme OWNER forgebase_app` instead of `site create --empty`.) To replace a site's data, restore into a database with a new name, point the site's URL variable at it, and drop the old one when you are sure.
 
-- **What "empty" means.** The database must exist, and have no relation (table, index, sequence, view) in any schema except the system ones, no schema other than `public`, no extension other than `plpgsql`, and no function or domain, enum or range type. Anything else and the command refuses (exit 1) and changes nothing. A database made by `site create` without `--empty` has been migrated, so it is **not** empty.
+- **What "empty" means.** The database must exist, and have no relation (table, index, sequence, view) in any schema except the system ones, no schema other than `public`, no extension other than `plpgsql`, and no function or domain, enum or range type (the kinds of objects checked). If the check finds any of them the command refuses (exit 1) and changes nothing. A database made by `site create` without `--empty` has been migrated, so it is **not** empty.
 - The restore runs `pg_restore --no-owner --no-privileges --exit-on-error --single-transaction`: all or nothing. The objects belong to the role of the site's URL. The database name is the one argument that is not in the environment (`pg_restore` needs it to restore into a database at all); it is not a secret.
-- `pg_restore` must be of the same or a newer major version than the server **and** than the `pg_dump` that wrote the backup; otherwise the command refuses and names both versions.
+- `pg_restore` must have the same major version as the target server, **and** the `pg_dump` that wrote the backup must not be newer than the server; otherwise the command refuses and names the versions. A backup of a 16 server can therefore be restored into a 17 server with the 17 tools (an upgrade), not the other way round.
 - **Nothing is migrated automatically.** Run `migrate --site acme` if the binary is newer than the backup; it does nothing when they match.
 - `site create --empty`, `site backup` and `site restore` use no apps and no DocType files, so they work with the stock binary without `--doctypes`.
 
@@ -204,7 +204,7 @@ Delete the app from the site's `apps` list (and from the list of every site that
 | `404 not_found` for every request | The `Host` matches no site. Check `site list`, and that the proxy passes the original `Host` (`proxy_set_header Host $host;`). `400 invalid_host` means a malformed or missing `Host`. |
 | `site `acme`: the environment variable ACME_DATABASE_URL is not set or is empty` | The variable named in `forgebase.toml` is missing in this process's environment (systemd: `EnvironmentFile=`; shell: `export`). |
 | `pg_dump not found; install the PostgreSQL client tools ...` | Install `postgresql-client-NN` or set `FORGEBASE_PG_BIN` to the directory that has the tools. |
-| `pg_dump is version 15, older than the server (version 16)` | The client tools are older than the server. Install the newer package, or point `FORGEBASE_PG_BIN` at it (on Debian and Ubuntu: `/usr/lib/postgresql/16/bin`). |
+| `pg_dump is version 18 but the server is version 16` | The client tools do not have the server's major version (older or newer). Install the package of the server's version, or point `FORGEBASE_PG_BIN` at it (on Debian and Ubuntu: `/usr/lib/postgresql/16/bin`). |
 | `the database of site `acme` is not empty` | A restore needs an empty database: use `site create acme --empty` (not plain `site create`, which migrates), or a freshly created database. |
 | `the database of site `acme` does not exist` | Create it first with `site create acme --empty`. |
 | `refusing to overwrite FILE` | A backup never overwrites. Choose a new file name. |

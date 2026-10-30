@@ -217,11 +217,13 @@ pub enum SiteCommand {
         doctypes: DocTypesDir,
     },
     /// Write a backup of the site's database to a new file, with `pg_dump` (PostgreSQL client
-    /// tools, version >= the server's, on `PATH` or in `FORGEBASE_PG_BIN`; they are not part of
-    /// Forgebase). The file is a custom-format dump of everything in the database, **password
+    /// tools of the server's major version, on `PATH` or in `FORGEBASE_PG_BIN`; they are not part
+    /// of Forgebase). The file is a custom-format dump of everything in the database, **password
     /// hashes, session and API token digests included**: it is created with mode 0600; keep it
-    /// safe. An existing file is never overwritten (exit 1; there is no `--force`), and a failed
-    /// backup leaves no file. The database URL and password are passed to `pg_dump` in its
+    /// safe. The dump is written to `FILE.partial` and renamed to FILE only when it is complete:
+    /// a failed backup leaves nothing, and an interrupted one (SIGINT, SIGTERM) can leave only
+    /// `FILE.partial`, which can be removed. An existing file is never overwritten (exit 1; there
+    /// is no `--force`). The database URL and password are passed to `pg_dump` in its
     /// environment, never on its command line.
     Backup {
         /// The site name.
@@ -231,9 +233,11 @@ pub enum SiteCommand {
         out: PathBuf,
     },
     /// Restore a backup of `site backup` into the site's database with `pg_restore`, in one
-    /// transaction. The database must exist and be **empty** (no tables, schemas other than
-    /// `public`, extensions other than `plpgsql`, functions or types): create it with `site create
-    /// NAME --empty`. Nothing is migrated: run `migrate --site NAME` afterwards if this binary is
+    /// transaction. `pg_restore` must have the server's major version, and the backup must come
+    /// from a `pg_dump` of the same or an older major version. The database must exist and be
+    /// **empty** (no tables, schemas other than `public`, extensions other than `plpgsql`,
+    /// functions or types: the kinds of objects checked): create it with `site create NAME
+    /// --empty`. Nothing is migrated: run `migrate --site NAME` afterwards if this binary is
     /// newer than the backup.
     Restore {
         /// The site name.

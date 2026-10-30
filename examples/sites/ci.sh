@@ -10,7 +10,8 @@
 #      documents (and the same login).
 #
 # Needs: the binary built (cargo build --locked -p sales_extension), PostgreSQL 16 with a role
-# that has CREATEDB, the PostgreSQL client tools (pg_dump, pg_restore; version >= the server's),
+# that has CREATEDB, the PostgreSQL client tools (pg_dump, pg_restore) of the server's major
+# version (FORGEBASE_PG_BIN names their directory when they are not first on PATH),
 # curl and jq. The three database URLs are read from the environment and never printed; the
 # three databases must not exist yet (they are created, and left in place when the script ends:
 # a local run drops them with DROP DATABASE).
@@ -88,9 +89,13 @@ login() {
 doctypes() {
   curl -fsS -b "$work/$1.jar" -H "Host: $1" "$base/api/v1/meta" | jq -r '.data[].name'
 }
-doctypes shop.localhost | grep -qx customer || fail "shop has no customer"
-doctypes shop.localhost | grep -qx customer_visit && fail "shop has customer_visit"
-doctypes field.localhost | grep -qx customer_visit || fail "field has no customer_visit"
+# Capture first, so that a failing request is an error and not "no such DocType" (under
+# pipefail a negative grep would otherwise pass on a failed command).
+shop_types="$(doctypes shop.localhost)" || fail "reading the metadata of shop"
+field_types="$(doctypes field.localhost)" || fail "reading the metadata of field"
+printf '%s\n' "$shop_types" | grep -qx customer || fail "shop has no customer"
+if printf '%s\n' "$shop_types" | grep -qx customer_visit; then fail "shop has customer_visit"; fi
+printf '%s\n' "$field_types" | grep -qx customer_visit || fail "field has no customer_visit"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: nope.localhost" "$base/api/v1/meta")"
 [ "$code" = 404 ] || fail "an unknown host gave $code, not 404"
 echo "ok: two sites, own users, own apps, unknown host is 404"

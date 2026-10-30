@@ -63,9 +63,17 @@ pub fn pg_environment(database_url: &str) -> Result<Vec<(&'static str, String)>,
     }
     env.push(("PGDATABASE", name.to_owned()));
     match config.get_ssl_mode() {
+        SslMode::Prefer => {}
         SslMode::Disable => env.push(("PGSSLMODE", "disable".to_owned())),
         SslMode::Require => env.push(("PGSSLMODE", "require".to_owned())),
-        _ => {}
+        // `SslMode` is non-exhaustive: a mode added later is an error until it is mapped here.
+        _ => {
+            return Err(DbError::Backup(
+                "the database URL uses a `sslmode` that cannot be passed to pg_dump or \
+                 pg_restore through the PG* environment variables; remove it from the URL"
+                    .to_owned(),
+            ));
+        }
     }
     Ok(env)
 }
@@ -152,7 +160,9 @@ impl DatabaseInfo {
 /// - no extension other than `plpgsql`;
 /// - no function, and no domain, enum, range or multirange type, outside those schemas.
 ///
-/// Anything else makes it "not empty", so a restore never merges into existing data.
+/// Objects of other kinds (for example a publication or an event trigger) are not checked.
+/// Anything the check finds makes the database "not empty", so a restore never merges into
+/// existing data of the kinds checked.
 pub const EMPTY_CHECK_SQL: &str = "\
 WITH user_schemas AS (
     SELECT oid, nspname FROM pg_namespace

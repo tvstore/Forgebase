@@ -393,7 +393,7 @@ forgebase --config forgebase.toml worker --site acme --doctypes examples/sales/d
 
 **`site list` and `site create`.** `forgebase site list` prints each site's name, hosts, apps and the **name** of its database variable (never the URL) and needs no database. `forgebase site create NAME` runs `CREATE DATABASE` for the database named in the site's URL, connecting to the maintenance database `postgres` of the same server (`--maintenance-db NAME` to use another), and then migrates it like `migrate --site NAME`. The role in the URL needs the `CREATEDB` privilege. It refuses, with exit 1, a database that exists already (run `migrate --site NAME` instead: an existing database is never migrated implicitly). If the migrate fails after the create, the database is kept: fix the cause and run `migrate --site NAME`. With an existing database and a role without `CREATEDB`, `site create` reports "permission denied" (PostgreSQL checks the privilege first). `site create NAME --empty` creates the database and does not migrate it (for a restore); it uses no apps.
 
-**Backup and restore.** They use the PostgreSQL client tools `pg_dump` and `pg_restore` (not bundled; version 16 or newer, the same or a newer major version than the server, on `PATH` or in `FORGEBASE_PG_BIN`). The connection reaches them through `PG*` environment variables, never on the command line.
+**Backup and restore.** They use the PostgreSQL client tools `pg_dump` and `pg_restore` (not bundled; the server's major version, on `PATH` or in `FORGEBASE_PG_BIN`). The connection reaches them through `PG*` environment variables, never on the command line.
 
 ```bash
 forgebase --config forgebase.toml site backup acme --out acme.dump          # never overwrites; mode 0600

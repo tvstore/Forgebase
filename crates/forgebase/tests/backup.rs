@@ -1,7 +1,8 @@
 //! `site backup` and `site restore` (M7.3, ADR 0014): the built `forgebase` binary against real
 //! PostgreSQL databases and the real `pg_dump` and `pg_restore` of the machine.
 //!
-//! The PostgreSQL client tools (version 16 or newer, on `PATH`) are required: a test that cannot
+//! The PostgreSQL client tools of the server's major version (on `PATH`, or in the directory of
+//! `FORGEBASE_PG_BIN`, which the tests pass on to the binary) are required: a test that cannot
 //! find them fails with the tool's name (it never skips). Every test makes its own throwaway
 //! `fb_test_backup_*` databases and needs `FORGEBASE_TEST_DATABASE_URL`; see CONTRIBUTING.md.
 
@@ -174,7 +175,6 @@ impl World {
             .args(args)
             .env_remove("FORGEBASE_DATABASE_URL")
             .env_remove("FORGEBASE_CONFIG")
-            .env_remove("FORGEBASE_PG_BIN")
             .env(SRC_URL, &self.src.url)
             .env(DST_URL, &self.dst.url)
             .stdin(Stdio::null())
@@ -506,7 +506,7 @@ fn a_missing_client_tool_is_a_clear_error_and_leaves_no_file() {
         fails(&world.run_with_bin(&["site", "backup", "src", "--out", file_arg], &nowhere));
     assert!(
         message.starts_with(
-            "error: pg_dump not found; install the PostgreSQL client tools of version >= the server's"
+            "error: pg_dump not found; install the PostgreSQL client tools of the server's major version"
         ) && message.contains("docs/guide/operations.md"),
         "{message}"
     );
@@ -528,16 +528,23 @@ fn a_missing_client_tool_is_a_clear_error_and_leaves_no_file() {
     );
 }
 
-/// A directory with fake `pg_dump` and `pg_restore` scripts that print `version`, and then run
-/// `body` (a shell script) for any other arguments.
+/// A directory with fake `pg_dump` and `pg_restore` scripts that print `version` for
+/// `--version`, `restore_list` for `pg_restore --list` (when given), and run `body` (a shell
+/// script) for any other arguments.
 #[cfg(unix)]
-fn fake_tools(dir: &Path, version: &str, body: &str) -> PathBuf {
+fn fake_tools(dir: &Path, version: &str, restore_list: Option<&str>, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join(format!("fake-bin-{}", unique_name()));
     std::fs::create_dir_all(&bin).expect("dir");
     for tool in ["pg_dump", "pg_restore"] {
+        let list = match (tool, restore_list) {
+            ("pg_restore", Some(text)) => {
+                format!("if [ \"$1\" = \"--list\" ]; then printf '%s\\n' '{text}'; exit 0; fi\n")
+            }
+            _ => String::new(),
+        };
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '{tool} (PostgreSQL) {version}'; exit 0; fi\n{body}\n"
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '{tool} (PostgreSQL) {version}'; exit 0; fi\n{list}{body}\n"
         );
         let path = bin.join(tool);
         std::fs::write(&path, script).expect("script");
@@ -546,30 +553,59 @@ fn fake_tools(dir: &Path, version: &str, body: &str) -> PathBuf {
     bin
 }
 
+/// The major version of the server the tests run against.
+#[cfg(unix)]
+fn server_major(world: &World) -> u32 {
+    world
+        .src
+        .scalar("SELECT (current_setting('server_version_num')::int / 10000)::text")
+        .expect("version")
+        .parse()
+        .expect("number")
+}
+
 #[cfg(unix)]
 #[test]
-fn an_older_client_tool_is_refused_with_both_versions() {
+fn a_client_tool_of_another_major_version_is_refused_with_both_versions() {
     let world = World::new();
     world.fill_src();
-    let bin = fake_tools(&world.dir, "15.4", "exit 0");
-    let file = world.file("x.dump");
-    let message = fails(&world.run_with_bin(
-        &[
-            "site",
-            "backup",
-            "src",
-            "--out",
-            file.to_str().expect("path"),
-        ],
-        &bin,
-    ));
+    let server = server_major(&world);
+    // Older and newer tools are both refused: the tool must have the server's major version.
+    for other in [server - 1, server + 1] {
+        let bin = fake_tools(&world.dir, &format!("{other}.4"), None, "exit 0");
+        let file = world.file("x.dump");
+        let message = fails(&world.run_with_bin(
+            &[
+                "site",
+                "backup",
+                "src",
+                "--out",
+                file.to_str().expect("path"),
+            ],
+            &bin,
+        ));
+        assert!(
+            message.contains(&format!(
+                "pg_dump is version {other} but the server is version {server};"
+            )),
+            "{message}"
+        );
+        assert!(!file.exists() && !world.file("x.dump.partial").exists());
+    }
+    // The same for pg_restore.
+    let file = world.file("src.dump");
+    let file_arg = file.to_str().expect("path");
+    world.ok(&["site", "backup", "src", "--out", file_arg]);
+    world.ok(&["site", "create", "dst", "--empty"]);
+    let bin = fake_tools(&world.dir, &format!("{}.4", server + 1), None, "exit 0");
+    let message = fails(&world.run_with_bin(&["site", "restore", "dst", "--from", file_arg], &bin));
     assert!(
-        message.contains("pg_dump is version 15, older than the server (version 16")
-            || message.contains("older than the server (version 17")
-            || message.contains("older than the server (version 18"),
+        message.contains(&format!(
+            "pg_restore is version {} but the server is version {server};",
+            server + 1
+        )),
         "{message}"
     );
-    assert!(!file.exists());
 }
 
 #[cfg(unix)]
@@ -577,15 +613,17 @@ fn an_older_client_tool_is_refused_with_both_versions() {
 fn the_tool_gets_the_connection_in_its_environment_only_and_a_failed_dump_leaves_no_file() {
     let world = World::new();
     world.fill_src();
+    let server = server_major(&world);
     let log = world.file("tool.log");
-    // Records its arguments and its PG* environment, writes some of a dump and fails.
+    // Records its arguments and its PG* environment, writes some of a dump to its standard
+    // output and fails.
     let body = format!(
         "echo \"ARGS: $*\" > '{log}'\nenv | grep '^PG' | sort >> '{log}'\n\
-         for last; do :; done\nfile=\"${{last#--file=}}\"\necho partial > \"$file\"\n\
-         echo 'something went wrong' >&2\nexit 3",
+         echo partial\necho 'something went wrong' >&2\n\
+         echo 'pg_dump: error: already named' >&2\nexit 3",
         log = log.display()
     );
-    let bin = fake_tools(&world.dir, "99.0", &body);
+    let bin = fake_tools(&world.dir, &format!("{server}.0"), None, &body);
     let file = world.file("x.dump");
     let output = world
         .command(&[
@@ -602,24 +640,32 @@ fn the_tool_gets_the_connection_in_its_environment_only_and_a_failed_dump_leaves
         .output()
         .expect("run");
     let message = fails(&output);
-    // The tool's standard error is passed on with its name; the failure is reported.
+    // The tool's standard error is passed on with its name, once; the failure is reported.
     assert!(
         message.contains("pg_dump: something went wrong\n"),
+        "{message}"
+    );
+    assert!(
+        message.contains("pg_dump: error: already named\n")
+            && !message.contains("pg_dump: pg_dump:"),
         "{message}"
     );
     assert!(
         message.contains("pg_dump failed; no backup file was written"),
         "{message}"
     );
-    assert!(!file.exists(), "the partial file is removed");
+    assert!(
+        !file.exists() && !world.file("x.dump.partial").exists(),
+        "the partial file is removed"
+    );
     let logged = std::fs::read_to_string(&log).expect("log");
     let (args, env) = logged.split_once('\n').expect("args line");
-    // Not on the command line: no URL, user, password, host or port.
-    for secret in ["forgebase", "postgres://", "localhost", "5432"] {
+    // Not on the command line: no URL, user, password, host, port or file name.
+    for secret in ["forgebase", "postgres://", "localhost", "5432", "x.dump"] {
         assert!(!args.contains(secret), "{args} contains {secret}");
     }
     assert!(
-        args.contains("--format=custom") && args.contains("--no-owner"),
+        args.contains("--format=custom") && args.contains("--no-owner") && !args.contains("--file"),
         "{args}"
     );
     // In the environment: the connection, and none of the inherited PG* variables.
@@ -642,18 +688,92 @@ fn the_tool_gets_the_connection_in_its_environment_only_and_a_failed_dump_leaves
 
 #[cfg(unix)]
 #[test]
-fn a_backup_made_by_a_newer_pg_dump_is_refused_by_an_older_pg_restore() {
+fn a_killed_backup_leaves_at_most_the_partial_file_and_it_is_not_overwritten() {
     let world = World::new();
     world.fill_src();
-    // A real dump of this server; the fake pg_restore claims version 15.
+    let server = server_major(&world);
+    // A slow dump: some output, then it waits (exec: no shell is left behind).
+    let bin = fake_tools(
+        &world.dir,
+        &format!("{server}.0"),
+        None,
+        "echo partial\nexec sleep 5",
+    );
+    let file = world.file("x.dump");
+    let partial = world.file("x.dump.partial");
+    let mut child = world
+        .command(&[
+            "site",
+            "backup",
+            "src",
+            "--out",
+            file.to_str().expect("path"),
+        ])
+        .env("FORGEBASE_PG_BIN", &bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let mut waited = 0;
+    while !partial.exists() || std::fs::metadata(&partial).map_or(0, |m| m.len()) == 0 {
+        assert!(waited < 200, "the backup did not start writing");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        waited += 1;
+    }
+    // While it runs, the final name does not exist.
+    assert!(!file.exists());
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    assert!(!file.exists(), "a killed backup never leaves FILE");
+    assert!(partial.exists(), "the partial file may be left");
+    // The next backup refuses to go on top of it, and says why.
+    let message = fails(&world.run(&[
+        "site",
+        "backup",
+        "src",
+        "--out",
+        file.to_str().expect("path"),
+    ]));
+    assert!(
+        message.contains("an earlier backup was interrupted") && message.contains("x.dump.partial"),
+        "{message}"
+    );
+    assert!(!file.exists());
+    std::fs::remove_file(&partial).expect("remove the partial file");
+    // With the partial file gone, a real backup works.
+    world.ok(&[
+        "site",
+        "backup",
+        "src",
+        "--out",
+        file.to_str().expect("path"),
+    ]);
+    assert!(file.exists() && !partial.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backup_made_by_a_newer_pg_dump_is_refused_by_pg_restore() {
+    let world = World::new();
+    world.fill_src();
+    let server = server_major(&world);
+    // A fake pg_restore of the server's own major version, whose listing says that the backup
+    // was made by pg_dump 99: only the dump-version rule can refuse it.
     let file = world.file("src.dump");
     let file_arg = file.to_str().expect("path");
     world.ok(&["site", "backup", "src", "--out", file_arg]);
     world.ok(&["site", "create", "dst", "--empty"]);
-    let bin = fake_tools(&world.dir, "15.4", "exit 0");
+    let bin = fake_tools(
+        &world.dir,
+        &format!("{server}.2"),
+        Some(";     Dumped by pg_dump version: 99.0"),
+        "echo 'the restore must not run' >&2\nexit 9",
+    );
     let message = fails(&world.run_with_bin(&["site", "restore", "dst", "--from", file_arg], &bin));
     assert!(
-        message.contains("pg_restore is version 15, older than the server"),
+        message.contains(&format!(
+            "the backup was made by pg_dump version 99, which is newer than the server (version {server}; pg_restore is version {server})"
+        )) && !message.contains("the restore must not run"),
         "{message}"
     );
     assert_eq!(

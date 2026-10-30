@@ -7,9 +7,16 @@
 //! removed from its environment, so a `PGSERVICE`, `PGPASSFILE` or `PGOPTIONS` of the operator
 //! cannot change where it connects.
 //!
-//! **Partial files.** A backup reserves its file with an exclusive create (mode 0600 on Unix: the
-//! file holds password hashes), so it never overwrites anything, and removes it again when
-//! anything fails.
+//! **Partial files.** A backup is written to `FILE.partial`, created exclusively (mode 0600 on
+//! Unix: the file holds password hashes), and the open handle is the standard output of
+//! `pg_dump`, so the tool never opens a path by name. Only a finished dump is published under its
+//! final name, with a hard link, which fails when `FILE` exists: nothing is ever overwritten. A
+//! failure removes the `.partial` file; a killed process (SIGINT, SIGTERM) can leave only
+//! `FILE.partial`, never a partial `FILE`.
+
+//! **Versions.** The tools must have the server's major version (a newer `pg_dump` writes SQL
+//! that an older server rejects, for example `SET transaction_timeout`). A restore also needs
+//! the dump's `pg_dump` major version to be at most the server's (an upgrade is allowed).
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
@@ -51,7 +58,7 @@ fn program(tool: Tool, bin_dir: Option<&Path>) -> PathBuf {
 
 fn not_found(tool: Tool) -> CliError {
     CliError::Backup(format!(
-        "{0} not found; install the PostgreSQL client tools of version >= the server's (see \
+        "{0} not found; install the PostgreSQL client tools of the server's major version (see \
          docs/guide/operations.md); set {PG_BIN_VAR} to their directory if they are not on PATH",
         tool.name()
     ))
@@ -81,14 +88,12 @@ fn command(tool: Tool, bin_dir: Option<&Path>, env: &PgEnv) -> Command {
 }
 
 /// The arguments of `pg_dump`. No URL, no password: the connection is in the environment.
-pub(crate) fn dump_args(file: &Path) -> Vec<OsString> {
-    let mut file_option = OsString::from("--file=");
-    file_option.push(file);
+/// The dump goes to the standard output, which is the open `.partial` file.
+pub(crate) fn dump_args() -> Vec<OsString> {
     vec![
         "--format=custom".into(),
         "--no-owner".into(),
         "--no-privileges".into(),
-        file_option,
     ]
 }
 
@@ -137,20 +142,33 @@ pub(crate) fn dump_major(listing: &str) -> Option<u32> {
     parse_major(rest.trim_start_matches(':').trim_start())
 }
 
-/// Why `tool_major` cannot work with a server or dump of `other_major`, or `None` when it can:
-/// the tool must be of the same or a newer major version.
-pub(crate) fn version_problem(
-    tool: Tool,
-    tool_major: u32,
-    what: &str,
-    other_major: u32,
-) -> Option<String> {
-    (tool_major < other_major).then(|| {
+/// Why `tool` of `tool_major` cannot be used with a server of `server_major`, or `None`: the
+/// major versions must be equal.
+pub(crate) fn version_problem(tool: Tool, tool_major: u32, server_major: u32) -> Option<String> {
+    (tool_major != server_major).then(|| {
         format!(
-            "{} is version {tool_major}, older than {what} (version {other_major}); install the \
-             PostgreSQL client tools of version {other_major} or newer (see \
-             docs/guide/operations.md)",
+            "{} is version {tool_major} but the server is version {server_major}; the tool must \
+             have the server's major version: install the PostgreSQL client tools of version \
+             {server_major} (see docs/guide/operations.md) and set {PG_BIN_VAR} to their \
+             directory if they are not first on PATH",
             tool.name()
+        )
+    })
+}
+
+/// Why a backup made by `pg_dump` of `dump_major` cannot be restored into a server of
+/// `server_major` (with `pg_restore` of `restore_major`), or `None`: the dump must not be newer
+/// than the server. An older dump is fine (an upgrade).
+pub(crate) fn dump_problem(
+    restore_major: u32,
+    dump_major: u32,
+    server_major: u32,
+) -> Option<String> {
+    (dump_major > server_major).then(|| {
+        format!(
+            "the backup was made by pg_dump version {dump_major}, which is newer than the server \
+             (version {server_major}; pg_restore is version {restore_major}); a backup can only \
+             be restored into a server of the same or a newer major version"
         )
     })
 }
@@ -171,16 +189,17 @@ fn tool_major(tool: Tool, bin_dir: Option<&Path>) -> Result<u32, CliError> {
 }
 
 /// Runs the tool to the end, copying each line of its standard error to ours, prefixed with the
-/// tool's name. Returns whether it exited with success.
+/// tool's name unless the line starts with it already (`pg_dump: error: ...`). Returns whether it exited with success.
 fn run_streaming(
     tool: Tool,
     bin_dir: Option<&Path>,
     env: &PgEnv,
     args: &[OsString],
+    stdout: Stdio,
 ) -> Result<bool, CliError> {
     let mut child = command(tool, bin_dir, env)
         .args(args)
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| start_error(tool, &e))?;
@@ -189,8 +208,13 @@ fn run_streaming(
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line).unwrap_or(0) > 0 {
         let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end();
         // A closed standard error must not stop the tool half way: ignore write errors.
-        let _ = writeln!(std::io::stderr(), "{}: {}", tool.name(), text.trim_end());
+        if text.starts_with(&format!("{}:", tool.name())) {
+            let _ = writeln!(std::io::stderr(), "{text}");
+        } else {
+            let _ = writeln!(std::io::stderr(), "{}: {text}", tool.name());
+        }
         line.clear();
     }
     let status = child
@@ -285,9 +309,17 @@ pub(crate) struct Backup {
     pub bytes: u64,
 }
 
+/// The name under which a backup is written until it is finished: `FILE.partial`.
+pub(crate) fn partial_path(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".partial");
+    PathBuf::from(name)
+}
+
 /// Dumps the database of `env` into `file`. `server_major` is the server's major version, read
-/// by the caller. Refuses an existing file; removes `file` again when anything fails. Blocking:
-/// run it with `spawn_blocking`.
+/// by the caller. The dump is written to `FILE.partial` and published as `FILE` only when
+/// `pg_dump` succeeded; an existing `FILE` is never overwritten. Blocking: run it with
+/// `spawn_blocking`.
 pub(crate) fn backup(
     bin_dir: Option<&Path>,
     env: &PgEnv,
@@ -295,30 +327,49 @@ pub(crate) fn backup(
     file: &Path,
 ) -> Result<Backup, CliError> {
     let major = tool_major(Tool::Dump, bin_dir)?;
-    if let Some(problem) = version_problem(Tool::Dump, major, "the server", server_major) {
+    if let Some(problem) = version_problem(Tool::Dump, major, server_major) {
         return Err(CliError::Backup(problem));
     }
-    reserve(file)?;
-    let result = run_streaming(Tool::Dump, bin_dir, env, &dump_args(file))
+    let partial = partial_path(file);
+    let handle = reserve(file, &partial)?;
+    let result = run_streaming(Tool::Dump, bin_dir, env, &dump_args(), Stdio::from(handle))
         .and_then(|ok| {
             ok.then_some(()).ok_or_else(|| {
                 CliError::Backup("pg_dump failed; no backup file was written".to_owned())
             })
         })
-        .and_then(|()| {
-            std::fs::metadata(file)
-                .map(|m| Backup { bytes: m.len() })
-                .map_err(|e| CliError::Backup(format!("cannot read {}: {e}", file.display())))
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(file);
-    }
+        .and_then(|()| publish(&partial, file));
+    // On success this removes the second name of the published file; on failure the dump.
+    let _ = std::fs::remove_file(&partial);
     result
 }
 
-/// Creates `file`, empty, only if it does not exist (so a backup never overwrites anything, also
-/// not by a race). Mode 0600 on Unix.
-fn reserve(file: &Path) -> Result<(), CliError> {
+/// Gives the finished `partial` its final name with a hard link, which fails if `file` exists.
+fn publish(partial: &Path, file: &Path) -> Result<Backup, CliError> {
+    match std::fs::hard_link(partial, file) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(CliError::Backup(format!(
+                "refusing to overwrite {}",
+                file.display()
+            )));
+        }
+        Err(e) => {
+            return Err(CliError::Backup(format!(
+                "cannot create {}: {e}",
+                file.display()
+            )));
+        }
+    }
+    std::fs::metadata(file)
+        .map(|m| Backup { bytes: m.len() })
+        .map_err(|e| CliError::Backup(format!("cannot read {}: {e}", file.display())))
+}
+
+/// Creates `partial`, empty, only if it does not exist, and checks that `file` does not (a
+/// backup never overwrites anything, also not by a race). Mode 0600 on Unix.
+fn reserve(file: &Path, partial: &Path) -> Result<std::fs::File, CliError> {
+    check_new_file(file)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -326,20 +377,24 @@ fn reserve(file: &Path) -> Result<(), CliError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    match options.open(file) {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(CliError::Backup(format!(
-            "refusing to overwrite {}",
-            file.display()
-        ))),
-        Err(e) => Err(CliError::Backup(format!(
-            "cannot create {}: {e}",
-            file.display()
-        ))),
-    }
+    options.open(partial).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            interrupted(partial)
+        } else {
+            CliError::Backup(format!("cannot create {}: {e}", partial.display()))
+        }
+    })
 }
 
-/// Refuses early, before any database or tool is touched, a backup file that exists already.
+fn interrupted(partial: &Path) -> CliError {
+    CliError::Backup(format!(
+        "{} exists: an earlier backup was interrupted; remove that file and try again",
+        partial.display()
+    ))
+}
+
+/// Refuses early, before any database or tool is touched, a backup file that exists already, and
+/// the `.partial` file of an interrupted backup.
 pub(crate) fn check_new_file(file: &Path) -> Result<(), CliError> {
     if file.symlink_metadata().is_ok() {
         return Err(CliError::Backup(format!(
@@ -347,11 +402,15 @@ pub(crate) fn check_new_file(file: &Path) -> Result<(), CliError> {
             file.display()
         )));
     }
+    let partial = partial_path(file);
+    if partial.symlink_metadata().is_ok() {
+        return Err(interrupted(&partial));
+    }
     Ok(())
 }
 
 /// Restores `file` into the database of `env` (`site restore`), after checking that
-/// `pg_restore` is not older than the dump or the server. The caller has checked that the
+/// `pg_restore` has the server's major version and the dump is not newer than the server. The caller has checked that the
 /// database is empty. Blocking: run it with `spawn_blocking`.
 pub(crate) fn restore(
     bin_dir: Option<&Path>,
@@ -361,7 +420,7 @@ pub(crate) fn restore(
     file: &Path,
 ) -> Result<(), CliError> {
     let major = tool_major(Tool::Restore, bin_dir)?;
-    if let Some(problem) = version_problem(Tool::Restore, major, "the server", server_major) {
+    if let Some(problem) = version_problem(Tool::Restore, major, server_major) {
         return Err(CliError::Backup(problem));
     }
     let listing = command(Tool::Restore, bin_dir, &Vec::new())
@@ -382,11 +441,11 @@ pub(crate) fn restore(
             file.display()
         ))
     })?;
-    if let Some(problem) = version_problem(Tool::Restore, major, "the backup", dumped_by) {
+    if let Some(problem) = dump_problem(major, dumped_by, server_major) {
         return Err(CliError::Backup(problem));
     }
     let args = restore_args(database, file);
-    if run_streaming(Tool::Restore, bin_dir, env, &args)? {
+    if run_streaming(Tool::Restore, bin_dir, env, &args, Stdio::null())? {
         Ok(())
     } else {
         Err(CliError::Backup(
@@ -420,16 +479,31 @@ mod tests {
     }
 
     #[test]
-    fn the_tool_must_be_the_same_or_newer() {
-        assert!(version_problem(Tool::Dump, 16, "the server", 16).is_none());
-        assert!(version_problem(Tool::Dump, 17, "the server", 16).is_none());
-        let problem = version_problem(Tool::Dump, 15, "the server", 16).expect("older");
+    fn the_tool_must_have_the_servers_major_version() {
+        assert!(version_problem(Tool::Dump, 16, 16).is_none());
+        for tool_version in [15, 17] {
+            let problem = version_problem(Tool::Dump, tool_version, 16).expect("differs");
+            assert!(
+                problem.starts_with(&format!(
+                    "pg_dump is version {tool_version} but the server is version 16;"
+                )) && problem.contains("install the PostgreSQL client tools of version 16"),
+                "{problem}"
+            );
+        }
+        let problem = version_problem(Tool::Restore, 17, 16).expect("differs");
+        assert!(problem.starts_with("pg_restore is version 17 but the server is version 16"));
+    }
+
+    #[test]
+    fn a_dump_must_not_be_newer_than_the_server() {
+        assert!(dump_problem(16, 16, 16).is_none());
+        assert!(dump_problem(17, 16, 17).is_none(), "an upgrade is allowed");
+        let problem = dump_problem(16, 17, 16).expect("newer");
         assert!(
-            problem.starts_with("pg_dump is version 15, older than the server (version 16)"),
+            problem.contains("pg_dump version 17")
+                && problem.contains("server (version 16; pg_restore is version 16)"),
             "{problem}"
         );
-        let problem = version_problem(Tool::Restore, 16, "the backup", 17).expect("older");
-        assert!(problem.contains("pg_restore") && problem.contains("backup"));
     }
 
     #[test]
@@ -443,7 +517,7 @@ mod tests {
             .iter()
             .find_map(|(name, value)| (*name == "PGDATABASE").then_some(value.as_str()))
             .expect("database");
-        for args in [dump_args(file), restore_args(database, file)] {
+        for args in [dump_args(), restore_args(database, file)] {
             for arg in args {
                 let arg = arg.to_string_lossy().into_owned();
                 for secret in ["s3cretpw", "ann", "db.example.com", "6543", "postgres://"] {
@@ -478,22 +552,49 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fb_backup_unit_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("x.dump");
+        let partial = partial_path(&file);
+        assert_eq!(partial, dir.join("x.dump.partial"));
         std::fs::write(&file, "precious").expect("write");
-        for result in [check_new_file(&file), reserve(&file)] {
+        for result in [
+            check_new_file(&file),
+            reserve(&file, &partial).map(|_| ()),
+            publish(&partial, &file).map(|_| ()),
+        ] {
             let message = result.expect_err("exists").to_string();
-            assert_eq!(message, format!("refusing to overwrite {}", file.display()));
+            assert!(
+                message == format!("refusing to overwrite {}", file.display())
+                    || message.starts_with("cannot create"),
+                "{message}"
+            );
         }
         assert_eq!(std::fs::read_to_string(&file).expect("read"), "precious");
+        assert!(!partial.exists(), "a refused backup creates nothing");
         std::fs::remove_file(&file).expect("remove");
         check_new_file(&file).expect("free");
-        reserve(&file).expect("reserve");
+        let mut handle = reserve(&file, &partial).expect("reserve");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&file).expect("meta").permissions().mode();
+            let mode = std::fs::metadata(&partial)
+                .expect("meta")
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        assert!(reserve(&file).is_err());
+        // An earlier interrupted backup is reported as such, and is not overwritten.
+        for result in [check_new_file(&file), reserve(&file, &partial).map(|_| ())] {
+            let message = result.expect_err("partial exists").to_string();
+            assert!(
+                message.contains("an earlier backup was interrupted")
+                    && message.contains("x.dump.partial"),
+                "{message}"
+            );
+        }
+        // Publishing gives the final name and never overwrites.
+        handle.write_all(b"data").expect("write");
+        let done = publish(&partial, &file).expect("publish");
+        assert_eq!(done.bytes, 4);
+        assert!(publish(&partial, &file).is_err());
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
@@ -507,7 +608,7 @@ mod tests {
                 .to_string();
             assert!(
                 message.starts_with(&format!(
-                    "{} not found; install the PostgreSQL client tools of version >= the server's",
+                    "{} not found; install the PostgreSQL client tools of the server's major version",
                     tool.name()
                 )) && message.contains("docs/guide/operations.md"),
                 "{message}"
