@@ -13,6 +13,7 @@
 # test: `amount` and `total` (read_only, computed by those hooks) stay empty here. It then migrates, and creates:
 #   - e2e_manager, role "Sales Manager": every right on sales orders (and customers);
 #   - e2e_clerk, role "Sales Clerk": no submit, cancel, amend or delete right;
+#   - e2e_admin, role "Administrator": the only user who may share a saved view (M8.3);
 #   - the customer "ada@example.com" (full name "Ada Lovelace", the customer's `title_field`) for the orders:
 #     a Link to it shows that title in the list and the form (UX.4, link titles).
 #   - a separate DocType `purchase_request` with a workflow (M8.2), so that the sales order flow keeps its plain
@@ -136,6 +137,7 @@ TOML
 "$BIN" migrate --doctypes "$DOCTYPES" > /dev/null
 printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_manager --role "Sales Manager" > /dev/null
 printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_clerk --role "Sales Clerk" > /dev/null
+printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_admin --role "Administrator" > /dev/null
 "$BIN" doc insert customer --doctypes "$DOCTYPES" \
   --data '{"email":"ada@example.com","full_name":"Ada Lovelace"}' > /dev/null
-echo "seeded: users e2e_manager and e2e_clerk, customer ada@example.com, DocTypes in $DOCTYPES"
+echo "seeded: users e2e_manager, e2e_clerk and e2e_admin, customer ada@example.com, DocTypes in $DOCTYPES"

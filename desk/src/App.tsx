@@ -18,7 +18,7 @@ export type DocTypes = { status: 'loading' } | { status: 'ready'; list: DocTypeS
 
 type Auth =
   | { status: 'loading' }
-  | { status: 'in'; username: string }
+  | { status: 'in'; username: string; roles: string[] }
   | { status: 'out' }
   | { status: 'error'; message: string };
 
@@ -38,7 +38,7 @@ export function App() {
     // fresh CSRF token, which is kept in memory only.
     getSession().then(
       (session) => {
-        if (!cancelled) setAuth({ status: 'in', username: session.username });
+        if (!cancelled) setAuth({ status: 'in', username: session.username, roles: session.roles });
       },
       (e: unknown) => {
         if (cancelled) return;
@@ -85,7 +85,7 @@ export function App() {
   }, [loggedIn]);
 
   const onLoggedIn = (session: SessionInfo) => {
-    setAuth({ status: 'in', username: session.username });
+    setAuth({ status: 'in', username: session.username, roles: session.roles });
     navigate(homeHref());
   };
 
@@ -127,17 +127,27 @@ export function App() {
           doctypes={doctypes.status === 'ready' ? doctypes.list : []}
           onLogout={onLogout}
         >
-          <Page route={route} username={auth.username} doctypes={doctypes} />
+          <Page route={route} username={auth.username} isAdmin={auth.roles.includes('Administrator')} doctypes={doctypes} />
         </Layout>
       )}
     </ToastProvider>
   );
 }
 
-function Page({ route, username, doctypes }: { route: Route; username: string; doctypes: DocTypes }) {
+function Page({
+  route,
+  username,
+  isAdmin,
+  doctypes,
+}: {
+  route: Route;
+  username: string;
+  isAdmin: boolean;
+  doctypes: DocTypes;
+}) {
   switch (route.name) {
     case 'list':
-      return <List key={route.doctype} doctype={route.doctype} params={route.params} />;
+      return <List key={route.doctype} doctype={route.doctype} params={route.params} username={username} isAdmin={isAdmin} />;
     case 'new':
       return <Form key={`new/${route.doctype}`} doctype={route.doctype} docName={null} username={username} />;
     case 'form':

@@ -256,3 +256,58 @@ export function formatCell(value: unknown, type: FieldType, target?: string, tit
   if (type === 'int' && typeof value === 'number') return groupDigits(String(value));
   return String(value);
 }
+
+/** The most columns a list shows besides `name`: the cap of a saved view and of a DocType's `list_fields`. */
+export const MAX_COLUMNS = 8;
+
+/**
+ * Every column the Columns menu offers, besides `name` (which holds the link and is always
+ * shown): the default columns first, in their order, then the other fields that are neither Table
+ * nor Text fields and are not the title field. This is the order the columns are shown in.
+ */
+export function availableColumns(meta: DocTypeMeta): Column[] {
+  const defaults = listColumns(meta).filter((c) => c.key !== NAME_KEY);
+  const known = new Set(defaults.map((c) => c.key));
+  const extra: Column[] = [];
+  for (const f of meta.fields) {
+    if (known.has(f.name) || f.type === 'table' || f.type === 'text' || f.name === meta.title_field) continue;
+    extra.push({ key: f.name, label: f.label, type: f.type, ...(f.type === 'link' && f.target ? { target: f.target } : {}) });
+  }
+  return [...defaults, ...extra];
+}
+
+/**
+ * The columns to show for the `columns` of the address (field names, standard columns): `name`,
+ * then the named ones that exist, in the order named. Names that no longer exist are left out;
+ * `null`, or no name that exists, gives the default columns.
+ */
+export function selectColumns(meta: DocTypeMeta, keys: string[] | null): Column[] {
+  if (keys === null) return listColumns(meta);
+  const offered = new Map(availableColumns(meta).map((c) => [c.key, c]));
+  const chosen = keys.flatMap((key) => offered.get(key) ?? []);
+  const first = listColumns(meta)[0];
+  return first && chosen.length > 0 ? [first, ...chosen] : listColumns(meta);
+}
+
+/**
+ * The `columns` of the address after the user checks or unchecks `key`: the shown columns in the
+ * order of the menu, or `null` when that is the default set. A column is not added past
+ * [`MAX_COLUMNS`] and the last one is not removed (an empty list means the default).
+ */
+export function toggleColumn(meta: DocTypeMeta, shown: string[], key: string): string[] | null {
+  const offered = availableColumns(meta).map((c) => c.key);
+  const next = shown.includes(key)
+    ? shown.filter((k) => k !== key)
+    : shown.length >= MAX_COLUMNS
+      ? shown
+      : [...shown, key];
+  const ordered = [...offered.filter((k) => next.includes(k)), ...next.filter((k) => !offered.includes(k))];
+  const defaults = listColumns(meta).filter((c) => c.key !== NAME_KEY).map((c) => c.key);
+  if (ordered.length === 0) return shown.length === 0 ? null : shown;
+  return ordered.length === defaults.length && ordered.every((k, i) => k === defaults[i]) ? null : ordered;
+}
+
+/** The keys a list can be sorted by: every column the menu offers, shown or not, and `name`. */
+export function sortableKeys(meta: DocTypeMeta): string[] {
+  return [...new Set([...listColumns(meta).map((c) => c.key), ...availableColumns(meta).map((c) => c.key)])];
+}

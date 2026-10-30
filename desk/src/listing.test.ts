@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_SORT,
+  MAX_COLUMNS,
+  availableColumns,
   filterFields,
   formatCell,
   formatDate,
@@ -16,8 +18,11 @@ import {
   parseListState,
   rowTitle,
   searchField,
+  selectColumns,
   showingText,
   sortText,
+  sortableKeys,
+  toggleColumn,
   withSearch,
 } from './listing';
 import type { DocTypeMeta, FieldMeta, FieldType, WorkflowMeta } from './types';
@@ -303,5 +308,64 @@ describe('a DocType with a workflow', () => {
       options: ['Draft', 'Approved'],
     });
     expect(filterFields(meta([field('a', 'data')], true)).some((f) => f.name === 'workflow_state')).toBe(false);
+  });
+});
+
+describe('the columns menu', () => {
+  const sample = meta([
+    field('a', 'data'),
+    field('b', 'int'),
+    field('c', 'link', { target: 'x' }),
+    field('d', 'date'),
+    field('e', 'check'),
+    field('f', 'select'),
+    field('g', 'decimal'),
+    field('notes', 'text'),
+    field('lines', 'table'),
+  ]);
+  const keys = (columns: { key: string }[]) => columns.map((c) => c.key);
+
+  it('offers the default columns first, then the other fields without Table and Text', () => {
+    expect(keys(availableColumns(sample))).toEqual(['a', 'b', 'c', 'd', 'e', 'owner', 'modified_at', 'f', 'g']);
+    const titled = meta([field('a', 'data'), field('b', 'int')], false, { title_field: 'a', list_fields: ['b'] });
+    expect(keys(availableColumns(titled))).toEqual(['b', 'owner', 'modified_at']);
+    const submittable = meta([field('a', 'data')], true);
+    expect(keys(availableColumns(submittable))).toEqual(['a', 'docstatus', 'owner', 'modified_at']);
+  });
+
+  it('shows the default columns for no choice, and the chosen ones in the order named', () => {
+    expect(selectColumns(sample, null)).toEqual(listColumns(sample));
+    expect(keys(selectColumns(sample, ['g', 'a']))).toEqual(['name', 'g', 'a']);
+    expect(selectColumns(sample, ['g'])[1]).toMatchObject({ key: 'g', label: 'G', type: 'decimal' });
+  });
+
+  it('leaves out columns that no longer exist, and falls back when none does', () => {
+    expect(keys(selectColumns(sample, ['gone', 'b', 'lines', 'notes']))).toEqual(['name', 'b']);
+    expect(selectColumns(sample, ['gone', 'lines'])).toEqual(listColumns(sample));
+  });
+
+  it('checks and unchecks a column, in the order of the menu', () => {
+    const shown = ['a', 'b'];
+    expect(toggleColumn(sample, shown, 'g')).toEqual(['a', 'b', 'g']);
+    expect(toggleColumn(sample, ['b', 'g'], 'a')).toEqual(['a', 'b', 'g']);
+    expect(toggleColumn(sample, shown, 'b')).toEqual(['a']);
+  });
+
+  it('gives null when the result is the default set', () => {
+    const defaults = listColumns(sample).filter((c) => c.key !== 'name').map((c) => c.key);
+    expect(toggleColumn(sample, [...defaults, 'g'], 'g')).toBeNull();
+    expect(toggleColumn(sample, defaults.slice(1), defaults[0] ?? '')).toBeNull();
+  });
+
+  it('adds no column past the cap and removes no last column', () => {
+    const wide = meta(Array.from({ length: 12 }, (_, i) => field(`f${i}`, 'data')), false, { list_fields: ['f0'] });
+    const all = availableColumns(wide).map((c) => c.key);
+    const full = all.slice(0, MAX_COLUMNS);
+    expect(toggleColumn(wide, full, all[MAX_COLUMNS] ?? '')).toEqual(full);
+    expect(toggleColumn(wide, ['f0'], 'f0')).toEqual(['f0']);
+  });
+
+  it('can sort by every column of the menu, shown or not', () => {
+    expect(sortableKeys(sample)).toEqual(['name', 'a', 'b', 'c', 'd', 'e', 'owner', 'modified_at', 'f', 'g']);
   });
 });

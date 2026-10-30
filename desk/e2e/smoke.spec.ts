@@ -11,7 +11,8 @@
 // their own, and the link title in the list and the form to the main flow. M8.2 adds the workflow
 // on the e2e-only DocType `purchase_request` (seed.sh): a clerk sends a request for approval, a
 // manager approves it; the state badge, the actions, the confirmation, the history and the state
-// filter. Sales orders keep their plain Submit.
+// filter. Sales orders keep their plain Submit. M8.3 adds the saved views (private, shared by an
+// Administrator, updated, deleted, a stale one), the Columns menu and the group-by summary panel.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -592,4 +593,272 @@ test('a workflow action on a stale version shows the conflict and Reload brings 
   await page.getByRole('button', { name: 'Submit for Approval' }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();
   await expect(statusBadge(page)).toHaveText('Pending Approval');
+});
+
+// ---- M8.3: saved views, columns and the summary ------------------------------------------
+
+/** Adds the filter "Status is <value>" of a purchase request list through the filter bar. */
+async function filterByStatus(page: Page, value: string): Promise<void> {
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
+  await page.getByRole('button', { name: 'Add filter' }).click();
+  await page.getByLabel('Filter 1 field').selectOption({ label: 'Status' });
+  await page.getByLabel('Filter 1 value').selectOption(value);
+  await expect(page.getByRole('button', { name: `Remove filter: Status is ${value}` })).toBeVisible();
+}
+
+const viewsButton = (page: Page) => page.getByRole('button', { name: 'Views', exact: true });
+const viewLabel = (page: Page) => page.locator('.view-label');
+
+/** Opens "Save view", names the view and saves it. */
+async function saveView(page: Page, label: string, shared = false): Promise<void> {
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: /^Save view/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save view' });
+  await expect(dialog.getByLabel('Name')).toBeFocused();
+  await dialog.getByLabel('Name').fill(label);
+  if (shared) await dialog.getByLabel('Shared with everyone').check();
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(toast(page, 'View saved')).toBeVisible();
+  await expect(viewLabel(page)).toHaveText(`\u00B7 ${label}`);
+}
+
+test('a private view survives a reload and is invisible to others; it can be updated and deleted', async ({ page }) => {
+  const label = `Drafts ${Date.now()}`;
+  await login(page, 'e2e_manager');
+  await createRequest(page, 'For the Drafts view'); // a draft, so that the filtered list has rows to sort
+  await page.goto('/desk/#/list/purchase_request');
+  await expectLoaded(page);
+
+  // The menu opens with the keyboard and Escape gives the focus back to its button.
+  await viewsButton(page).focus();
+  await page.keyboard.press('Enter');
+  await expect(viewsButton(page)).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByText('No saved views yet.')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(viewsButton(page)).toHaveAttribute('aria-expanded', 'false');
+  await expect(viewsButton(page)).toBeFocused();
+
+  await filterByStatus(page, 'Draft');
+  await saveView(page, label);
+  await expect(page).toHaveURL(/[?&]view=[0-9a-f-]{36}/);
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Draft' })).toBeVisible();
+
+  // The same name again is refused, in the dialog.
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: /^Save view/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save view' });
+  await expect(dialog.getByLabel('Shared with everyone')).toHaveCount(0); // only an Administrator may share
+  await dialog.getByLabel('Name').fill(label);
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('already exists');
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // A reload keeps the view, its filter and the title next to the heading.
+  await page.reload();
+  await expect(viewLabel(page)).toHaveText(`\u00B7 ${label}`);
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Draft' })).toBeVisible();
+  await viewsButton(page).click();
+  await expect(page.getByRole('group', { name: 'My views' }).getByRole('button', { name: label })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+  await page.keyboard.press('Escape');
+
+  // Nothing to update until something changes; then "Update" saves the new sort into the view.
+  await viewsButton(page).click();
+  await expect(page.getByRole('button', { name: `Update \u2018${label}\u2019` })).toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Amount', exact: true }).click(); // sort by Amount
+  await expect(page).toHaveURL(/[?&]sort=amount/);
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: `Update \u2018${label}\u2019` }).click();
+  await expect(toast(page, 'View updated')).toBeVisible();
+  await viewsButton(page).click();
+  await expect(page.getByRole('button', { name: `Update \u2018${label}\u2019` })).toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+
+  // The default view clears the view, its filter and the title.
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: 'Default view' }).click();
+  await expect(viewLabel(page)).toHaveCount(0);
+  await expect(page).not.toHaveURL(/view=|filters=/);
+  // Choosing it applies it again: its filter and its sort.
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: label }).click();
+  await expect(page).toHaveURL(/[?&]view=/);
+  await expect(page).toHaveURL(/[?&]sort=amount/);
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Draft' })).toBeVisible();
+  await expectNoHorizontalScroll(page, 'the list with a view');
+
+  // The clerk does not see the manager's private view.
+  await logout(page);
+  await login(page, 'e2e_clerk');
+  await page.goto('/desk/#/list/purchase_request');
+  await expectLoaded(page);
+  await viewsButton(page).click();
+  await expect(page.getByRole('button', { name: label })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'My views' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await logout(page);
+
+  // Delete it (with a confirmation).
+  await login(page, 'e2e_manager');
+  await page.goto('/desk/#/list/purchase_request');
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: label }).click();
+  await expect(viewLabel(page)).toHaveText(`\u00B7 ${label}`);
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: `Delete \u2018${label}\u2019` }).click();
+  const confirm = page.getByRole('dialog', { name: `Delete the view \u2018${label}\u2019?` });
+  await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await confirm.getByRole('button', { name: 'Delete view' }).click();
+  await expect(toast(page, 'View deleted')).toBeVisible();
+  await expect(viewLabel(page)).toHaveCount(0);
+  await viewsButton(page).click();
+  await expect(page.getByRole('button', { name: label })).toHaveCount(0);
+});
+
+test('an administrator shares a view and a clerk sees it but cannot change it', async ({ page }) => {
+  const label = `Waiting ${Date.now()}`;
+  await login(page, 'e2e_admin');
+  await page.goto('/desk/#/list/purchase_request');
+  await expectLoaded(page);
+  await filterByStatus(page, 'Pending Approval');
+  await saveView(page, label, true);
+  await viewsButton(page).click();
+  await expect(page.getByRole('group', { name: 'Shared' }).getByRole('button', { name: label })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await logout(page);
+
+  await login(page, 'e2e_clerk');
+  await page.goto('/desk/#/list/purchase_request');
+  await expectLoaded(page);
+  await viewsButton(page).click();
+  await page.getByRole('group', { name: 'Shared' }).getByRole('button', { name: label }).click();
+  await expect(viewLabel(page)).toHaveText(`\u00B7 ${label}`);
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Pending Approval' })).toBeVisible();
+  // No Update or Delete for a view the clerk may not change.
+  await viewsButton(page).click();
+  await expect(page.getByRole('button', { name: /^Update / })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Delete / })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await logout(page);
+
+  // The administrator removes it again.
+  await login(page, 'e2e_admin');
+  await page.goto('/desk/#/list/purchase_request');
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: label }).click();
+  await viewsButton(page).click();
+  await page.getByRole('button', { name: `Delete \u2018${label}\u2019` }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete view' }).click();
+  await expect(toast(page, 'View deleted')).toBeVisible();
+});
+
+test('a view that names a field that no longer exists says so and offers to fix or delete it', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  const stale = {
+    id: '0190b3a2-5c1e-7f00-8a00-1234567890ab',
+    label: 'Old view',
+    shared: false,
+    owner: 'e2e_manager',
+    definition: { filters: [{ field: 'gone', op: 'is null' }], sort: [], columns: [] },
+    version: 1,
+    modified_at: '2026-10-30T10:00:00Z',
+  };
+  // The server answers for real (400 invalid_query for the unknown field); only the view list is made up.
+  await page.route('**/api/v1/views/purchase_request', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [stale] }) }),
+  );
+  await page.goto(`/desk/#/list/purchase_request?view=${stale.id}`);
+  const notice = page.getByRole('alert').filter({ hasText: 'This view refers to fields that no longer exist.' });
+  await expect(notice).toBeVisible();
+  await expect(notice.getByRole('button', { name: 'Update view' })).toHaveAttribute('aria-disabled', 'true');
+  await expect(notice.getByRole('button', { name: 'Delete view' })).toBeVisible();
+  // Clearing the filters brings the list back, and the view can then be updated.
+  await notice.getByRole('button', { name: 'Clear filters' }).click();
+  await expect(notice).toHaveCount(0);
+  await expectLoaded(page);
+  await expect(page.getByRole('columnheader', { name: 'Status' })).toBeVisible();
+  await expect(viewLabel(page)).toHaveText('\u00B7 Old view');
+});
+
+test('the Columns menu hides a column, keeps the choice in the address and resets', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  await page.goto('/desk/#/list/sales_order');
+  await expectLoaded(page);
+  const header = page.getByRole('columnheader', { name: 'Order Date' });
+  await expect(header).toBeVisible();
+
+  const columns = page.getByRole('button', { name: 'Columns', exact: true });
+  await columns.click();
+  await page.getByRole('checkbox', { name: 'Order Date' }).uncheck();
+  // The menu stays open to change several columns; the column is gone and the address says so.
+  await expect(columns).toHaveAttribute('aria-expanded', 'true');
+  await expect(header).toHaveCount(0);
+  await expect(page).toHaveURL(/[?&]columns=/);
+  await page.keyboard.press('Escape');
+  await expect(columns).toBeFocused();
+
+  await page.reload();
+  await expectLoaded(page);
+  await expect(page.getByRole('columnheader', { name: 'Order Date' })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'Total' })).toBeVisible();
+  await columns.click();
+  await expect(page.getByRole('checkbox', { name: 'Order Date' })).not.toBeChecked();
+  // A column the list does not show by default can be added.
+  await page.getByRole('checkbox', { name: 'Remarks' }).count(); // Text fields are not offered
+  await expect(page.getByRole('checkbox', { name: 'Remarks' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Reset to default' }).click();
+  await expect(page.getByRole('columnheader', { name: 'Order Date' })).toBeVisible();
+  await expect(page).not.toHaveURL(/columns=/);
+});
+
+test('the Summary panel counts by status, follows the filters and a click on a group filters the list', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  await createRequest(page, 'Summary one');
+  await page.goto('/desk/#/list/purchase_request');
+  await expectLoaded(page);
+
+  const summary = page.getByRole('button', { name: 'Summary', exact: true });
+  await summary.click();
+  await expect(summary).toHaveAttribute('aria-expanded', 'true');
+  const panel = page.getByRole('region', { name: 'Summary' });
+  await expect(panel.getByLabel('Group by')).toHaveValue('workflow_state'); // the status of a workflow DocType
+  const table = panel.getByRole('table', { name: 'Purchase Request by Status' });
+  await expect(table).toBeVisible();
+  await expect(table.getByRole('columnheader', { name: 'Count' })).toBeVisible();
+  await expect(table.getByRole('columnheader', { name: 'Sum of Amount' })).toBeVisible();
+  const draft = table.getByRole('row').filter({ has: page.getByRole('button', { name: 'Draft', exact: true }) });
+  const count = Number((await draft.getByRole('cell').first().innerText()).replace(/,/g, ''));
+  expect(count).toBeGreaterThanOrEqual(1);
+  await expectNoHorizontalScroll(page, 'the summary panel');
+
+  // A group by another field, and an average instead of a sum.
+  await panel.getByLabel('Group by').selectOption({ label: 'Owner' });
+  await expect(panel.getByRole('table', { name: 'Purchase Request by Owner' })).toBeVisible();
+  await panel.getByLabel('Value 1: calculation').selectOption('avg');
+  await expect(panel.getByRole('columnheader', { name: 'Average of Amount' })).toBeVisible();
+  await panel.getByLabel('Group by').selectOption({ label: 'Status' });
+
+  // The panel counts what the list shows: with a filter, the other groups are gone.
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
+  await page.getByRole('button', { name: 'Add filter' }).click();
+  await page.getByLabel('Filter 1 field').selectOption({ label: 'Status' });
+  await page.getByLabel('Filter 1 value').selectOption('Draft');
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Draft' })).toBeVisible();
+  await expect(table.getByRole('row')).toHaveCount(2); // the header and the Draft group
+  await page.getByRole('button', { name: 'Remove filter: Status is Draft' }).click();
+  await expect(table.getByRole('row').nth(2)).toBeVisible();
+
+  // A click on a group closes the panel and filters the list to it.
+  await table.getByRole('button', { name: 'Draft', exact: true }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(summary).toBeFocused();
+  await expect(page).toHaveURL(/[?&]filters=/);
+  await expect(page.getByRole('button', { name: 'Remove filter: Status is Draft' })).toBeVisible();
+  await expectLoaded(page);
+  if (count <= 20) await expect(page.getByRole('status').filter({ hasText: `Showing 1\u2013${count}` })).toBeVisible();
+  await expectNoHorizontalScroll(page, 'the list after a group was chosen');
 });

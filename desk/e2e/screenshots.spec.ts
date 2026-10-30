@@ -8,7 +8,8 @@
 // submitted), the cancel dialog and the command bar at 1280, 800 and 375 px (and the list at 320 px), and asserts that
 // no page scrolls sideways at those phone widths. M8.2 adds the workflow screens (workflow-*: a draft, a request
 // waiting for approval with its actions, the confirmation, an approved one with its history, and the list with
-// the state badges) on the e2e-only DocType purchase_request. The PNGs are not committed.
+// the state badges) on the e2e-only DocType purchase_request. M8.3 adds the Views menu, the Save view dialog, the
+// Summary panel and the Columns menu (views-menu, save-view-dialog, summary-panel, columns-menu). The PNGs are not committed.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -298,4 +299,86 @@ test('screenshots of the workflow', async ({ page }) => {
   await page.getByLabel('Title').fill('Laptops for the whole support team');
   await expect(page.getByRole('button', { name: 'Approve' })).toBeDisabled();
   await snap(page, `${DIR}/workflow-form-dirty-1280.png`);
+});
+
+test('screenshots of saved views, the summary and the columns', async ({ page }) => {
+  await login(page, 'e2e_manager');
+  await seedRequests(page);
+  const list = '/desk/#/list/purchase_request';
+
+  // A shared view, made by the administrator, so that the menu shows both groups.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/desk/');
+  await page.getByRole('button', { name: /^Account:/ }).click();
+  await page.getByRole('button', { name: 'Log out' }).click();
+  await login(page, 'e2e_admin');
+  await page.goto(`${list}?filters=${encodeURIComponent(JSON.stringify([{ field: 'workflow_state', op: '=', value: 'Pending Approval' }]))}`);
+  await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Views', exact: true }).click();
+  await page.getByRole('button', { name: /^Save view/ }).click();
+  await page.getByLabel('Name').fill('Waiting for approval');
+  await page.getByLabel('Shared with everyone').check();
+  await page.getByRole('dialog', { name: 'Save view' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.toast', { hasText: 'View saved' })).toBeVisible();
+  await page.getByRole('button', { name: /^Account:/ }).click();
+  await page.getByRole('button', { name: 'Log out' }).click();
+  await login(page, 'e2e_manager');
+
+  // The manager's own view: drafts, newest amount first.
+  await page.goto(`${list}?sort=amount%3Adesc&filters=${encodeURIComponent(JSON.stringify([{ field: 'workflow_state', op: '=', value: 'Draft' }]))}`);
+  await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Views', exact: true }).click();
+  await page.getByRole('button', { name: /^Save view/ }).click();
+  await page.getByLabel('Name').fill('My drafts by amount');
+  await page.getByRole('dialog', { name: 'Save view' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.toast', { hasText: 'View saved' })).toBeVisible();
+
+  for (const width of WIDTHS) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto(list);
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+
+    // The Views menu with a shared and a private view; the current one is marked.
+    await page.getByRole('button', { name: 'Views', exact: true }).click();
+    await page.getByRole('button', { name: 'My drafts by amount' }).click();
+    await expect(page.locator('.view-label')).toHaveText('\u00B7 My drafts by amount');
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Views', exact: true }).click();
+    await noSideScroll(page, `views menu at ${width}`);
+    await snap(page, `${DIR}/views-menu-${width}.png`);
+    await page.keyboard.press('Escape');
+
+    // The Save view dialog (an administrator would also see "Shared with everyone").
+    await page.getByRole('button', { name: 'Views', exact: true }).click();
+    await page.getByRole('button', { name: /^Save view/ }).click();
+    await page.getByLabel('Name').fill('Drafts, sorted');
+    await noSideScroll(page, `save view dialog at ${width}`);
+    await snap(page, `${DIR}/save-view-dialog-${width}.png`);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // The Summary panel over the whole list.
+    await page.goto(list);
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Summary', exact: true }).click();
+    await expect(page.getByRole('table', { name: 'Purchase Request by Status' })).toBeVisible();
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await noSideScroll(page, `summary panel at ${width}`);
+    await snap(page, `${DIR}/summary-panel-${width}.png`);
+
+    // The Columns menu.
+    await page.getByRole('button', { name: 'Summary', exact: true }).click();
+    await page.getByRole('button', { name: 'Columns', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Owner' }).uncheck();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await noSideScroll(page, `columns menu at ${width}`);
+    await snap(page, `${DIR}/columns-menu-${width}.png`);
+    await page.keyboard.press('Escape');
+  }
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto(list);
+  await page.getByRole('button', { name: 'Summary', exact: true }).click();
+  await expect(page.getByRole('table', { name: 'Purchase Request by Status' })).toBeVisible();
+  await noSideScroll(page, 'summary panel at 320');
+  await snap(page, `${DIR}/summary-panel-320.png`);
 });
