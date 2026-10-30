@@ -11,6 +11,7 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 | M4 | Minimal Desk |
 | M5 | App model and developer experience |
 | M6 | Jobs and scheduler |
+| UX | UX: Desk UX refresh |
 | M7 | Site management |
 | M8 | Workflow and reports |
 | M9 | Integration |
@@ -111,6 +112,14 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
   - *CI green, independent review PASS, docs updated:* required before each merge by [AGENTS.md section 10.3](../../AGENTS.md#103-standing-merge-authorization) and recorded on #21, #22 and this PR; docs: README, the guide, ADR 0013, the architecture, the security model and this file.
 - **Follow-up (owner decision 2026-10-30):** the built-in `purge_jobs` also deletes `dead` jobs 7 days after they finished (`jobs::purge_finished`, migration 0007); see [ADR 0013](../adr/0013-jobs-scheduler-and-transactional-outbox.md#implementation-details-m62).
 - **Non-goals:** Redis, a separate jobs service, realtime, named queues, priorities, an HTTP or desk interface for jobs, jobs running as a user, exactly-once external effects, database reads in hooks.
+
+## UX: Desk UX refresh
+
+- **Status:** In progress (the owner approved the plan "Milestone UX: Desk UX refresh" on 2026-10-30, "setuju semua, lanjutkan"). It sits between M6 and M7 and does not renumber M7 and later.
+- **Plan summary:** make the generic desk friendlier to use without a redesign of the framework: human-readable labels by default, fields that the server computes shown read-only, and metadata that lets the desk name documents and choose list columns. The work is split in two PRs.
+- **UX.1 (delivered by this PR): metadata for a friendlier desk** (owner decision UX-2). A field or DocType without `label` gets the humanized name (`order_date` gives "Order Date"); the field key `read_only` (enforced by `forgebase-db` for every caller, refused before the hooks run, see the [file format](architecture.md#doctype-file-format) and the [security model](security-model.md)); the DocType keys `title_field` and `list_fields`; all returned by the metadata API. The example apps use them (read-only `total` and `amount`, explicit labels, title and list fields). The desk shows read-only fields read-only and does not send them; its look and its use of `title_field` and `list_fields` are UX.2. Also P-2: a status note in [ADR 0010](../adr/0010-authentication-and-sessions.md).
+- **UX.2 (next): the desk itself.** Restyle the desk and use the metadata of UX.1 (the title of a document, the columns of the list). Needs its own Stage 1 plan step as agreed in the approved plan.
+- **Non-goals of UX.1:** a redesign or restyle of the desk, new field types, field-level permissions, computed fields without hooks.
 
 ## M7 Site management
 
