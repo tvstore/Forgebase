@@ -58,9 +58,18 @@
 //! come from standard input), `token` (`create`, `revoke`), `serve` (the HTTP API; no
 //! migrations), `worker` (runs background jobs until Ctrl-C or SIGTERM), `job` (`list`, `show`,
 //! `retry` and `enqueue`; the command line is the only interface to jobs) and `new-app` (writes a new app crate that builds and passes its tests; needs no
-//! database, see `docs/guide/first-app.md`). Configuration comes from `FORGEBASE_DATABASE_URL`, and for `serve` from
-//! `FORGEBASE_LISTEN`, `FORGEBASE_ALLOWED_HOSTS`, `FORGEBASE_DEV_INSECURE_COOKIES` and
-//! `FORGEBASE_DESK_DIR`.
+//! database, see `docs/guide/first-app.md`). Configuration comes from `FORGEBASE_DATABASE_URL` (the database of the
+//! one implicit site `default`), and for `serve` from `FORGEBASE_LISTEN`, `FORGEBASE_ALLOWED_HOSTS`,
+//! `FORGEBASE_DEV_INSECURE_COOKIES` and `FORGEBASE_DESK_DIR`.
+//!
+//! # Sites
+//!
+//! Without a config file there is one site, `default`. With `--config forgebase.toml` (or
+//! `FORGEBASE_CONFIG`) there are the sites listed in it, **one database each** (ADR 0014): a
+//! name, host names, and the name of the environment variable that holds the database URL.
+//! `--site NAME` picks the site of a database command (required with several sites, except for
+//! `serve`, which serves all of them and routes by `Host`). The public API of this crate is
+//! unchanged: sites are a matter of the command line and the config file.
 //!
 //! The binary is a trusted local tool: `doc` commands run as the **system context**
 //! (`Caller::System` in `forgebase-core`), so no permission rules apply to them, and

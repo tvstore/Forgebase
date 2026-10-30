@@ -130,9 +130,10 @@ M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29
 
 ## M7 Site management
 
-- **Scope:** site configuration file; the multi-site database decision (lean: database per site, see [architecture, section 9](architecture.md#9-multi-site-undecided)); per-site app install; backups. Capability 1.
-- **Exit criteria:** (to be set in the M7 plan) tests for site isolation.
-- **Non-goals:** runtime app install ([ADR 0006](../adr/0006-extension-model.md)).
+- **Status:** In progress. The owner approved the M7 plan on 2026-10-30 ("setuju semua, lanjutkan"); owner decisions M7-1 to M7-7 are Accepted, see [ADR 0014](../adr/0014-multi-site-database-per-site.md). Delivered as three PRs: **M7.1** (delivered by the pull request of branch `claude/m7-1-sites`) the config file and the site context everywhere (`--config`, `--site`, `Host` routing, per-site pools, the implicit `default` site, ADR 0014); **M7.2** (next) per-site app install, `site list`, `site create`, the worker and scheduler per site with each site's apps; **M7.3** (next) backup and restore, the operations guide and a CI example.
+- **Scope:** site configuration file; the multi-site database decision (Accepted: database per site, see [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014)); per-site app install; backups. Capability 1.
+- **Exit criteria:** tests for site isolation at every layer (M7.1: config validation, CLI, HTTP, `serve` end to end, worker); an operator can create, migrate, serve, back up and restore sites (M7.2 and M7.3).
+- **Non-goals:** runtime app install ([ADR 0006](../adr/0006-extension-model.md)); a shared multi-site worker; schema per site; TLS and custom domains; an "all sites" `migrate`.
 
 ## M8 Workflow and reports
 
