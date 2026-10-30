@@ -385,8 +385,7 @@ impl JobConnection {
     /// The client, to start the handler's transaction on.
     pub fn client(&mut self) -> &mut Client {
         // `object` is `Some` until `drop`.
-        let object = self.object.as_mut().expect("the connection is present");
-        &mut **object
+        self.object.as_mut().expect("the connection is present")
     }
 
     /// The transaction on this connection ended (committed or rolled back) normally: the

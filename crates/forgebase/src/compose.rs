@@ -20,6 +20,7 @@ use forgebase_db::{AppMigration, AppSpec, DbError, MigrateReport, Pool, SyncOpti
 use crate::app::{App, MigrationFile};
 use crate::doctypes::read_dir;
 use crate::error::bullets;
+use crate::worker::JobDef;
 
 /// The name of the app that the `--doctypes` directory forms.
 pub(crate) const LOCAL_APP: &str = "local";
@@ -69,6 +70,8 @@ impl std::error::Error for StartupError {}
 /// The apps of a binary, composed: one registry and what `migrate` needs.
 pub(crate) struct Composed {
     pub registry: Registry,
+    /// The jobs of all apps by full name (`<app>.<job>`); the registry has the names.
+    pub jobs: BTreeMap<String, JobDef>,
     /// The registered apps (not `local`) in app order.
     apps: Vec<AppInfo>,
 }
@@ -181,12 +184,15 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
         check_references(&registry, &defined_in, &reach, &local_reach, &mut errors);
         check_hooks(apps, &reach, &mut registry, &mut errors);
     }
+    // Jobs do not depend on the DocType files, so their problems are reported with the others.
+    let jobs = check_jobs(apps, &mut registry, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
     }
     Ok(Composed {
         registry,
+        jobs,
         apps: apps
             .iter()
             .map(|a| AppInfo {
@@ -416,6 +422,54 @@ fn check_hooks(
             }
         }
     }
+}
+
+/// Checks the job names and options and registers the valid jobs: the names in the registry,
+/// the handlers in the result, by full name.
+fn check_jobs(
+    apps: &[App],
+    registry: &mut Registry,
+    errors: &mut StartupError,
+) -> BTreeMap<String, JobDef> {
+    let mut jobs = BTreeMap::new();
+    for app in apps {
+        let mut seen = BTreeSet::new();
+        for (name, handler, options) in &app.jobs {
+            let app_name = &app.name;
+            if let Err(reason) = validate_doctype_name(name) {
+                errors
+                    .apps
+                    .push(format!("app `{app_name}`: job name {name:?} {reason}"));
+                continue;
+            }
+            if !seen.insert(name.as_str()) {
+                errors.apps.push(format!(
+                    "app `{app_name}`: job `{name}` is registered more than once"
+                ));
+                continue;
+            }
+            let problems = options.problems();
+            for problem in &problems {
+                errors
+                    .apps
+                    .push(format!("app `{app_name}`: job `{name}`: {problem}"));
+            }
+            let full = format!("{app_name}.{name}");
+            // The same full name from two apps with the same name is reported as a duplicate app.
+            if problems.is_empty() && !jobs.contains_key(&full) {
+                registry.add_job(&full);
+                jobs.insert(
+                    full.clone(),
+                    JobDef {
+                        name: full,
+                        handler: handler.clone(),
+                        options: options.clone(),
+                    },
+                );
+            }
+        }
+    }
+    jobs
 }
 
 #[cfg(test)]

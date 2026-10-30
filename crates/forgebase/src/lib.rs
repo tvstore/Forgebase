@@ -72,10 +72,14 @@ mod args;
 mod builder;
 mod compose;
 mod doctypes;
+mod documents;
 mod error;
+mod job_cmd;
+mod jobs;
 mod new_app;
 mod report;
 mod run;
+mod worker;
 
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -83,11 +87,17 @@ pub mod testing;
 pub use app::{App, DocTypeFile, MigrationFile};
 pub use builder::Forgebase;
 pub use compose::StartupError;
+pub use documents::{Documents, FilterOp, ListQuery, StoredDocument};
+pub use jobs::{JobContext, JobError, JobFuture, JobHandler, JobOptions};
 
 // What a hook needs to read and change a document. These are the types of `forgebase-core`.
-pub use forgebase_core::document::{Document, Row};
-pub use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError, Operation};
+pub use forgebase_core::document::{Changes, DocStatus, Document, Row};
+pub use forgebase_core::hooks::{
+    DocTypeHooks, EnqueuedJob, EnqueuedJobs, HookContext, HookError, Operation,
+};
 pub use forgebase_core::value::Value;
 // The payloads of `Value`, re-exported so an app uses the same versions.
 pub use rust_decimal::Decimal;
 pub use time::{Date, OffsetDateTime};
+// The payload of a job. Re-exported so an app and the framework use the same version.
+pub use serde_json;

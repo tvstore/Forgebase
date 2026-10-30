@@ -437,6 +437,8 @@ pub async fn update(
     Ok(stored)
 }
 
+// One more argument than clippy likes: the job collector of the outbox, passed to every `*_in`.
+#[allow(clippy::too_many_arguments)]
 async fn update_in(
     client: &impl GenericClient,
     registry: &Registry,

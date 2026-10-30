@@ -8,7 +8,8 @@
 //! tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 //! ```
 //!
-//! What it gives: [`TestDb`], a throwaway PostgreSQL database that can run `migrate` for a
+//! What it gives: [`run_jobs`] runs the background jobs that are due, with the worker's own code.
+//! [`TestDb`], a throwaway PostgreSQL database that can run `migrate` for a
 //! [`Forgebase`] and hands out an [`HttpClient`] that talks to the HTTP API in process (no
 //! socket), and [`assert_doctypes_listed`], a guard for the embedded DocType list.
 //!
@@ -49,6 +50,7 @@ use crate::app::App;
 use crate::builder::Forgebase;
 use crate::compose::{StartupError, compose};
 use crate::doctypes::toml_files;
+use crate::worker::{Outcome, Stop, Worker, WorkerConfig};
 
 /// JSON, for request bodies and replies: `serde_json`, re-exported so that the version matches.
 pub use serde_json::{self, Value as Json, json};
@@ -132,7 +134,7 @@ pub struct Migrated {
 /// A database created for one test, and dropped by [`TestDb::cleanup`] or when it is dropped
 /// (also when the test panics).
 pub struct TestDb {
-    pool: Pool,
+    pub(crate) pool: Pool,
     admin_url: String,
     name: String,
     url: String,
@@ -291,6 +293,75 @@ impl TestDb {
         self.pool.close();
         drop_database(&self.admin_url, &self.name).await;
     }
+}
+
+/// What [`run_jobs`] did. Only read it: the type is `#[non_exhaustive]`, so a field can be added
+/// later without breaking tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct JobRun {
+    done: usize,
+    retried: usize,
+    dead: usize,
+}
+
+impl JobRun {
+    /// Jobs that ended `done`.
+    pub fn done(&self) -> usize {
+        self.done
+    }
+
+    /// Attempts that failed and were queued again (after a delay; see [`run_jobs`]).
+    pub fn retried(&self) -> usize {
+        self.retried
+    }
+
+    /// Jobs that ended `dead`.
+    pub fn dead(&self) -> usize {
+        self.dead
+    }
+}
+
+/// The most jobs [`run_jobs`] runs: more means a job keeps enqueueing work for itself.
+const RUN_JOBS_LIMIT: usize = 10_000;
+
+/// Runs every job of `forgebase` that is due, one at a time, until none is due, with the same
+/// code the worker uses (claim, handler in one transaction with the completion, retry or
+/// dead). Jobs that hooks and other jobs enqueue while it runs are run too.
+///
+/// A job that fails and is retried is queued again **after its backoff** (30 seconds by
+/// default), so it is not run again by this call: `retried()` counts it, and the test can check
+/// the row, or make it due with SQL (`UPDATE fb_job SET run_at = now()`) and call `run_jobs`
+/// again. Jobs of names the binary does not know are left alone.
+///
+/// # Panics
+///
+/// When the apps do not fit together, on a database error, and after 10 000 jobs (a job that
+/// enqueues itself without end).
+pub async fn run_jobs(forgebase: &Forgebase, db: &TestDb) -> JobRun {
+    let composed = compose(&forgebase.apps, None)
+        .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
+    let worker = Worker::new(
+        db.pool.clone(),
+        composed.registry,
+        composed.jobs,
+        WorkerConfig::default(),
+    );
+    let stop = Stop::never();
+    let mut run = JobRun::default();
+    for _ in 0..RUN_JOBS_LIMIT {
+        match worker.run_one("test", &stop).await {
+            Ok(Some(Outcome::Done)) => run.done += 1,
+            Ok(Some(Outcome::Retried)) => run.retried += 1,
+            Ok(Some(Outcome::Dead)) => run.dead += 1,
+            Ok(Some(_)) => {}
+            Ok(None) => return run,
+            Err(error) => panic!("run_jobs: {error}"),
+        }
+    }
+    panic!(
+        "run_jobs stopped after {RUN_JOBS_LIMIT} jobs: a job probably enqueues itself again and again"
+    );
 }
 
 async fn drop_database(admin_url: &str, name: &str) {
