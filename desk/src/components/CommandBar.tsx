@@ -3,12 +3,15 @@ import { useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { findCommands, flatten, moveActive } from '../command';
 import { SearchIcon } from '../icons';
 import { getRecent, subscribeRecent } from '../recent';
+import type { ReportMeta } from '../reports';
 import { navigate } from '../router';
 import type { DocTypeSummary } from '../types';
 import { Modal } from './Dialog';
 
 interface Props {
   doctypes: DocTypeSummary[];
+  /** The reports the user may run ("Run <report>"). */
+  reports: ReportMeta[];
   /** Closes the bar (Escape, a click outside, or after a result was chosen). */
   onClose: () => void;
 }
@@ -17,9 +20,9 @@ interface Props {
  * The command bar: a modal with a text input and a list of results (the ARIA combobox and
  * listbox pattern). The input keeps the focus; ArrowUp and ArrowDown move the active option
  * (`aria-activedescendant`), Enter opens it, Escape closes the bar and gives the focus back to
- * where it was. Navigation only: it opens a list, a new document or a recent document.
+ * where it was. Navigation only: it opens a list, a new document, a recent document or a report.
  */
-export function CommandBar({ doctypes, onClose }: Props) {
+export function CommandBar({ doctypes, reports, onClose }: Props) {
   const [input, setInput] = useState('');
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -27,7 +30,7 @@ export function CommandBar({ doctypes, onClose }: Props) {
   const listId = `${baseId}-list`;
   // Follows the list: a form that finishes loading just after the bar opened is listed too.
   const recent = useSyncExternalStore(subscribeRecent, getRecent);
-  const groups = useMemo(() => findCommands(input, doctypes, recent), [input, doctypes, recent]);
+  const groups = useMemo(() => findCommands(input, doctypes, recent, reports), [input, doctypes, recent, reports]);
   const commands = useMemo(() => flatten(groups), [groups]);
   const optionId = (index: number) => `${baseId}-option-${index}`;
   const current = commands[active];

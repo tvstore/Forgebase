@@ -294,7 +294,9 @@ jobs:
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
-      - run: cargo build --locked -p forgebase
+      # The example `e2e_app` is the stock command plus one app with a query report (M8.4): a report
+      # can only come from an app compiled into the binary.
+      - run: cargo build --locked -p forgebase --example e2e_app
       - name: Check the Node version
         run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
       # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.
@@ -314,7 +316,7 @@ jobs:
           FORGEBASE_DESK_DIR=desk/dist \
           FORGEBASE_DEV_INSECURE_COOKIES=1 \
           FORGEBASE_ALLOWED_HOSTS=localhost,127.0.0.1 \
-          target/debug/forgebase serve --doctypes target/e2e/doctypes > server.log 2>&1 &
+          target/debug/examples/e2e_app serve --doctypes target/e2e/doctypes > server.log 2>&1 &
           for _ in $(seq 1 30); do
             if curl -fsS -o /dev/null http://127.0.0.1:8000/desk/; then exit 0; fi
             sleep 1

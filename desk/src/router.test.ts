@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formHref, listHref, newHref, parseHash } from './router';
+import { formHref, listHref, newHref, parseHash, reportHref } from './router';
 
 describe('parseHash', () => {
   it('parses the home and login routes', () => {
@@ -40,6 +40,17 @@ describe('parseHash', () => {
     expect(parseHash(formHref('note', 'a/b'))).toEqual({ name: 'form', doctype: 'note', docName: 'a/b' });
   });
 
+  it('parses a report with its parameters', () => {
+    const route = parseHash('#/report/sales.by_customer?from=2026-10-01&customer=A%20B');
+    expect(route.name).toBe('report');
+    if (route.name !== 'report') return;
+    expect(route.report).toBe('sales.by_customer');
+    expect(route.params.get('from')).toBe('2026-10-01');
+    expect(route.params.get('customer')).toBe('A B');
+    const bare = parseHash('#/report/sales.by_customer');
+    expect(bare.name === 'report' && [...bare.params]).toEqual([]);
+  });
+
   it('gives notfound for anything else', () => {
     for (const hash of [
       '#/nothing',
@@ -53,6 +64,10 @@ describe('parseHash', () => {
       '#/login/x',
       '#/list/%E0%A4%A',
       '#/form/a/%',
+      '#/report',
+      '#/report/',
+      '#/report/a.b/c',
+      '#/report/%E0%A4%A',
     ]) {
       expect(parseHash(hash), hash).toEqual({ name: 'notfound' });
     }
@@ -69,5 +84,12 @@ describe('hrefs', () => {
     const route = parseHash(listHref('a b', new URLSearchParams({ filters: '[{"field":"x"}]' })));
     if (route.name !== 'list') throw new Error('not a list');
     expect(route.params.get('filters')).toBe('[{"field":"x"}]');
+  });
+
+  it('builds a report address that round-trips', () => {
+    expect(reportHref('sales.by_customer')).toBe('#/report/sales.by_customer');
+    expect(reportHref('sales.x', new URLSearchParams())).toBe('#/report/sales.x');
+    const route = parseHash(reportHref('sales.x', new URLSearchParams({ q: 'a&b=c' })));
+    expect(route.name === 'report' && route.params.get('q')).toBe('a&b=c');
   });
 });

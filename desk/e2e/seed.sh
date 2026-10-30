@@ -8,9 +8,11 @@
 # It writes the DocTypes the test serves to $E2E_DIR/doctypes (default target/e2e): the DocTypes of
 # the example app examples/sales plus a role "Sales Clerk" that may read, write and create sales
 # orders but not submit them (no example role is like that). That e2e-only role is why the test
-# uses the stock binary with --doctypes, and not the binary of the sales app (whose DocTypes are
-# embedded and cannot take the extra role). The sales app's hooks do not run in this
-# test: `amount` and `total` (read_only, computed by those hooks) stay empty here. It then migrates, and creates:
+# uses --doctypes, and not the binary of the sales app (whose DocTypes are embedded and cannot take
+# the extra role). The binary is the example `e2e_app` of the forgebase crate (the stock command plus
+# one app that defines the query report "Sales by customer", M8.4: a report can only come from an app
+# compiled into the binary; build it with `cargo build -p forgebase --example e2e_app`). The sales
+# app's hooks do not run in this test: `amount` and `total` (read_only, computed by those hooks) stay empty here. It then migrates, and creates:
 #   - e2e_manager, role "Sales Manager": every right on sales orders (and customers);
 #   - e2e_clerk, role "Sales Clerk": no submit, cancel, amend or delete right;
 #   - e2e_admin, role "Administrator": the only user who may share a saved view (M8.3);
@@ -20,11 +22,11 @@
 #     Submit: Draft -> Pending Approval (Sales Clerk or Sales Manager), Pending Approval -> Approved (Sales Manager,
 #     submits), Pending Approval -> Draft "Reject" (Sales Manager), Approved -> Cancelled (Sales Manager, cancels).
 # Passwords come from E2E_PASSWORD (default below): a throw-away password of a throw-away database.
-# Start the server with:  forgebase serve --doctypes "$E2E_DIR/doctypes"
+# Start the server with:  target/debug/examples/e2e_app serve --doctypes "$E2E_DIR/doctypes"
 set -euo pipefail
 
 : "${FORGEBASE_DATABASE_URL:?set FORGEBASE_DATABASE_URL to an empty scratch database}"
-BIN="${FORGEBASE_BIN:-target/debug/forgebase}"
+BIN="${FORGEBASE_BIN:-target/debug/examples/e2e_app}"
 E2E_DIR="${E2E_DIR:-target/e2e}"
 PASSWORD="${E2E_PASSWORD:-e2e-test-password}"
 DOCTYPES="$E2E_DIR/doctypes"

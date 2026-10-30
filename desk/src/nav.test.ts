@@ -64,6 +64,18 @@ describe('breadcrumbs', () => {
     expect(breadcrumbs(parseHash('#/new/thing'), list).map((c) => c.label)).toEqual([OTHER_APP, 'Thing', 'New']);
   });
 
+  it('is Reports / the report for a report, with its name until the reports are known', () => {
+    const reports = [{ name: 'sales.by_customer', label: 'Sales by customer' }];
+    expect(breadcrumbs(parseHash('#/report/sales.by_customer?from=2026-10-01'), list, reports)).toEqual([
+      { label: 'Reports', href: '#/' },
+      { label: 'Sales by customer' },
+    ]);
+    expect(breadcrumbs(parseHash('#/report/sales.by_customer'), list)).toEqual([
+      { label: 'Reports', href: '#/' },
+      { label: 'sales.by_customer' },
+    ]);
+  });
+
   it('shows the DocType name before the DocTypes are known, and nothing on other pages', () => {
     expect(breadcrumbs(parseHash('#/list/sales_order'), [])).toEqual([{ label: 'sales_order' }]);
     expect(breadcrumbs(parseHash('#/'), list)).toEqual([]);

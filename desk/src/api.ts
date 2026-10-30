@@ -7,6 +7,7 @@
 import { isAddressable } from './access';
 import { parseLinkTitles } from './linkTitles';
 import type { LinkTitles } from './linkTitles';
+import type { ReportMeta, ReportResult } from './reports';
 import type { SummaryResult } from './summary';
 import type { DocTypeMeta, DocTypeSummary, DocumentRow, SessionInfo } from './types';
 import type { SavedView, ViewDefinition } from './views';
@@ -361,4 +362,27 @@ export function getSummary(doctype: string, params: SummaryParams): Promise<Summ
   if (params.aggregates) query.set('aggregates', params.aggregates);
   if (params.filters) query.set('filters', params.filters);
   return request<SummaryResult>('GET', `/api/v1/summary/${encodeURIComponent(doctype)}?${query.toString()}`);
+}
+
+/** The query reports the user may run (M8.4), by label. The SQL is never in the answer. */
+export function listReports(): Promise<ReportMeta[]> {
+  return request<ReportMeta[]>('GET', '/api/v1/report');
+}
+
+/**
+ * Runs a report with `params` (every parameter, an empty one as `null`) and asks for the titles of
+ * its Link columns. A POST, so it carries the CSRF token like every changing request, although it
+ * changes nothing: the server runs it read-only.
+ */
+export async function runReport(name: string, params: Record<string, unknown>): Promise<ReportResult> {
+  const answer = await request<{
+    data?: { columns?: ReportResult['columns']; rows?: unknown[][]; truncated?: boolean };
+    link_titles?: unknown;
+  }>('POST', `/api/v1/report/${encodeURIComponent(name)}?link_titles=1`, { body: { params }, envelope: true });
+  return {
+    columns: answer?.data?.columns ?? [],
+    rows: answer?.data?.rows ?? [],
+    truncated: answer?.data?.truncated === true,
+    titles: parseLinkTitles(answer?.link_titles),
+  };
 }

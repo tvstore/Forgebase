@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { ApiError, getMeta, getSession, logout, setUnauthenticatedHandler } from './api';
+import { ApiError, getMeta, getSession, listReports, logout, setUnauthenticatedHandler } from './api';
 import { Layout } from './components/Layout';
 import { Logo } from './components/Logo';
 import { ToastProvider } from './components/Toast';
@@ -8,13 +8,18 @@ import { Form } from './pages/Form';
 import { Home } from './pages/Home';
 import { List } from './pages/List';
 import { Login } from './pages/Login';
+import { Report } from './pages/Report';
 import { clearRecent } from './recent';
 import { homeHref, loginHref, navigate, parseHash, useHash } from './router';
 import type { Route } from './router';
+import type { ReportMeta } from './reports';
 import type { DocTypeSummary, SessionInfo } from './types';
 
 /** The DocTypes the user can read (sidebar and home page), loaded once after login. */
 export type DocTypes = { status: 'loading' } | { status: 'ready'; list: DocTypeSummary[] } | { status: 'error'; message: string };
+
+/** The query reports the user may run (sidebar, command bar and the report page), loaded once after login. */
+export type Reports = { status: 'loading' } | { status: 'ready'; list: ReportMeta[] } | { status: 'error'; message: string };
 
 type Auth =
   | { status: 'loading' }
@@ -84,6 +89,26 @@ export function App() {
     };
   }, [loggedIn]);
 
+  const [reports, setReports] = useState<Reports>({ status: 'loading' });
+  useEffect(() => {
+    if (!loggedIn) return;
+    let cancelled = false;
+    listReports().then(
+      (list) => {
+        if (!cancelled) setReports({ status: 'ready', list });
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setReports({ status: 'error', message: e instanceof ApiError ? e.message : 'Cannot reach the server.' });
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+      setReports({ status: 'loading' });
+    };
+  }, [loggedIn]);
+
   const onLoggedIn = (session: SessionInfo) => {
     setAuth({ status: 'in', username: session.username, roles: session.roles });
     navigate(homeHref());
@@ -125,9 +150,16 @@ export function App() {
           username={auth.username}
           route={route}
           doctypes={doctypes.status === 'ready' ? doctypes.list : []}
+          reports={reports.status === 'ready' ? reports.list : []}
           onLogout={onLogout}
         >
-          <Page route={route} username={auth.username} isAdmin={auth.roles.includes('Administrator')} doctypes={doctypes} />
+          <Page
+            route={route}
+            username={auth.username}
+            isAdmin={auth.roles.includes('Administrator')}
+            doctypes={doctypes}
+            reports={reports}
+          />
         </Layout>
       )}
     </ToastProvider>
@@ -139,11 +171,13 @@ function Page({
   username,
   isAdmin,
   doctypes,
+  reports,
 }: {
   route: Route;
   username: string;
   isAdmin: boolean;
   doctypes: DocTypes;
+  reports: Reports;
 }) {
   switch (route.name) {
     case 'list':
@@ -159,6 +193,8 @@ function Page({
           username={username}
         />
       );
+    case 'report':
+      return <Report key={route.report} name={route.report} params={route.params} reports={reports} />;
     case 'login': // being redirected to the home page
     case 'home':
       return <Home doctypes={doctypes} />;

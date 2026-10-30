@@ -12,7 +12,9 @@
 // on the e2e-only DocType `purchase_request` (seed.sh): a clerk sends a request for approval, a
 // manager approves it; the state badge, the actions, the confirmation, the history and the state
 // filter. Sales orders keep their plain Submit. M8.3 adds the saved views (private, shared by an
-// Administrator, updated, deleted, a stale one), the Columns menu and the group-by summary panel.
+// Administrator, updated, deleted, a stale one), the Columns menu and the group-by summary panel. M8.4 adds a
+// query report (the app `e2e` of the example binary e2e_app, seed.sh): a manager opens it from the sidebar,
+// runs it, sorts the result and reloads; a clerk does not see the Reports section.
 
 import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
@@ -872,11 +874,21 @@ test('the Summary panel counts by status, follows the filters and a click on a g
   await expectNoHorizontalScroll(page, 'the list after a group was chosen');
 });
 
-/** What a keyboard user sees on the focused element: an outline of at least 2 px, or a box shadow. */
+/**
+ * What a keyboard user sees on the focused element: an outline of at least 2 px in a visible colour
+ * (not transparent, alpha of at least 0.5, and not white unless the control is on the navy top bar:
+ * a white ring on a white page is no indicator), or a box shadow.
+ */
 async function focusIndicator(target: Locator): Promise<{ outline: boolean; shadow: boolean; text: string }> {
   return target.evaluate((el) => {
     const style = getComputedStyle(el);
-    const outline = style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) >= 2 && style.outlineColor !== 'rgba(0, 0, 0, 0)';
+    // `rgb(r, g, b)` or `rgba(r, g, b, a)` (also `rgb(r g b / a)`): getComputedStyle gives one of these.
+    const parts = (style.outlineColor.match(/[\d.]+/g) ?? []).map(Number);
+    const [r = 0, g = 0, b = 0, a = 1] = parts;
+    const white = r >= 250 && g >= 250 && b >= 250;
+    const onNavy = el.closest('.topbar') !== null;
+    const visible = a >= 0.5 && (!white || onNavy);
+    const outline = style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) >= 2 && visible;
     return { outline, shadow: style.boxShadow !== 'none', text: el.tagName + (el.getAttribute('aria-label') ?? el.textContent ?? '').slice(0, 30) };
   });
 }
@@ -946,4 +958,135 @@ test('keyboard focus is visible on the controls of a form, the list toolbar and 
   await expect
     .poll(async () => bar.locator('.command-input').evaluate((el) => getComputedStyle(el).boxShadow !== 'none'))
     .toBe(true);
+});
+
+// ---- M8.4: query reports ------------------------------------------------------------------
+
+/** The text of the cells of one column of the result table, in order (the first column is 0). */
+async function resultColumn(page: Page, index: number): Promise<string[]> {
+  return page.locator('.report-table tbody tr').evaluateAll((rows, i) => rows.map((r) => r.children[i]?.textContent ?? ''), index);
+}
+
+/** A parameter's control by its label; a required one is labelled "From *" (the star is decoration). */
+const paramControl = (page: Page, label: string) => page.getByLabel(new RegExp(`^${label}( \\*)?$`));
+
+test('a manager runs a report, sorts it and reloads; a clerk is not offered Reports (M8.4)', async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // Data for a date range of its own (a year no other test uses, new at every run): two orders of
+  // Ada Lovelace (the seeded customer) and one each of two new customers. Created through the API
+  // with a session of its own, so that the desk's CSRF token is not rotated.
+  const api = await request.post('/api/v1/login', { data: { username: 'e2e_manager', password: PASSWORD } });
+  expect(api.ok()).toBe(true);
+  const csrf = ((await api.json()) as { data: { csrf_token: string } }).data.csrf_token;
+  const post = async (path: string, data: unknown) =>
+    request.post(`/api/v1${path}`, { data, headers: { 'X-Forgebase-CSRF': csrf } });
+  for (const [email, full_name] of [
+    ['report-alpha@example.com', 'Report Alpha'],
+    ['report-beta@example.com', 'Report Beta'],
+  ]) {
+    await post('/resource/customer', { email, full_name }); // a second run: already there
+  }
+  const year = 2100 + (Date.now() % 7000);
+  const day = `${year}-03-05`;
+  for (const [customer, rows] of [
+    [CUSTOMER, [['Widget', 2, '9.50']]],
+    [CUSTOMER, [['Gadget', 1, '100.00']]],
+    ['report-alpha@example.com', [['Cable', 4, '10.00']]],
+    ['report-beta@example.com', [['Server', 10, '125.00']]],
+  ] as const) {
+    const created = await post('/resource/sales_order', {
+      customer,
+      order_date: day,
+      items: rows.map(([description, qty, rate]) => ({ description, qty, rate })),
+    });
+    expect(created.status(), 'the order is created').toBe(201);
+  }
+
+  await login(page, 'e2e_manager');
+  const sidebar = page.getByRole('navigation', { name: 'Document types' });
+  await expect(sidebar.getByRole('heading', { name: 'Reports' })).toBeVisible();
+  await sidebar.getByRole('link', { name: 'Sales by customer' }).click();
+  await expect(page.getByRole('heading', { name: 'Sales by customer', level: 1 })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link', { name: 'Reports' })).toBeVisible();
+  await expect(sidebar.getByRole('link', { name: 'Sales by customer' })).toHaveAttribute('aria-current', 'page');
+
+  // Nothing runs by itself on a bare address.
+  await expect(page.getByText('Set the parameters, then run the report.')).toBeVisible();
+  await expect(page.locator('.report-table')).toHaveCount(0);
+
+  // The required dates are asked for on the fields, and the focus goes to the first.
+  await page.getByRole('button', { name: 'Run report' }).click();
+  await expect(paramControl(page, 'From')).toBeFocused();
+  await expect(page.getByText('This field is required.')).toHaveCount(2);
+
+  await paramControl(page, 'From').fill(`${year}-03-01`);
+  await paramControl(page, 'To').fill(`${year}-03-31`);
+  await page.getByRole('button', { name: 'Run report' }).click();
+  await expect(page.locator('.report-table tbody tr')).toHaveCount(3);
+  await expect(page).toHaveURL(new RegExp(`from=${year}-03-01.*to=${year}-03-31`));
+  await expect(page.locator('.report-count')).toHaveText('3 rows');
+  // The order of the SQL: by customer. Numbers are formatted and on the right; dates are formatted.
+  expect(await resultColumn(page, 0)).toEqual(['Ada Lovelace', 'Report Alpha', 'Report Beta']);
+  expect(await resultColumn(page, 1)).toEqual(['2', '1', '1']);
+  expect(await resultColumn(page, 2)).toEqual(['119.00', '40.00', '1,250.00']);
+  expect(await resultColumn(page, 3)).toEqual([`5 Mar ${year}`, `5 Mar ${year}`, `5 Mar ${year}`]);
+  await expect(page.locator('.report-table tbody tr').first().locator('td').nth(2)).toHaveClass(/num/);
+  await expectLoaded(page);
+  await expectNoHorizontalScroll(page, 'a report result');
+
+  // Sorting by Total (numbers, not text): ascending, descending, and back to the order of the SQL.
+  const total = page.getByRole('columnheader', { name: /Total/ });
+  await total.getByRole('button').click();
+  await expect(total).toHaveAttribute('aria-sort', 'ascending');
+  expect(await resultColumn(page, 0)).toEqual(['Report Alpha', 'Ada Lovelace', 'Report Beta']);
+  await total.getByRole('button').click();
+  await expect(total).toHaveAttribute('aria-sort', 'descending');
+  expect(await resultColumn(page, 0)).toEqual(['Report Beta', 'Ada Lovelace', 'Report Alpha']);
+  await total.getByRole('button').click();
+  await expect(total).not.toHaveAttribute('aria-sort', /.+/);
+  expect(await resultColumn(page, 0)).toEqual(['Ada Lovelace', 'Report Alpha', 'Report Beta']);
+
+  // A reload with the parameters in the address shows them in the form and runs the report again.
+  await page.reload();
+  await expect(paramControl(page, 'From')).toHaveValue(`${year}-03-01`);
+  await expect(page.locator('.report-table tbody tr')).toHaveCount(3);
+
+  // A Select narrows the result; nothing matching is the empty state.
+  await paramControl(page, 'Status').selectOption('Submitted');
+  await page.getByRole('button', { name: 'Run report' }).click();
+  await expect(page.getByRole('heading', { name: 'No rows' })).toBeVisible();
+  await expect(page.locator('.report-table')).toHaveCount(0);
+  await expectNoSecretsInStorage(page);
+
+  // The command bar offers it.
+  await page.keyboard.press('Control+k');
+  await page.getByRole('combobox', { name: 'Search or jump to' }).fill('sales by');
+  await expect(page.getByRole('option', { name: 'Run Sales by customer', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  // A clerk has no role of the report: no section, no command, and the address is "not found".
+  await logout(page);
+  await login(page, 'e2e_clerk');
+  await expect(sidebar.getByRole('heading', { name: 'Reports' })).toHaveCount(0);
+  await page.keyboard.press('Control+k');
+  await page.getByRole('combobox', { name: 'Search or jump to' }).fill('sales by');
+  await expect(page.getByRole('option', { name: /^Run /i })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.goto('/desk/#/report/e2e.sales_by_customer');
+  await expect(page.getByRole('heading', { name: 'Report not found' })).toBeVisible();
+  // The API says the same: 404 for the clerk, and the list is empty.
+  const refusal = await page.evaluate(async () => {
+    const session = (await (await fetch('/api/v1/session', { headers: { 'X-Forgebase-CSRF': 'refresh' } })).json()) as {
+      data: { csrf_token: string };
+    };
+    const run = await fetch('/api/v1/report/e2e.sales_by_customer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forgebase-CSRF': session.data.csrf_token },
+      body: JSON.stringify({ params: {} }),
+    });
+    const list = (await (await fetch('/api/v1/report')).json()) as { data: unknown[] };
+    return { status: run.status, listed: list.data.length };
+  });
+  expect(refusal).toEqual({ status: 404, listed: 0 });
 });

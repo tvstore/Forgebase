@@ -292,6 +292,13 @@
     @apply inline-flex min-h-8 items-center justify-center gap-1.5 rounded-control border border-line-strong bg-surface px-3.5 py-1 text-ui leading-tight font-medium whitespace-nowrap text-ink-soft no-underline transition-colors duration-150 hover:bg-page hover:no-underline;
   }
 
+  /* The hover of a plain button is the page grey, which is the background of the filter and
+     summary panels: there it must be the (darker) fill, or the hover is invisible. */
+  .filters .btn:hover:not(.btn-primary, .btn-danger),
+  .summary .btn:hover:not(.btn-primary, .btn-danger) {
+    @apply bg-fill;
+  }
+
   .btn-primary {
     @apply border-primary bg-primary text-white hover:bg-primary-hover;
   }
@@ -1065,6 +1072,76 @@
     @apply rounded-none border-0;
   }
 
+  /* ---------- Reports (M8.4) ---------- */
+
+  .report-form > * + * {
+    @apply mt-4;
+  }
+
+  .report-actions {
+    @apply mt-5 flex flex-wrap items-center gap-3;
+  }
+
+  /* The result is one card with no padding: the head, the table and the note are its bars. */
+  .report-result {
+    @apply overflow-hidden p-0;
+  }
+
+  .report-head {
+    @apply flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-5 pt-4 pb-3;
+  }
+
+  .report-head h2 {
+    @apply m-0;
+  }
+
+  .report-count {
+    @apply m-0 text-small text-muted;
+  }
+
+  .report-idle,
+  .report-loading {
+    @apply m-0 px-5 pb-5;
+  }
+
+  /* The table scrolls inside the card (both ways), under a header that stays: the page itself
+     never scrolls sideways. */
+  .report-wrap {
+    @apply max-h-[min(70vh,40rem)] overflow-auto border-t border-divider;
+  }
+
+  /* A collapsed border does not stay under a sticky header: the line is a shadow instead. */
+  .report-table thead th {
+    @apply sticky top-0 z-1 border-b-0 bg-surface shadow-[inset_0_-1px_0_var(--color-divider)];
+  }
+
+  /* The first and last cells line up with the card's own padding (the head and the note). */
+  .report-table th:first-child,
+  .report-table td:first-child {
+    @apply pl-5;
+  }
+
+  .report-table th:last-child,
+  .report-table td:last-child {
+    @apply pr-5;
+  }
+
+  .report-table tbody tr:hover > * {
+    @apply bg-row;
+  }
+
+  .report-table td a {
+    @apply font-medium;
+  }
+
+  .report-note {
+    @apply m-0 border-t border-divider px-5 py-3 text-small text-muted;
+  }
+
+  .report-result .empty {
+    @apply rounded-none border-0 border-t border-solid border-divider;
+  }
+
   /* ---------- Form ---------- */
 
   .doc-form > * + * {
@@ -1174,24 +1251,24 @@
     @apply w-[1%] min-w-0 px-2 pt-[0.4375rem] whitespace-nowrap;
   }
 
-  .grid-table input,
+  .grid-table input:not([type='checkbox']),
   .grid-table select {
     @apply min-h-[2.375rem] rounded-md border-transparent bg-transparent px-2.5 shadow-none hover:border-transparent hover:bg-page;
   }
 
   /* The active cell: white, a 1.5 px grey outline inside the cell. The keyboard gets the navy ring
      (a 2 px outline, as the other fields): the grey alone is not 3:1. */
-  .grid-table input:focus,
+  .grid-table input:not([type='checkbox']):focus,
   .grid-table select:focus {
     @apply border-transparent bg-surface shadow-none outline-[1.5px] -outline-offset-[1.5px] outline-edge;
   }
 
-  .grid-table input:focus-visible,
+  .grid-table input:not([type='checkbox']):focus-visible,
   .grid-table select:focus-visible {
     @apply outline-2 -outline-offset-2 outline-primary/60;
   }
 
-  .grid-table input[aria-invalid='true']:not(:disabled),
+  .grid-table input:not([type='checkbox'])[aria-invalid='true']:not(:disabled),
   .grid-table select[aria-invalid='true']:not(:disabled) {
     @apply border-danger-edge bg-danger-bg;
   }

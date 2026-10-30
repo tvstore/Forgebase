@@ -4,6 +4,9 @@ import type { Route } from './router';
 import { homeHref, listHref } from './router';
 import type { DocTypeSummary } from './types';
 
+/** The sidebar section and the first crumb of a report. */
+export const REPORTS_LABEL = 'Reports';
+
 /** The group of a DocType whose app is not recorded. */
 export const OTHER_APP = 'Other';
 
@@ -45,8 +48,16 @@ export interface Crumb {
   href?: string;
 }
 
-/** App / DocType / Document for a list, new or form route; nothing for the other routes. */
-export function breadcrumbs(route: Route, doctypes: DocTypeSummary[]): Crumb[] {
+/** App / DocType / Document for a list, new or form route; Reports / report for a report; nothing for the other routes. */
+export function breadcrumbs(
+  route: Route,
+  doctypes: DocTypeSummary[],
+  reports: readonly { name: string; label: string }[] = [],
+): Crumb[] {
+  if (route.name === 'report') {
+    const label = reports.find((r) => r.name === route.report)?.label ?? route.report;
+    return [{ label: REPORTS_LABEL, href: homeHref() }, { label }];
+  }
   if (route.name !== 'list' && route.name !== 'new' && route.name !== 'form') return [];
   const known = doctypes.find((d) => d.name === route.doctype);
   const crumbs: Crumb[] = [];

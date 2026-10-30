@@ -1,5 +1,5 @@
-// A tiny hash router: `#/login`, `#/`, `#/list/<doctype>?...`, `#/new/<doctype>` and
-// `#/form/<doctype>/<name>`. State that belongs in the address (paging, sort, filters) is in the
+// A tiny hash router: `#/login`, `#/`, `#/list/<doctype>?...`, `#/new/<doctype>`,
+// `#/form/<doctype>/<name>` and `#/report/<app>.<name>?...`. State that belongs in the address (paging, sort, filters) is in the
 // query part, so the back button and copied links work.
 
 import { useSyncExternalStore } from 'react';
@@ -10,6 +10,8 @@ export type Route =
   | { name: 'list'; doctype: string; params: URLSearchParams }
   | { name: 'new'; doctype: string }
   | { name: 'form'; doctype: string; docName: string }
+  /** A query report (M8.4): `report` is `<app>.<name>`, the query holds the parameters. */
+  | { name: 'report'; report: string; params: URLSearchParams }
   | { name: 'notfound' };
 
 function decode(segment: string): string | null {
@@ -41,6 +43,12 @@ export function parseHash(hash: string): Route {
       ? { name: 'notfound' }
       : { name: 'list', doctype, params: new URLSearchParams(query) };
   }
+  if (kind === 'report' && first !== undefined && second === undefined) {
+    const report = decode(first);
+    return report === null
+      ? { name: 'notfound' }
+      : { name: 'report', report, params: new URLSearchParams(query) };
+  }
   if (kind === 'new' && first !== undefined && second === undefined) {
     const doctype = decode(first);
     return doctype === null ? { name: 'notfound' } : { name: 'new', doctype };
@@ -64,6 +72,11 @@ export const formHref = (doctype: string, name: string): string =>
 export function listHref(doctype: string, params?: URLSearchParams): string {
   const query = params?.toString() ?? '';
   return `#/list/${encodeURIComponent(doctype)}${query === '' ? '' : `?${query}`}`;
+}
+
+export function reportHref(report: string, params?: URLSearchParams): string {
+  const query = params?.toString() ?? '';
+  return `#/report/${encodeURIComponent(report)}${query === '' ? '' : `?${query}`}`;
 }
 
 /** Goes to `href` (a `#/...` address); `replace` does not add a history entry (redirects). */

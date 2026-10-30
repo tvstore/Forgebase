@@ -1,6 +1,7 @@
-import { DocTypeIcon, HouseIcon } from '../icons';
-import { groupByApp } from '../nav';
-import { homeHref, listHref } from '../router';
+import { ClipboardListIcon, DocTypeIcon, HouseIcon } from '../icons';
+import { REPORTS_LABEL, groupByApp } from '../nav';
+import type { ReportMeta } from '../reports';
+import { homeHref, listHref, reportHref } from '../router';
 import type { Route } from '../router';
 import type { DocTypeSummary } from '../types';
 
@@ -8,13 +9,18 @@ interface Props {
   id: string;
   open: boolean;
   doctypes: DocTypeSummary[];
+  /** The reports the user may run; the section is left out when there are none. */
+  reports: ReportMeta[];
   route: Route;
   /** A link was followed (the drawer closes, also when the address does not change). */
   onNavigate: () => void;
 }
 
-/** The DocTypes the user can read, grouped by app, each with its icon. The current one is marked. */
-export function Sidebar({ id, open, doctypes, route, onNavigate }: Props) {
+/**
+ * The DocTypes the user can read, grouped by app, each with its icon, and then the reports the
+ * user may run. The current one is marked.
+ */
+export function Sidebar({ id, open, doctypes, reports, route, onNavigate }: Props) {
   const current = route.name === 'list' || route.name === 'new' || route.name === 'form' ? route.doctype : null;
   return (
     <nav
@@ -52,6 +58,25 @@ export function Sidebar({ id, open, doctypes, route, onNavigate }: Props) {
           </ul>
         </section>
       ))}
+      {reports.length > 0 ? (
+        <section aria-label={REPORTS_LABEL}>
+          <h2 className="side-heading">{REPORTS_LABEL}</h2>
+          <ul className="side-list">
+            {reports.map((r) => (
+              <li key={r.name}>
+                <a
+                  className="side-link"
+                  href={reportHref(r.name)}
+                  aria-current={route.name === 'report' && route.report === r.name ? 'page' : undefined}
+                >
+                  <ClipboardListIcon className="icon" />
+                  <span>{r.label}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </nav>
   );
 }

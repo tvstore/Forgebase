@@ -102,6 +102,46 @@ describe('findCommands', () => {
   });
 });
 
+describe('findCommands with reports', () => {
+  const reports = [
+    { name: 'sales.by_customer', label: 'Sales by customer' },
+    { name: 'sales.aging', label: 'Receivables aging' },
+  ];
+  const run = (input: string, list = reports) =>
+    findCommands(input, doctypes, [], list).find((g) => g.title === 'Reports')?.commands.map((c) => c.label);
+
+  it('adds a Reports group with "Run <report>", last', () => {
+    const groups = findCommands('', doctypes, recent, reports);
+    expect(groups.map((g) => g.title)).toEqual(['Recent', 'DocTypes', 'Create', 'Reports']);
+    expect(run('')).toEqual(['Run Sales by customer', 'Run Receivables aging']);
+  });
+
+  it('matches the label and the name, ignoring case', () => {
+    expect(run('AGING')).toEqual(['Run Receivables aging']);
+    expect(run('sales.by')).toEqual(['Run Sales by customer']);
+    expect(run('customer')).toEqual(['Run Sales by customer']);
+    expect(run('zzz')).toBeUndefined();
+  });
+
+  it('gives the report address and a unique id', () => {
+    const command = findCommands('aging', doctypes, [], reports).flatMap((g) => g.commands)[0];
+    expect(command).toMatchObject({ kind: 'report', href: '#/report/sales.aging', id: 'report/sales.aging' });
+    const ids = flatten(findCommands('', doctypes, recent, reports)).map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('has no group when the user may run no report', () => {
+    expect(run('', [])).toBeUndefined();
+    expect(findCommands('', doctypes, recent).map((g) => g.title)).not.toContain('Reports');
+  });
+
+  it('is cut at the cap like the other groups', () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({ name: `a.r${i}`, label: `Report ${i}` }));
+    const groups = findCommands('report ', [], [], many);
+    expect(flatten(groups)).toHaveLength(MAX_RESULTS);
+  });
+});
+
 describe('moveActive', () => {
   it('moves down and up and wraps around', () => {
     expect(moveActive(0, 1, 3)).toBe(1);

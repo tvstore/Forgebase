@@ -56,6 +56,22 @@ export function mapDetail(detail: string, meta: DocTypeMeta): { key: string; mes
   return { key: errorKey(field.name, number, cell.name), message: clean(inner[2] ?? '') };
 }
 
+/**
+ * Splits the details of a `422` into messages for named fields (the parameters of a report: no
+ * rows, no Table fields) and the rest. The first message per field wins.
+ */
+export function mapNamedDetails(details: string[], names: ReadonlySet<string>): MappedErrors {
+  const errors: Errors = {};
+  const unmapped: string[] = [];
+  for (const detail of details) {
+    const match = FIELD.exec(detail);
+    const name = match?.[1];
+    if (match === null || name === undefined || !names.has(name)) unmapped.push(detail);
+    else if (!(errorKey(name) in errors)) errors[errorKey(name)] = clean(match[2] ?? '');
+  }
+  return { errors, unmapped };
+}
+
 /** Splits the details into messages for fields (first message per field wins) and the rest. */
 export function mapDetails(details: string[], meta: DocTypeMeta): MappedErrors {
   const errors: Errors = {};
