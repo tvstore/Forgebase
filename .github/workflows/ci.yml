@@ -47,6 +47,20 @@ jobs:
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
+      # The backup tests run the real pg_dump and pg_restore, which must be of version 16 or newer
+      # (the server's). The runner image normally has them; if it does not, install them from
+      # Ubuntu's own repository (noble ships PostgreSQL 16: no extra apt source). The step ends
+      # by printing the versions, so a missing tool fails here with a clear message.
+      - name: PostgreSQL client tools (version 16 or newer)
+        run: |
+          set -eu
+          if ! command -v pg_dump > /dev/null || ! command -v pg_restore > /dev/null \
+             || [ "$(pg_dump --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')" -lt 16 ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client-16
+          fi
+          pg_dump --version
+          pg_restore --version
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
@@ -54,6 +68,57 @@ jobs:
       - run: cargo doc --workspace --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Two sites on one server and a backup restored into a new database (M7.3, ADR 0014): the
+  # composed binary of examples/sales_extension with examples/sites/forgebase.toml. The script
+  # examples/sites/ci.sh does the work and can be run locally. It needs the client tools
+  # (pg_dump, pg_restore, version 16 or newer) like the `check` job. The URLs are built from the
+  # service container's throwaway credentials; the script never prints them. The databases are
+  # created by the script (`site create`).
+  sites:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forgebase
+          POSTGRES_PASSWORD: forgebase
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forgebase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SHOP_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/sites_shop
+      FIELD_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/sites_field
+      RESTORE_DATABASE_URL: postgres://forgebase:forgebase@localhost:5432/sites_restore
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      # Same step as in the `check` job (see the comment there).
+      - name: PostgreSQL client tools (version 16 or newer)
+        run: |
+          set -eu
+          if ! command -v pg_dump > /dev/null || ! command -v pg_restore > /dev/null \
+             || [ "$(pg_dump --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')" -lt 16 ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client-16
+          fi
+          pg_dump --version
+          pg_restore --version
+      - run: cargo build --locked -p sales_extension
+      - name: Two sites, a backup and a restore
+        run: examples/sites/ci.sh
 
   msrv:
     if: github.event_name != 'schedule'
