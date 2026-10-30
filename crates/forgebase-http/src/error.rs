@@ -21,6 +21,7 @@
 //! | `payload_too_large` | 413 | |
 //! | `unsupported_media_type` | 415 | the body is not `application/json` |
 //! | `too_many_logins` | 503 | login concurrency bound; `Retry-After` is set |
+//! | `report_timeout` | 504 | a query report ran over its time limit (M8.4) |
 //! | `internal` | 500 | generic message; the real error goes to standard error |
 //!
 //! Messages never contain passwords, tokens, secrets or the database URL. Database errors that
@@ -154,6 +155,16 @@ impl From<DbError> for ApiError {
             DbError::ViewExists { .. } => Self::new(S::CONFLICT, "conflict", text),
             DbError::ViewDenied(_) => Self::new(S::FORBIDDEN, "permission_denied", text),
             DbError::NotFound { .. } => Self::not_found(text),
+            // The same answer for a report that does not exist and one the caller may not run.
+            DbError::ReportNotFound { .. } => Self::not_found("report not found"),
+            DbError::ReportTimeout { .. } => Self::new(
+                S::GATEWAY_TIMEOUT,
+                "report_timeout",
+                "the report took too long; narrow the parameters",
+            ),
+            // A report that writes or does not fit its declaration is a mistake of the app. The
+            // message names the report and never the SQL; it is logged, not sent.
+            DbError::ReportReadOnly { .. } | DbError::Report(_) => Self::internal(&text),
             DbError::UnknownDocType { .. } | DbError::ChildDocType { .. } => {
                 Self::not_found("unknown doctype")
             }

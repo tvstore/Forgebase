@@ -200,8 +200,9 @@ M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tail
 [milestones](blueprint/milestones.md). The workflow row is recorded in [ADR 0015](adr/0015-workflow-states-and-transitions.md)
 (M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The saved views and group-by summary row is recorded in
 [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) and [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed)
-(M8.3, this pull request). The other M8 rows are still planned: until their pull requests land, this table is their
-only record.
+(M8.3, [#35](https://github.com/agilma/Forgebase/pull/35)). The query reports row is recorded in
+[ADR 0016](adr/0016-query-reports-read-only-execution.md) (M8.4, [#37](https://github.com/agilma/Forgebase/pull/37)). The other M8 rows are still planned:
+until their pull requests land, this table is their only record.
 
 | Decision | Recorded in |
 |---|---|
@@ -210,7 +211,7 @@ only record.
 | ~~T3: system font stack.~~ (superseded by U2, below: Inter is self-hosted; the system stack stays as the fallback.) | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | [ADR 0015](adr/0015-workflow-states-and-transitions.md) |
 | Saved views: private per user; shared views only by Administrator. Group-by summary. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow), [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) (M8.3) |
-| Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | planned: the M8.4 ADR |
+| Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | [ADR 0016](adr/0016-query-reports-read-only-execution.md) |
 
 ### UX.4 desk polish (2026-10-30, "setuju semua rencana mu")
 
@@ -260,3 +261,5 @@ The owner looked at the desk after UX.4 and was happy with the UX but not with t
 |---|---|
 | F1: **field style D**: borderless `#F3F3F3` fills (hover `#EDEDED`, white with a `#C7C7C7` border on focus, a visible keyboard ring, a pink error state), labels above the fields. The owner **accepted the WCAG 1.4.11 trade-off**: the boundary of a borderless filled field is about 1.1:1 (3:1 is asked); mitigated by labels, the fill, hover and focus states and a visible keyboard focus; text contrast stays AA. | [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.5), [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
 | F2 to F4 (as numbered in the information session's approved plan): the **neutral grey scale** that replaces the bluish slate (page `#F8F8F8`, flat cards with an `#EDEDED` border, softer text: body `#383838`, labels `#6B6B6B`), the **child table** as one bordered grid with plain, text-like cells (the active cell white with a `#C7C7C7` outline), and **buttons** (32 px, 8 px radius, secondary white with a `#E2E2E2` border, no shadow) with **neutral badges**. The plan file held by the working session does not number these items, so they are listed together here rather than guessing the numbering. | [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.5) |
+
+**Numbering confirmed (2026-10-30, information session).** The information session gave the numbering of the approved items, which the row above lists together: **F1** field style D (soft neutral, in the Frappe 16 direction) with the documented WCAG 1.4.11 trade-off; **F2** the child table as a soft, spreadsheet-like grid; **F3** the neutral grey palette and softer text colours across the desk (navy unchanged); **F4** delivering it as a small UX.5 pull request before further desk work ([#36](https://github.com/agilma/Forgebase/pull/36)). The information session also accepted the two deviations of the implementation: `#6B6B6B` for table captions and placeholders (the plan's lighter greys fail AA for text) and a navy focus ring at 60 % opacity. Details: [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.5).

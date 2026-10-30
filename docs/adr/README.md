@@ -45,4 +45,5 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0013](0013-jobs-scheduler-and-transactional-outbox.md) | Jobs, scheduler and transactional outbox | Accepted |
 | [0014](0014-multi-site-database-per-site.md) | Multi-site: database per site | Accepted |
 | [0015](0015-workflow-states-and-transitions.md) | Workflow: states and transitions in the DocType file | Accepted |
+| [0016](0016-query-reports-read-only-execution.md) | Query reports: app-defined SQL, read-only execution | Accepted |
 | [0017](0017-desk-styling-tailwind.md) | Desk styling: Tailwind CSS, theme tokens, no component kits | Accepted (supersedes UX-5; amended by the UX.4 section: Inter, copied icons, OFL-1.1 for fonts) |

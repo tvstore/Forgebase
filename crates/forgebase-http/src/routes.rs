@@ -129,7 +129,7 @@ pub(crate) fn version_param(query: &BTreeMap<String, String>) -> Result<i64, Api
 
 /// The `link_titles` parameter (UX.4): absent is `false`, `1` is `true`, anything else is
 /// `invalid_query`.
-fn link_titles_flag(query: &BTreeMap<String, String>) -> Result<bool, ApiError> {
+pub(crate) fn link_titles_flag(query: &BTreeMap<String, String>) -> Result<bool, ApiError> {
     match query.get("link_titles").map(String::as_str) {
         None => Ok(false),
         Some("1") => Ok(true),

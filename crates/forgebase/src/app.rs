@@ -7,6 +7,7 @@ use std::sync::Arc;
 use forgebase_core::hooks::DocTypeHooks;
 
 use crate::jobs::{JobHandler, JobOptions};
+use crate::reports::Report;
 use crate::schedule::Schedule;
 
 /// A DocType definition file embedded in the binary: its path (for error messages) and its
@@ -198,7 +199,9 @@ macro_rules! migrations {
 ///   of an app that extends another run after the hooks of the app it extends;
 /// - declare SQL data migrations;
 /// - register background jobs ([`App::job`]), which hooks, other jobs and the command line can
-///   enqueue, and run them on a [`Schedule`] ([`App::schedule`]).
+///   enqueue, and run them on a [`Schedule`] ([`App::schedule`]);
+/// - define query reports ([`App::report`]): SQL compiled into the binary, run read-only for the
+///   roles it names.
 ///
 /// What it may not do: change the definition of another app's DocType (add fields to it, for
 /// example), run code outside the binary, or reach the database from a hook (a hook may
@@ -213,6 +216,7 @@ pub struct App {
     pub(crate) migrations: Vec<MigrationFile>,
     pub(crate) jobs: Vec<(String, Arc<dyn JobHandler>, JobOptions)>,
     pub(crate) schedules: Vec<(String, Schedule)>,
+    pub(crate) reports: Vec<(String, Report)>,
 }
 
 impl fmt::Debug for App {
@@ -247,6 +251,14 @@ impl fmt::Debug for App {
                     .map(|(job, schedule)| (job, &schedule.spec))
                     .collect::<Vec<_>>(),
             )
+            .field(
+                "reports",
+                &self
+                    .reports
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -265,6 +277,7 @@ impl App {
             migrations: Vec::new(),
             jobs: Vec::new(),
             schedules: Vec::new(),
+            reports: Vec::new(),
         }
     }
 
@@ -348,6 +361,19 @@ impl App {
     /// removing one; see [`Schedule`] and ADR 0013.
     pub fn schedule(mut self, job: &str, schedule: Schedule) -> Self {
         self.schedules.push((job.to_owned(), schedule));
+        self
+    }
+
+    /// Defines a query report: SQL that the app compiled in, run read-only for the roles it
+    /// names (ADR 0016). `name` follows the rules of a DocType name and is unique within the app;
+    /// the report is known as `<app>.<name>`. See [`Report`] for the rules of the SQL, the
+    /// parameters and the columns.
+    ///
+    /// Everything wrong with a report is a startup error, like the other mistakes of an app.
+    /// `forgebase migrate` also prepares the SQL against the database and refuses a statement
+    /// whose parameters or columns do not fit what was declared.
+    pub fn report(mut self, name: &str, report: Report) -> Self {
+        self.reports.push((name.to_owned(), report));
         self
     }
 

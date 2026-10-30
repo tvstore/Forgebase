@@ -106,6 +106,23 @@ impl Composed {
         self.apps.iter().any(|a| a.name == name)
     }
 
+    /// How many reports the composed apps define.
+    pub fn report_count(&self) -> usize {
+        self.registry.reports().count()
+    }
+
+    /// Prepares the SQL of every report against the database and returns one message per report
+    /// that does not fit what it declares ([`forgebase_db::check_reports`]). Run after the
+    /// migrations: the statements read the tables they create.
+    pub async fn check_reports(&self, pool: &Pool) -> Result<Vec<String>, DbError> {
+        let reports: Vec<_> = self.registry.reports().collect();
+        if reports.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = pool.get().await?;
+        forgebase_db::check_reports(&mut client, &reports).await
+    }
+
     /// Framework migrations, schema sync, the app migrations in app order, then the sync of the
     /// declared schedules ([`forgebase_db::migrate_all`]).
     pub async fn migrate(
@@ -206,6 +223,7 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
     if errors.files.is_empty() {
         check_references(&registry, &defined_in, &reach, &local_reach, &mut errors);
         check_hooks(apps, &reach, &mut registry, &mut errors);
+        check_reports(apps, &reach, &mut registry, &mut errors);
     }
     // Jobs do not depend on the DocType files, so their problems are reported with the others.
     let jobs = check_jobs(apps, &mut registry, &mut errors);
@@ -455,6 +473,59 @@ fn check_hooks(
     }
 }
 
+/// Checks the reports and registers the valid ones, in the registry by full name. A Link param
+/// or column may name a DocType of the app itself or of an app it depends on (the rule of the
+/// Link fields), so the report works on every site that installs the app.
+fn check_reports(
+    apps: &[App],
+    reach: &BTreeMap<String, BTreeSet<String>>,
+    registry: &mut Registry,
+    errors: &mut StartupError,
+) {
+    for app in apps {
+        let app_name = &app.name;
+        let mut seen = BTreeSet::new();
+        for (name, report) in &app.reports {
+            let mut problems: Vec<String> = Vec::new();
+            if !seen.insert(name.as_str()) {
+                errors.apps.push(format!(
+                    "app `{app_name}`: report `{name}` is registered more than once"
+                ));
+                continue;
+            }
+            let def = report.definition(app_name, name);
+            problems.extend(def.problems());
+            let uses = reach.get(app_name);
+            for (target, what) in def.link_targets() {
+                match registry.get(target) {
+                    None => problems.push(format!("{what} links to unknown DocType `{target}`")),
+                    Some(doctype) if doctype.is_child => problems.push(format!(
+                        "{what} links to `{target}`, a child DocType (its rows belong to a parent document)"
+                    )),
+                    Some(_) => {
+                        let owner = registry.owner(target).unwrap_or_default();
+                        if owner != app_name && !uses.is_some_and(|u| u.contains(owner)) {
+                            problems.push(format!(
+                                "{what} links to `{target}`, which belongs to app `{owner}`; \
+                                 app `{app_name}` does not depend on `{owner}`"
+                            ));
+                        }
+                    }
+                }
+            }
+            for problem in &problems {
+                errors
+                    .apps
+                    .push(format!("app `{app_name}`: report `{name}`: {problem}"));
+            }
+            // The same full name from two apps with the same name is reported as a duplicate app.
+            if problems.is_empty() {
+                registry.add_report(def);
+            }
+        }
+    }
+}
+
 /// Checks the job names and options and registers the valid jobs: the names in the registry,
 /// the handlers in the result, by full name.
 fn check_jobs(
@@ -647,6 +718,115 @@ mod tests {
                 && text.contains("`ghost`"),
             "{text}"
         );
+    }
+
+    fn totals() -> crate::reports::Report {
+        use crate::reports::{Column, Param, Report};
+        Report::sql("SELECT 1;")
+            .roles(&["Manager"])
+            .param(Param::link("customer", "customer"))
+            .column(Column::int("n"))
+    }
+
+    #[test]
+    fn reports_are_registered_by_full_name_with_the_sql_trimmed() {
+        let sales = App::new("sales")
+            .depends_on(&["crm"])
+            .report("totals", totals());
+        let composed = compose(&[crm(), sales], None).expect("composes");
+        let report = composed.registry.report("sales.totals").expect("report");
+        assert_eq!(report.sql, "SELECT 1");
+        assert_eq!(report.label, "Totals");
+        assert_eq!(composed.registry.reports().count(), 1);
+        assert!(composed.registry.report("totals").is_none());
+    }
+
+    #[test]
+    fn every_report_composition_error_is_reported_together() {
+        use crate::reports::{Column, Param, Report};
+        let sales = App::new("sales")
+            .depends_on(&["crm"])
+            .report("Bad Name", totals())
+            .report("dup", totals())
+            .report("dup", totals())
+            .report("nobody", Report::sql("SELECT 1").column(Column::int("n")))
+            .report(
+                "links",
+                Report::sql("SELECT 1")
+                    .roles(&["A"])
+                    .param(Param::link("p", "ghost"))
+                    .param(Param::data("p"))
+                    .column(Column::link("c", "ghost")),
+            )
+            .report(
+                "empty",
+                Report::sql(" ; ").roles(&["A"]).param(Param::int("x")),
+            )
+            .report(
+                "limits",
+                Report::sql("SELECT 1")
+                    .roles(&["A"])
+                    .column(Column::int("n"))
+                    .timeout(std::time::Duration::from_secs(301))
+                    .max_rows(100_001),
+            );
+        let text = compose(&[crm(), sales], None)
+            .err()
+            .expect("refused")
+            .to_string();
+        for needle in [
+            "report `Bad Name`: name \"Bad Name\"",
+            "report `dup` is registered more than once",
+            "report `nobody`: no roles",
+            "report `links`: param `p` links to unknown DocType `ghost`",
+            "report `links`: column `c` links to unknown DocType `ghost`",
+            "report `links`: param `p` is declared more than once",
+            "report `empty`: the SQL is empty",
+            "report `empty`: no columns",
+            "report `limits`: timeout",
+            "report `limits`: max_rows 100001",
+        ] {
+            assert!(text.contains(needle), "{needle} in\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_report_may_only_link_to_its_own_app_and_its_dependencies() {
+        // `sales` does not depend on `crm`, so its report cannot name crm's customer.
+        let sales = App::new("sales").report("totals", totals());
+        let text = compose(&[crm(), sales], None)
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            text.contains(
+                "report `totals`: param `customer` links to `customer`, which belongs to app `crm`; app `sales` does not depend on `crm`"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_report_may_not_link_to_a_child_doctype() {
+        use crate::reports::Report;
+        let app = App::new("a")
+            .doctypes(
+                const {
+                    &[
+                        DocTypeFile::new("doctypes/parent.toml", "name = \"parent\"\nlabel = \"P\"\n[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"child\"\n"),
+                        DocTypeFile::new("doctypes/child.toml", "name = \"child\"\nlabel = \"C\"\nis_child = true\n"),
+                    ]
+                },
+            )
+            .report(
+                "r",
+                Report::sql("SELECT 1")
+                    .roles(&["A"])
+                    .param(crate::reports::Param::link("c", "child"))
+                    .column(crate::reports::Column::int("n")),
+            );
+        let text = compose(&[app], None).err().expect("refused").to_string();
+        assert!(text.contains("a child DocType"), "{text}");
     }
 
     const LINKING_A: &str = "name = \"a\"\nlabel = \"A\"\n[[fields]]\nname = \"f\"\ntype = \"link\"\ntarget = \"customer\"\n";

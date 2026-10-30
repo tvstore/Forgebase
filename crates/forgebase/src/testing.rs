@@ -12,7 +12,8 @@
 //! and [`run_schedules_at`] enqueues the scheduled jobs that are due at a given time.
 //! [`TestDb`], a throwaway PostgreSQL database that can run `migrate` for a
 //! [`Forgebase`] and hands out an [`HttpClient`] that talks to the HTTP API in process (no
-//! socket), and [`assert_doctypes_listed`], a guard for the embedded DocType list.
+//! socket), [`check_reports`] (the static check of the apps' report SQL, which `TestDb::migrate`
+//! also runs) and [`assert_doctypes_listed`], a guard for the embedded DocType list.
 //!
 //! ```ignore
 //! #[tokio::test]
@@ -203,6 +204,20 @@ impl TestDb {
             .migrate(&self.pool, &options)
             .await
             .map_err(|e| MigrateError::Failed(e.to_string()))?;
+        // Like `forgebase migrate`: after the migrations, and not in a dry run.
+        if !dry_run {
+            let problems = composed
+                .check_reports(&self.pool)
+                .await
+                .map_err(|e| MigrateError::Failed(e.to_string()))?;
+            if !problems.is_empty() {
+                return Err(MigrateError::Failed(format!(
+                    "the migrations were applied, but {} report(s) do not fit their SQL:\n{}",
+                    problems.len(),
+                    crate::error::bullets(&problems)
+                )));
+            }
+        }
         Ok(Migrated {
             app_migrations: report
                 .app_migrations
@@ -405,6 +420,29 @@ pub async fn run_schedules_at(
         .tick(Some(at))
         .await
         .unwrap_or_else(|e| panic!("run_schedules_at: {e}"))
+}
+
+/// Prepares the SQL of every report of `forgebase` against `db` and returns one message per
+/// problem: the check `forgebase migrate` runs after the migrations (and [`TestDb::migrate`]
+/// too, which fails with the same messages). It reads the tables the migrations create, so
+/// migrate first. An empty list means every report fits what it declares: its parameter and
+/// column counts, and the SQL types of its parameters and columns (ADR 0016).
+///
+/// ```ignore
+/// db.migrate(&binary, false).await.expect("migrate");
+/// assert_eq!(check_reports(&binary, &db).await, Vec::<String>::new());
+/// ```
+///
+/// # Panics
+///
+/// When the apps do not fit together or on a database error.
+pub async fn check_reports(forgebase: &Forgebase, db: &TestDb) -> Vec<String> {
+    let composed = compose(&forgebase.apps, None)
+        .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
+    composed
+        .check_reports(&db.pool)
+        .await
+        .unwrap_or_else(|e| panic!("check_reports: {e}"))
 }
 
 async fn drop_database(admin_url: &str, name: &str) {

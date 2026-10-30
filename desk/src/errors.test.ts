@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { conflictMessage, isStaleCode, mapDetail, mapDetails } from './errors';
+import { conflictMessage, isStaleCode, mapDetail, mapDetails, mapNamedDetails } from './errors';
 import { errorKey } from './fields';
 import { field, meta } from './testing';
 
@@ -105,5 +105,32 @@ describe('isStaleCode', () => {
     expect(isStaleCode('conflict')).toBe(true);
     expect(isStaleCode('invalid_docstatus')).toBe(true);
     expect(isStaleCode('validation_failed')).toBe(false);
+  });
+});
+
+describe('mapNamedDetails', () => {
+  const names = new Set(['from', 'to']);
+
+  it('maps the details that name a known field and leaves the rest', () => {
+    const mapped = mapNamedDetails(
+      [
+        'field `from` is required',
+        'field `to`: `x` is not a date in the form YYYY-MM-DD',
+        'unknown field `extra`',
+        'field `other`: nope',
+      ],
+      names,
+    );
+    expect(mapped.errors).toEqual({
+      from: 'This field is required.',
+      to: '`x` is not a date in the form YYYY-MM-DD.',
+    });
+    expect(mapped.unmapped).toEqual(['unknown field `extra`', 'field `other`: nope']);
+  });
+
+  it('keeps the first message of a field', () => {
+    const mapped = mapNamedDetails(['field `from` is required', 'field `from`: bad'], names);
+    expect(mapped.errors).toEqual({ from: 'This field is required.' });
+    expect(mapped.unmapped).toEqual([]);
   });
 });

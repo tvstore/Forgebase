@@ -9,7 +9,8 @@
 // no page scrolls sideways at those phone widths. M8.2 adds the workflow screens (workflow-*: a draft, a request
 // waiting for approval with its actions, the confirmation, an approved one with its history, and the list with
 // the state badges) on the e2e-only DocType purchase_request. M8.3 adds the Views menu, the Save view dialog, the
-// Summary panel and the Columns menu (views-menu, save-view-dialog, summary-panel, columns-menu). The PNGs are not committed.
+// Summary panel and the Columns menu (views-menu, save-view-dialog, summary-panel, columns-menu). M8.4 adds the
+// report page (report-params, report-result, report-empty). The PNGs are not committed.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -22,6 +23,8 @@ test.skip(process.env.SCREENSHOTS !== '1', 'set SCREENSHOTS=1 to take the screen
 
 /** A screenshot taken after the short fade-in and pop-in animations have finished. */
 async function snap(page: Page, path: string): Promise<void> {
+  // The pointer out of the way, so that no field is captured in its hover fill.
+  await page.mouse.move(0, 0);
   await page.waitForTimeout(400);
   await page.screenshot({ path });
 }
@@ -169,6 +172,23 @@ test('screenshots of login, home, list and form', async ({ page }) => {
     await snap(page, `${DIR}/command-bar-${width}.png`);
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // M8.4: the report page before a run (the parameters), with a result and with no rows.
+    await page.goto('/desk/#/report/e2e.sales_by_customer');
+    await expect(page.getByRole('heading', { name: 'Sales by customer', level: 1 })).toBeVisible();
+    await noSideScroll(page, `report parameters at ${width}`);
+    await snap(page, `${DIR}/report-params-${width}.png`);
+
+    await page.goto('/desk/#/report/e2e.sales_by_customer?from=2026-10-01&to=2026-10-31&include_cancelled=true');
+    await expect(page.locator('.report-table tbody tr')).toHaveCount(3);
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await noSideScroll(page, `report result at ${width}`);
+    await snap(page, `${DIR}/report-result-${width}.png`);
+
+    await page.goto('/desk/#/report/e2e.sales_by_customer?from=2020-01-01&to=2020-01-31');
+    await expect(page.getByRole('heading', { name: 'No rows' })).toBeVisible();
+    await noSideScroll(page, `report with no rows at ${width}`);
+    await snap(page, `${DIR}/report-empty-${width}.png`);
   }
 
   // ---- more states at 1280 ------------------------------------------------------------

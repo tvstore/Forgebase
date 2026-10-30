@@ -42,9 +42,9 @@ The Playwright smoke test (CI job `e2e`) needs a real server, so it is not part 
 
 ```sh
 export FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/fb_e2e   # an empty scratch database
-cargo build -p forgebase && (cd desk && npm ci && npm run build)
+cargo build -p forgebase --example e2e_app && (cd desk && npm ci && npm run build)
 desk/e2e/seed.sh                                   # DocTypes in target/e2e/doctypes, users e2e_manager and e2e_clerk, one customer
-FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/forgebase serve --doctypes target/e2e/doctypes &
+FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/examples/e2e_app serve --doctypes target/e2e/doctypes &
 cd desk
 npx playwright install chromium                    # downloads the Chromium of this Playwright version (CI does this too)
 npx playwright test                                # E2E_BASE_URL (default http://localhost:8000), E2E_PASSWORD

@@ -13,6 +13,7 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use forgebase_core::document::Document;
 use forgebase_core::hooks::{DocTypeHooks, HookContext, HookError};
 use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::report::ReportDef;
 use forgebase_core::value::Value;
 use forgebase_db::auth;
 use forgebase_db::{Pool, SyncOptions, connect, migrate_framework, quote_ident, sync};
@@ -550,9 +551,21 @@ impl Env {
         Self::build(AppConfig::default(), extra).await
     }
 
+    /// The test DocTypes and those of `extra`, and the query `reports` (M8.4).
+    pub async fn with_reports(extra: &[&str], reports: Vec<ReportDef>) -> Self {
+        Self::build_with(AppConfig::default(), extra, reports).await
+    }
+
     async fn build(config: AppConfig, extra: &[&str]) -> Self {
+        Self::build_with(config, extra, Vec::new()).await
+    }
+
+    pub async fn build_with(config: AppConfig, extra: &[&str], reports: Vec<ReportDef>) -> Self {
         let db = TestDb::migrated().await;
-        let registry = registry_with(extra);
+        let mut registry = registry_with(extra);
+        for report in reports {
+            assert!(registry.add_report(report), "duplicate report");
+        }
         {
             let mut client = db.pool.get().await.expect("connection");
             sync(&mut client, &registry, &SyncOptions::default())

@@ -91,8 +91,25 @@ pub async fn link_titles(
     documents: &[StoredDocument],
 ) -> Result<LinkTitles, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    resolve(
+        client,
+        registry,
+        caller,
+        collect(registry, doctype, documents),
+    )
+    .await
+}
+
+/// The titles for names grouped by target DocType, under the caller's read rules. Shared with
+/// the Link columns of a report ([`report_link_titles`](crate::report_link_titles)).
+pub(crate) async fn resolve(
+    client: &impl GenericClient,
+    registry: &Registry,
+    caller: &Caller,
+    found: BTreeMap<String, BTreeSet<String>>,
+) -> Result<LinkTitles, DbError> {
     let mut titles = LinkTitles::new();
-    for (target, names) in collect(registry, doctype, documents) {
+    for (target, names) in found {
         let Some(target_type) = registry.get(&target) else {
             continue;
         };

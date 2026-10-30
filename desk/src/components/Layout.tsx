@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { breadcrumbs } from '../nav';
 import { initials } from '../people';
+import type { ReportMeta } from '../reports';
 import { homeHref } from '../router';
 import type { Route } from '../router';
 import { commandKeyHint, commandKeyName, isCommandBarKey } from '../shortcut';
@@ -19,6 +20,8 @@ interface Props {
   route: Route;
   /** The DocTypes the user can read (empty until they are loaded). */
   doctypes: DocTypeSummary[];
+  /** The reports the user may run (empty until they are loaded, or when there are none). */
+  reports: ReportMeta[];
   onLogout: () => void;
   children: ReactNode;
 }
@@ -35,7 +38,7 @@ function platform(): string {
  * the menu button (`aria-expanded`) and closes when the page changes. Ctrl/Cmd+K opens the command
  * bar from anywhere.
  */
-export function Layout({ username, route, doctypes, onLogout, children }: Props) {
+export function Layout({ username, route, doctypes, reports, onLogout, children }: Props) {
   const [open, setOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const sidebarId = useId();
@@ -45,7 +48,12 @@ export function Layout({ username, route, doctypes, onLogout, children }: Props)
   const searchLabel = `Search or jump to... (${commandKeyName(platform())})`;
 
   // A new page closes the drawer (state is adjusted while rendering, not in an effect).
-  const pageKey = route.name === 'list' || route.name === 'new' || route.name === 'form' ? `${route.name}/${route.doctype}` : route.name;
+  const pageKey =
+    route.name === 'list' || route.name === 'new' || route.name === 'form'
+      ? `${route.name}/${route.doctype}`
+      : route.name === 'report'
+        ? `report/${route.report}`
+        : route.name;
   const [seenPage, setSeenPage] = useState(pageKey);
   if (seenPage !== pageKey) {
     setSeenPage(pageKey);
@@ -136,12 +144,12 @@ export function Layout({ username, route, doctypes, onLogout, children }: Props)
       </header>
       <div className="body">
         {open ? <div className="backdrop" aria-hidden="true" onClick={() => setOpen(false)} /> : null}
-        <Sidebar id={sidebarId} open={open} doctypes={doctypes} route={route} onNavigate={() => setOpen(false)} />
+        <Sidebar id={sidebarId} open={open} doctypes={doctypes} reports={reports} route={route} onNavigate={() => setOpen(false)} />
         <main id="content" ref={main} tabIndex={-1} className="content">
-          <CrumbsContext.Provider value={breadcrumbs(route, doctypes)}>{children}</CrumbsContext.Provider>
+          <CrumbsContext.Provider value={breadcrumbs(route, doctypes, reports)}>{children}</CrumbsContext.Provider>
         </main>
       </div>
-      {commandOpen ? <CommandBar doctypes={doctypes} onClose={() => setCommandOpen(false)} /> : null}
+      {commandOpen ? <CommandBar doctypes={doctypes} reports={reports} onClose={() => setCommandOpen(false)} /> : null}
     </div>
   );
 }

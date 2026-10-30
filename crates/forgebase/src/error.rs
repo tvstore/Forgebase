@@ -93,6 +93,11 @@ pub(crate) fn describe_db(error: &DbError) -> String {
                 bullets(&lines)
             )
         }
+        DbError::ReportCheck(problems) => format!(
+            "the migrations were applied, but {} report(s) do not fit their SQL:\n{}\nfix the report and run migrate again",
+            problems.len(),
+            bullets(problems)
+        ),
         other => other.to_string(),
     }
 }
@@ -112,6 +117,18 @@ pub(crate) fn bullets(lines: &[String]) -> String {
 mod tests {
     use super::*;
     use forgebase_core::document::ValidationError;
+
+    #[test]
+    fn report_problems_are_listed_and_say_what_to_do() {
+        let error = CliError::Db(DbError::ReportCheck(vec![
+            "report `a.b`: x".to_owned(),
+            "report `a.c`: y".to_owned(),
+        ]));
+        assert_eq!(
+            error.to_string(),
+            "the migrations were applied, but 2 report(s) do not fit their SQL:\n  - report `a.b`: x\n  - report `a.c`: y\nfix the report and run migrate again"
+        );
+    }
 
     #[test]
     fn validation_errors_are_listed_one_per_line() {

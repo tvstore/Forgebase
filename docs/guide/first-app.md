@@ -315,6 +315,8 @@ error: invalid app setup:
 
 An unknown job name in `ctx.enqueue` is found at run time, not at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
 
+**Query reports.** An app can also define a read-only SQL report (`App::report`, with `Report`, `Param` and `Column`) that is run by the roles it names; the SQL is compiled in, its parameters are `$1..$n` and always bound, and `forgebase migrate` checks it against the database. Row-level rules do not apply inside a report. The design, the limits and what to watch for are in [ADR 0016](../adr/0016-query-reports-read-only-execution.md); the full guide section is part of M8.5.
+
 Running your app for real (several sites, a reverse proxy, workers, upgrades, backups and restores) is in the [operations guide](operations.md).
 
 ## The public API boundary
