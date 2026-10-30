@@ -38,13 +38,25 @@ const SUBMITTABLE_COLUMNS: [(&str, &str, bool); 2] = [
     ("amended_from", "text", false),
 ];
 
-/// The submittable columns of `doctype` (none unless it is submittable).
-fn submittable_columns(doctype: &DocType) -> &'static [(&'static str, &'static str, bool)] {
-    if doctype.submittable {
+/// The extra standard column of a DocType with a workflow (M8.1): the name of the state the
+/// document is in, nullable (a document that existed before the workflow gets its state when
+/// `migrate` backfills it).
+const WORKFLOW_COLUMNS: [(&str, &str, bool); 1] = [("workflow_state", "text", false)];
+
+/// The framework columns of `doctype` after the standard ones: the submittable columns of a
+/// submittable DocType, then the workflow column of a DocType with a workflow (none otherwise).
+fn extra_columns(doctype: &DocType) -> Vec<(&'static str, &'static str, bool)> {
+    let submittable: &[_] = if doctype.submittable {
         &SUBMITTABLE_COLUMNS
     } else {
         &[]
-    }
+    };
+    let workflow: &[_] = if doctype.workflow.is_some() {
+        &WORKFLOW_COLUMNS
+    } else {
+        &[]
+    };
+    submittable.iter().chain(workflow).copied().collect()
 }
 
 /// The standard columns of the table of `doctype`: a child's rows have no name, owner, version
@@ -87,7 +99,8 @@ pub enum Step {
     },
     /// Add a nullable column for a field added to an existing DocType, or the `docstatus`
     /// (`NOT NULL DEFAULT 0`, existing documents become drafts) and `amended_from` columns of a
-    /// DocType that became submittable.
+    /// DocType that became submittable, or the nullable `workflow_state` column of a DocType
+    /// that got a workflow (`migrate` then sets the state of its existing documents).
     AddColumn {
         /// DocType name.
         doctype: String,
@@ -390,7 +403,7 @@ fn standard_column_sql(name: &str, data_type: &str) -> String {
     format!("{} {data_type} {constraint}", quote_ident(name))
 }
 
-/// `"docstatus" smallint NOT NULL DEFAULT 0` or `"amended_from" text`.
+/// `"docstatus" smallint NOT NULL DEFAULT 0`, `"amended_from" text` or `"workflow_state" text`.
 fn submittable_column_sql(name: &str, data_type: &str, not_null: bool) -> String {
     let constraint = match (name, not_null) {
         ("docstatus", _) => " NOT NULL DEFAULT 0",
@@ -406,7 +419,7 @@ fn create_table_sql(doctype: &DocType, table: &str) -> String {
         .map(|(name, data_type)| standard_column_sql(name, data_type))
         .collect();
     lines.extend(
-        submittable_columns(doctype)
+        extra_columns(doctype)
             .iter()
             .map(|(name, data_type, not_null)| submittable_column_sql(name, data_type, *not_null)),
     );
@@ -629,7 +642,7 @@ fn plan_doctype(
             Some(_) => {}
         }
     }
-    for &(name, data_type, not_null) in submittable_columns(doctype) {
+    for &(name, data_type, not_null) in extra_columns(doctype).iter() {
         let expected = format!("{data_type}{}", if not_null { " NOT NULL" } else { "" });
         match columns.get(name) {
             None => phases.add_columns.push(Step::AddColumn {
@@ -793,9 +806,7 @@ fn plan_doctype(
     }
     for column in columns.keys() {
         let known = standard_columns(doctype).iter().any(|(n, _)| n == column)
-            || submittable_columns(doctype)
-                .iter()
-                .any(|(n, ..)| n == column)
+            || extra_columns(doctype).iter().any(|(n, ..)| n == column)
             || doctype.column_fields().any(|f| f.name == *column);
         if !known {
             plan.warnings.push(Warning::ColumnNotInMetadata {
@@ -1735,5 +1746,64 @@ scale = 2
         let off = plan(&registry("name = \"memo\"\nlabel = \"M\"\n"), &kept);
         assert!(off.steps.is_empty() && off.conflicts.is_empty());
         assert_eq!(off.warnings.len(), 2, "{:?}", off.warnings);
+    }
+
+    const FLOW: &str = "name = \"memo\"\nlabel = \"M\"\nsubmittable = true\n\
+                         [workflow]\n[[workflow.states]]\nname = \"Open\"\ndocstatus = 0\n";
+
+    #[test]
+    fn a_workflow_adds_a_nullable_state_column_after_the_docstatus_columns() {
+        let plan_new = plan(&registry(FLOW), &Catalog::default());
+        let Step::CreateTable { sql, .. } = &plan_new.steps[0] else {
+            panic!("expected CreateTable");
+        };
+        assert!(
+            sql.contains("\"amended_from\" text,\n    \"workflow_state\" text\n)"),
+            "{sql}"
+        );
+        // A DocType that gets a workflow later: one nullable column, no default.
+        let status = [
+            ("docstatus", "smallint", true),
+            ("amended_from", "text", false),
+        ];
+        let added = plan(&registry(FLOW), &memo_catalog(&status));
+        assert!(added.conflicts.is_empty() && added.warnings.is_empty());
+        let [Step::AddColumn { column, sql, .. }] = &added.steps[..] else {
+            panic!("expected one AddColumn, got {:?}", added.steps);
+        };
+        assert_eq!(column, "workflow_state");
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"doc_memo\" ADD COLUMN \"workflow_state\" text"
+        );
+        // Present: nothing to do. Drift (another type, NOT NULL) is a conflict.
+        let with_state = [status[0], status[1], ("workflow_state", "text", false)];
+        let ok = plan(&registry(FLOW), &memo_catalog(&with_state));
+        assert!(ok.steps.is_empty() && ok.conflicts.is_empty() && ok.warnings.is_empty());
+        for drift in [
+            ("workflow_state", "bigint", false),
+            ("workflow_state", "text", true),
+        ] {
+            let drifted = plan(
+                &registry(FLOW),
+                &memo_catalog(&[status[0], status[1], drift]),
+            );
+            assert_eq!(
+                drifted.conflicts.len(),
+                1,
+                "{drift:?}: {:?}",
+                drifted.conflicts
+            );
+        }
+        // Removing the workflow keeps the column: a warning, like turning submittable off.
+        let off = plan(&registry(MEMO), &memo_catalog(&with_state));
+        assert!(off.steps.is_empty() && off.conflicts.is_empty());
+        assert_eq!(
+            off.warnings,
+            [Warning::ColumnNotInMetadata {
+                table: "doc_memo".to_owned(),
+                column: "workflow_state".to_owned()
+            }]
+        );
     }
 }

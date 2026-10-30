@@ -283,6 +283,60 @@ pub enum DbError {
         /// The document that amends it.
         amended_by: String,
     },
+    /// Submit or cancel was called for a DocType that has a workflow: its documents change state
+    /// only through a transition (ADR 0015).
+    #[error("DocType `{doctype}` has a workflow; use a transition (cannot {operation})")]
+    WorkflowRequired {
+        /// DocType name.
+        doctype: String,
+        /// The refused operation: `submit` or `cancel`.
+        operation: &'static str,
+    },
+    /// A transition (or its list or history) was asked for on a DocType without a workflow.
+    #[error("DocType `{doctype}` has no workflow")]
+    NoWorkflow {
+        /// DocType name.
+        doctype: String,
+    },
+    /// The document's state has no transition with this action (the action does not exist, or
+    /// not from this state). A document without a state has no transitions either.
+    #[error("{doctype} `{name}` is in state `{state}`: no transition `{action}` from it")]
+    UnknownTransition {
+        /// DocType name.
+        doctype: String,
+        /// Document name.
+        name: String,
+        /// The state the document is in (`(none)` when it has no state).
+        state: String,
+        /// The action that was asked for.
+        action: String,
+    },
+    /// The caller may not take the transition: it needs one of the transition's roles and the
+    /// right of its docstatus move (write, submit or cancel), and for an `if_owner` right the
+    /// document must be the caller's. Like [`DbError::PermissionDenied`] it is only returned
+    /// for a document the caller can read.
+    #[error(
+        "permission denied: transition `{action}` of DocType `{doctype}` needs one of its roles and the `{right}` right"
+    )]
+    TransitionDenied {
+        /// DocType name.
+        doctype: String,
+        /// The action.
+        action: String,
+        /// The right the transition's docstatus move needs.
+        right: Right,
+    },
+    /// The document is in a state whose `edit_roles` the caller does not have, so it cannot
+    /// be updated (ADR 0015).
+    #[error(
+        "permission denied: a `{doctype}` document in state `{state}` can be edited only by the roles of that state"
+    )]
+    EditDenied {
+        /// DocType name.
+        doctype: String,
+        /// The state the document is in.
+        state: String,
+    },
     /// A job cannot be enqueued, or a job command is wrong: the job name is not one of the
     /// binary's jobs, the payload is too large or has a NUL character, an id is not a UUID. For
     /// a hook that enqueues it fails the whole operation, and nothing is written. It is a
@@ -296,8 +350,8 @@ pub enum DbError {
     Hook {
         /// DocType name.
         doctype: String,
-        /// The hook that failed: `before_insert`, `validate`, `before_delete`, `before_submit` or
-        /// `before_cancel`.
+        /// The hook that failed: `before_insert`, `validate`, `before_delete`, `before_submit`,
+        /// `before_cancel` or `before_transition`.
         hook: &'static str,
         /// The hook's message.
         message: String,

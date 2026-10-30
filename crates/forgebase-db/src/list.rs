@@ -12,7 +12,7 @@
 //! |---|---|
 //! | [`FilterOp::Eq`], [`Ne`](FilterOp::Ne), [`In`](FilterOp::In) | every column field and standard column; a Link field takes the target's `name` |
 //! | [`Lt`](FilterOp::Lt), [`Le`](FilterOp::Le), [`Gt`](FilterOp::Gt), [`Ge`](FilterOp::Ge) | Data, Text, Select, Int, Decimal, Date, Datetime and the text, time and number standard columns (not Check, not Link) |
-//! | [`Like`](FilterOp::Like) | text only: Data, Text, Select, `name`, `owner`, `modified_by` (a SQL `LIKE` pattern: `%` any text, `_` one character, `\` escapes; case-sensitive) |
+//! | [`Like`](FilterOp::Like) | text only: Data, Text, Select, `name`, `owner`, `modified_by`, `workflow_state` (a SQL `LIKE` pattern: `%` any text, `_` one character, `\` escapes; case-sensitive) |
 //! | [`IsNull`](FilterOp::IsNull) | every column field and standard column |
 //!
 //! `Ne` and the comparisons leave out rows where the field is null (SQL semantics); use
@@ -22,7 +22,8 @@
 //!
 //! Filterable and sortable: every column field of the DocType (not Table fields, whose rows are
 //! not listed) and the standard columns `name`, `owner`, `modified_by`, `created_at`,
-//! `modified_at`, `version` and, for a submittable DocType, `docstatus` (an integer, 0, 1 or 2).
+//! `modified_at`, `version` and, for a submittable DocType, `docstatus` (an integer, 0, 1 or 2) and,
+//! for a DocType with a workflow, `workflow_state` (the name of the state; text, so `like` works).
 //! Sorting by a Link field sorts by the target's `name`. Nulls sort as PostgreSQL does: last in
 //! ascending, first in descending order.
 //!
@@ -197,6 +198,8 @@ fn column(doctype: &DocType, field: &str) -> Result<Column, DbError> {
         "created_at" | "modified_at" => Some(FieldType::Datetime),
         "version" => Some(FieldType::Int),
         "docstatus" if doctype.submittable => Some(FieldType::Int),
+        // A text column of a DocType with a workflow (M8.1); filter and sort by the state name.
+        "workflow_state" if doctype.workflow.is_some() => Some(FieldType::Text),
         _ => None,
     };
     let field_type = match (standard, doctype.field(field)) {

@@ -138,6 +138,14 @@ async fn migrate_site(
             );
         }
     }
+    // The documents of a workflow that are in a state it no longer defines: kept as they are.
+    for warning in &report.workflow_warnings {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: site `{}`: {warning}",
+            ctx.site.name
+        );
+    }
     Ok(migrate_report(
         &report,
         options.dry_run,
