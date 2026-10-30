@@ -4,11 +4,18 @@ import {
   DEFAULT_SORT,
   filterFields,
   formatCell,
+  formatDate,
+  formatDateTime,
+  groupDigits,
+  isNumericColumn,
   listColumns,
   listStateParams,
   nextSort,
   parseListState,
+  rowTitle,
+  searchField,
   sortText,
+  withSearch,
 } from './listing';
 import type { DocTypeMeta, FieldMeta, FieldType } from './types';
 
@@ -23,9 +30,10 @@ const field = (name: string, type: FieldType, extra: Partial<FieldMeta> = {}): F
   ...extra,
 });
 
-const meta = (fields: FieldMeta[], submittable = false): DocTypeMeta => ({
+const meta = (fields: FieldMeta[], submittable = false, extra: Partial<DocTypeMeta> = {}): DocTypeMeta => ({
   name: 'thing',
   label: 'Thing',
+  app: null,
   naming: 'random',
   submittable,
   title_field: null,
@@ -34,6 +42,7 @@ const meta = (fields: FieldMeta[], submittable = false): DocTypeMeta => ({
   rights: {
     read: 'all', write: 'all', create: 'all', delete: 'all', submit: 'none', cancel: 'none', amend: 'none',
   },
+  ...extra,
 });
 
 describe('listColumns', () => {
@@ -59,6 +68,66 @@ describe('listColumns', () => {
   it('works for a DocType with no fields', () => {
     expect(listColumns(meta([])).map((c) => c.key)).toEqual(['name', 'modified_at']);
   });
+
+  it('uses list_fields in their order, skips unknown, Table and the title field, and adds the status', () => {
+    const fields = [field('a', 'data'), field('b', 'int'), field('notes', 'text'), field('lines', 'table')];
+    const columns = listColumns(
+      meta(fields, true, { title_field: 'a', list_fields: ['notes', 'a', 'gone', 'lines', 'b'] }),
+    );
+    expect(columns.map((c) => c.key)).toEqual(['name', 'notes', 'b', 'docstatus', 'modified_at']);
+    expect(columns.find((c) => c.key === 'docstatus')?.label).toBe('Status');
+  });
+
+  it('falls back to the default columns without the title field, and has no status when not submittable', () => {
+    const columns = listColumns(meta([field('a', 'data'), field('b', 'int')], false, { title_field: 'a' }));
+    expect(columns.map((c) => c.key)).toEqual(['name', 'b', 'modified_at']);
+  });
+
+  it('right-aligns numbers only', () => {
+    const columns = listColumns(meta([field('a', 'data'), field('b', 'int'), field('c', 'decimal')]));
+    expect(columns.filter(isNumericColumn).map((c) => c.key)).toEqual(['b', 'c']);
+  });
+});
+
+describe('rowTitle', () => {
+  const m = meta([field('a', 'data')], false, { title_field: 'a' });
+  it('is the title field value, else the name', () => {
+    expect(rowTitle({ name: 'N1', a: 'Ada' }, m)).toEqual({ title: 'Ada', name: 'N1' });
+    expect(rowTitle({ name: 'N1', a: '' }, m)).toEqual({ title: 'N1', name: 'N1' });
+    expect(rowTitle({ name: 'N1', a: null }, m)).toEqual({ title: 'N1', name: 'N1' });
+    expect(rowTitle({ name: 'N1', a: 'Ada' }, meta([]))).toEqual({ title: 'N1', name: 'N1' });
+  });
+});
+
+describe('quick search', () => {
+  it('looks in the title field when like is allowed on it, else in name', () => {
+    const fields = [field('a', 'data'), field('c', 'link'), field('s', 'select')];
+    expect(searchField(meta(fields, false, { title_field: 'a' }))).toEqual({ name: 'a', label: 'A' });
+    expect(searchField(meta(fields, false, { title_field: 's' })).name).toBe('s');
+    expect(searchField(meta(fields, false, { title_field: 'c' })).name).toBe('name'); // like is refused on a Link
+    expect(searchField(meta(fields, false, { title_field: 'gone' })).name).toBe('name');
+    expect(searchField(meta(fields))).toEqual({ name: 'name', label: 'Name' });
+  });
+
+  it('builds a like filter on top of the user filters', () => {
+    expect(withSearch(null, '', 'name')).toBeUndefined();
+    expect(withSearch('[{"field":"a","op":"is null"}]', '  ', 'name')).toBe('[{"field":"a","op":"is null"}]');
+    expect(JSON.parse(withSearch(null, ' ada ', 'name') ?? '')).toEqual([
+      { field: 'name', op: 'like', value: '%ada%' },
+    ]);
+    expect(JSON.parse(withSearch('[{"field":"a","op":"is null"}]', 'x', 'a') ?? '')).toEqual([
+      { field: 'a', op: 'is null' },
+      { field: 'a', op: 'like', value: '%x%' },
+    ]);
+  });
+
+  it('matches the typed text literally and leaves a bad filters text to the server', () => {
+    expect(JSON.parse(withSearch(null, '50%_\\', 'name') ?? '')).toEqual([
+      { field: 'name', op: 'like', value: '%50\\%\\_\\\\%' },
+    ]);
+    expect(withSearch('not json', 'x', 'name')).toBe('not json');
+    expect(withSearch('{"a":1}', 'x', 'name')).toBe('{"a":1}');
+  });
 });
 
 describe('filterFields', () => {
@@ -80,12 +149,13 @@ describe('parseListState and listStateParams', () => {
       offset: 0,
       sort: DEFAULT_SORT,
       filters: null,
+      q: '',
     });
-    expect(listStateParams({ offset: 0, sort: DEFAULT_SORT, filters: null }).toString()).toBe('');
+    expect(listStateParams({ offset: 0, sort: DEFAULT_SORT, filters: null, q: '' }).toString()).toBe('');
   });
 
-  it('round-trips offset, sort and filters', () => {
-    const state = { offset: 40, sort: { field: 'a', desc: true }, filters: '[{"field":"a","op":"is null"}]' };
+  it('round-trips offset, sort, filters and the search text', () => {
+    const state = { offset: 40, sort: { field: 'a', desc: true }, filters: '[{"field":"a","op":"is null"}]', q: 'ada & co' };
     const params = listStateParams(state);
     expect(params.get('sort')).toBe('a:desc');
     expect(params.get('offset')).toBe('40');
@@ -120,10 +190,32 @@ describe('formatCell', () => {
     expect(formatCell(true, 'check')).toBe('Yes');
     expect(formatCell(false, 'check')).toBe('No');
     expect(formatCell(12, 'int')).toBe('12');
+    expect(formatCell(1234567, 'int')).toBe('1,234,567');
     expect(formatCell('12.50', 'decimal')).toBe('12.50');
-    expect(formatCell('2026-10-29T15:04:05.123456Z', 'datetime')).toBe('2026-10-29 15:04:05 UTC');
-    expect(formatCell('2026-10-29T15:04:05Z', 'datetime')).toBe('2026-10-29 15:04:05 UTC');
+    expect(formatCell('1234.50', 'decimal')).toBe('1,234.50');
+    expect(formatCell('2026-10-29T15:04:05.123456Z', 'datetime')).toBe('29 Oct 2026, 15:04 UTC');
+    expect(formatCell('2026-10-29T15:04:05Z', 'datetime')).toBe('29 Oct 2026, 15:04 UTC');
+    expect(formatCell('2026-10-29', 'date')).toBe('29 Oct 2026');
     expect(formatCell('not a date', 'datetime')).toBe('not a date');
     expect(formatCell('<img src=x onerror=alert(1)>', 'data')).toBe('<img src=x onerror=alert(1)>');
+  });
+});
+
+describe('number and date helpers', () => {
+  it('groups digits without changing them', () => {
+    expect(groupDigits('0')).toBe('0');
+    expect(groupDigits('999')).toBe('999');
+    expect(groupDigits('1000')).toBe('1,000');
+    expect(groupDigits('-1234567.5000')).toBe('-1,234,567.5000');
+    expect(groupDigits('1e5')).toBe('1e5');
+    expect(groupDigits('abc')).toBe('abc');
+  });
+
+  it('formats dates and leaves other text alone', () => {
+    expect(formatDate('2026-01-05')).toBe('5 Jan 2026');
+    expect(formatDate('2026-13-05')).toBe('2026-13-05');
+    expect(formatDate('yesterday')).toBe('yesterday');
+    expect(formatDateTime('2026-12-31T23:59:59Z')).toBe('31 Dec 2026, 23:59 UTC');
+    expect(formatDateTime('2026-12-31 23:59')).toBe('2026-12-31 23:59');
   });
 });

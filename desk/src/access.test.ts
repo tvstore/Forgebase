@@ -4,6 +4,7 @@ import {
   docStatusOf,
   fieldReadOnly,
   hasEditableField,
+  headerActions,
   isAddressable,
   lifecycleActions,
   mayChange,
@@ -166,5 +167,29 @@ describe('names that cannot be put in a REST path', () => {
     for (const name of ['a', '...', '.a', 'a.', 'SO-2026-00001', 'a/b', '%2e%2e', 'a b', '日本', '..\\x']) {
       expect(isAddressable(name), name).toBe(true);
     }
+  });
+});
+
+describe('header actions (the main action and the More menu)', () => {
+  const full = ctx();
+
+  it('makes Save the main action for a new document and while there are unsaved changes', () => {
+    expect(headerActions(ctx({ isNew: true }), false, true)).toEqual({ save: 'primary', submit: null, more: [] });
+    expect(headerActions(full, true, true)).toEqual({ save: 'primary', submit: 'secondary', more: ['delete'] });
+  });
+
+  it('makes Submit the main action for a saved draft', () => {
+    expect(headerActions(full, false, true)).toEqual({ save: 'secondary', submit: 'primary', more: ['delete'] });
+  });
+
+  it('puts Cancel and Amend in the menu, and offers no Submit for a submitted document', () => {
+    expect(headerActions(ctx({ docStatus: 1 }), false, true)).toEqual({ save: 'secondary', submit: null, more: ['cancel'] });
+    expect(headerActions(ctx({ docStatus: 2 }), false, false)).toEqual({ save: null, submit: null, more: ['amend', 'delete'] });
+  });
+
+  it('offers only what the rights allow', () => {
+    const clerk = ctx({ rights: rights({ read: 'all', write: 'all', create: 'all' }) });
+    expect(headerActions(clerk, false, true)).toEqual({ save: 'secondary', submit: null, more: [] });
+    expect(headerActions(clerk, false, false)).toEqual({ save: null, submit: null, more: [] });
   });
 });

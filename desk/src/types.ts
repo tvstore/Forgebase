@@ -15,6 +15,8 @@ export interface SessionInfo {
 export interface DocTypeSummary {
   name: string;
   label: string;
+  /** The app that owns the DocType, or null when none is recorded. */
+  app: string | null;
   submittable: boolean;
   rights: Rights;
 }
@@ -52,11 +54,12 @@ export interface FieldMeta {
 export interface DocTypeMeta {
   name: string;
   label: string;
+  app: string | null;
   naming: string;
   submittable: boolean;
-  /** The field that names a document for a person (not used by the desk yet), or null. */
+  /** The field that names a document for a person, or null. */
   title_field: string | null;
-  /** The columns of the list after `name` (not used by the desk yet), or null for the default. */
+  /** The columns of the list after `name`, or null for the default. */
   list_fields: string[] | null;
   fields: FieldMeta[];
   rights: Rights;

@@ -99,3 +99,30 @@ export function lifecycleActions(ctx: DocContext): LifecycleAction[] {
 export function isAddressable(name: string): boolean {
   return name !== '' && name !== '.' && name !== '..';
 }
+
+/** How a header button is drawn: the one main action is `primary`, the rest `secondary`. */
+export type Emphasis = 'primary' | 'secondary';
+
+export interface HeaderActions {
+  /** Null: the user cannot change the document, so there is no Save. */
+  save: Emphasis | null;
+  /** Null: no submit right, or not a draft of a submittable DocType (see {@link lifecycleActions}). */
+  submit: Emphasis | null;
+  /** The other lifecycle actions, for the "More" menu. */
+  more: LifecycleAction[];
+}
+
+/**
+ * The buttons of the form header. Save is primary for a new document and while there are unsaved
+ * changes; Submit is primary for a saved draft (with unsaved changes it stays, secondary, and asks
+ * to save first). Visibility follows {@link lifecycleActions} and `canSave` exactly: nothing the
+ * user has no right for is offered.
+ */
+export function headerActions(ctx: DocContext, dirty: boolean, canSave: boolean): HeaderActions {
+  const actions = lifecycleActions(ctx);
+  return {
+    save: !canSave ? null : ctx.isNew || dirty ? 'primary' : 'secondary',
+    submit: !actions.includes('submit') ? null : dirty ? 'secondary' : 'primary',
+    more: actions.filter((a) => a !== 'submit'),
+  };
+}
