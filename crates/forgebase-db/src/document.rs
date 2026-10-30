@@ -1352,14 +1352,13 @@ async fn delete_in(
         return Err(stale_or_missing(client, doctype, &target).await?);
     }
     // The history goes with the document: there is no audit trail yet, and a name can be reused.
-    if doctype.workflow.is_some() {
-        client
-            .execute(
-                "DELETE FROM fb_workflow_log WHERE doctype = $1::text AND name = $2::text",
-                &[&doctype.name, &name],
-            )
-            .await?;
-    }
+    // Always, also for a DocType whose workflow was removed: the rows would otherwise outlive it.
+    client
+        .execute(
+            "DELETE FROM fb_workflow_log WHERE doctype = $1::text AND name = $2::text",
+            &[&doctype.name, &name],
+        )
+        .await?;
     Ok(())
 }
 
@@ -1494,6 +1493,12 @@ fn check_edit_roles(
     current: &StoredDocument,
     caller: &Caller,
 ) -> Result<(), DbError> {
+    if matches!(
+        current.docstatus,
+        Some(DocStatus::Submitted | DocStatus::Cancelled)
+    ) {
+        return Ok(());
+    }
     let Some(state) = current
         .workflow_state
         .as_deref()

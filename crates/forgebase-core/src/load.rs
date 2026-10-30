@@ -1372,6 +1372,8 @@ docstatus = 1
         for (name, reason) in [
             ("", "must not be empty"),
             ("   ", "must not be empty"),
+            (" Cancelled", "must not start or end with whitespace"),
+            ("Cancelled ", "must not start or end with whitespace"),
             (&"x".repeat(65), "is longer than 64 characters"),
         ] {
             let text = edited("name = \"Cancelled\"", &format!("name = \"{name}\""));
@@ -1496,6 +1498,8 @@ docstatus = 1
     fn actions_are_checked_and_unique_per_from_state() {
         for (action, reason) in [
             ("", "must not be empty"),
+            (" Send", "must not start or end with whitespace"),
+            ("Send\t", "must not start or end with whitespace"),
             (&"a".repeat(65), "is longer than 64 characters"),
         ] {
             let errors = workflow_errors(&edited(

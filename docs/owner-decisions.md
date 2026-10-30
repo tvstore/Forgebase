@@ -198,7 +198,7 @@ These decisions were approved in the information session. Their ADRs and milesto
 M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.3,
 [#31](https://github.com/agilma/Forgebase/pull/31)); T4 (UX.3 before M8.1) is recorded in ADR 0017 and the
 [milestones](blueprint/milestones.md). The workflow row is recorded in [ADR 0015](adr/0015-workflow-states-and-transitions.md)
-(M8.1, the pull request of branch `claude/m8-1-workflow`). The other M8 rows are still planned: until their pull
+(M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The other M8 rows are still planned: until their pull
 requests land, this table is their only record.
 
 | Decision | Recorded in |

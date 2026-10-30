@@ -1473,6 +1473,75 @@ async fn the_table_of_a_workflow_doctype_has_a_nullable_state_column() {
 }
 
 #[tokio::test]
+async fn edit_roles_apply_to_drafts_only() {
+    let w = world().await;
+    let doc = w.insert("a", &system()).await;
+    let doc = w.walk(doc, &["Send", "Approve"]).await;
+    assert_eq!(doc.docstatus, Some(DocStatus::Submitted));
+    // A stale state (a workflow edited after the document was written) must not block an
+    // allow_on_submit update: Pending has edit_roles, but the document is not a draft.
+    w.db.exec(&format!(
+        "UPDATE doc_order SET workflow_state = 'Pending' WHERE name = '{}'",
+        doc.name
+    ))
+    .await;
+    let mut client = w.db.pool.get().await.unwrap();
+    let updated = update(
+        &mut **client,
+        &w.registry,
+        "order",
+        &doc.name,
+        doc.version,
+        &set("remarks", text("late note")),
+        &user("cleo", &["Clerk"]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.values["remarks"], text("late note"));
+}
+
+#[tokio::test]
+async fn available_transitions_skip_those_the_docstatus_disagrees_with() {
+    let w = world().await;
+    let doc = w.insert("a", &system()).await;
+    let doc = w.walk(doc, &["Send"]).await;
+    let (_, before) = w.actions(&doc.name, system()).await.unwrap();
+    assert_eq!(before, ["Reject", "Approve"]);
+    // The stored docstatus disagrees with the state Pending (draft): `transition` would refuse
+    // these, so they are not offered.
+    w.db.exec(&format!(
+        "UPDATE doc_order SET docstatus = 1 WHERE name = '{}'",
+        doc.name
+    ))
+    .await;
+    let (state, after) = w.actions(&doc.name, system()).await.unwrap();
+    assert_eq!(state.as_deref(), Some("Pending"));
+    assert!(after.is_empty(), "{after:?}");
+}
+
+#[tokio::test]
+async fn deleting_removes_the_log_rows_also_after_the_workflow_was_removed() {
+    let w = world().await;
+    let doc = w.insert("a", &system()).await;
+    let doc = w.walk(doc, &["Send", "Reject"]).await;
+    assert_eq!(w.log_rows().await.len(), 2);
+    let plain = registry(&[&order_without_workflow()]);
+    let mut client = w.db.pool.get().await.unwrap();
+    delete(
+        &mut **client,
+        &plain,
+        "order",
+        &doc.name,
+        doc.version,
+        &system(),
+    )
+    .await
+    .unwrap();
+    drop(client);
+    assert!(w.log_rows().await.is_empty());
+}
+
+#[tokio::test]
 async fn removing_the_workflow_keeps_the_column_and_its_data_with_a_warning() {
     let w = world().await;
     let doc = w.insert("a", &system()).await;

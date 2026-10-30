@@ -254,6 +254,14 @@ pub async fn available_transitions(
         None => Vec::new(),
         Some(state) => workflow
             .transitions_from(state)
+            // A transition whose from-state disagrees with the stored docstatus (a workflow
+            // edited after the document was written) is refused by `transition`: not offered.
+            .filter(|t| {
+                !doctype.submittable
+                    || workflow
+                        .state(&t.from)
+                        .is_none_or(|from| stored.docstatus == Some(from.docstatus))
+            })
             .filter(|t| match transition_access(doctype, caller, t) {
                 Access::All => true,
                 Access::OwnerOnly => stored.owner == caller.name(),

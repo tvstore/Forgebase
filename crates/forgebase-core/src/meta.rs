@@ -1179,6 +1179,8 @@ pub const WORKFLOW_COLUMN: &str = "workflow_state";
 fn check_workflow_name(kind: &'static str, name: &str, errors: &mut Vec<DefinitionError>) {
     let reason = if name.trim().is_empty() {
         "must not be empty"
+    } else if name.trim() != name {
+        "must not start or end with whitespace"
     } else if name.chars().count() > MAX_NAME_LEN {
         "is longer than 64 characters"
     } else if name.contains('\0') {
