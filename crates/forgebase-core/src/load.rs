@@ -2,11 +2,13 @@
 
 use serde::Deserialize;
 
+use crate::document::DocStatus;
 use crate::meta::{
     DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming, humanize,
 };
 use crate::permission::PermissionRule;
 use crate::series::SeriesPattern;
+use crate::workflow::{StateStyle, Transition, Workflow, WorkflowState};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +27,89 @@ struct RawDocType {
     permissions: Vec<RawPermission>,
     title_field: Option<String>,
     list_fields: Option<Vec<String>>,
+    workflow: Option<RawWorkflow>,
+}
+
+/// The `[workflow]` table: `[[workflow.states]]` and `[[workflow.transitions]]`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkflow {
+    #[serde(default)]
+    states: Vec<RawState>,
+    #[serde(default)]
+    transitions: Vec<RawTransition>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawState {
+    name: String,
+    /// Kept as an integer so a value other than 0, 1 and 2 gets a clear message.
+    docstatus: i64,
+    style: Option<String>,
+    #[serde(default)]
+    edit_roles: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTransition {
+    action: String,
+    from: String,
+    to: String,
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
+/// Converts the workflow. A docstatus or style that is not valid is reported and replaced by a
+/// placeholder (draft, neutral), so the other checks still run without a second, derived error.
+fn convert_workflow(raw: RawWorkflow, errors: &mut Vec<DefinitionError>) -> Workflow {
+    let states = raw
+        .states
+        .into_iter()
+        .map(|state| {
+            let docstatus = i16::try_from(state.docstatus)
+                .ok()
+                .and_then(DocStatus::from_i16)
+                .unwrap_or_else(|| {
+                    errors.push(DefinitionError::WorkflowInvalidDocStatus {
+                        state: state.name.clone(),
+                        found: state.docstatus,
+                    });
+                    DocStatus::Draft
+                });
+            let style = match state.style {
+                None => StateStyle::default(),
+                Some(found) => StateStyle::from_name(&found).unwrap_or_else(|| {
+                    errors.push(DefinitionError::WorkflowUnknownStyle {
+                        state: state.name.clone(),
+                        found,
+                    });
+                    StateStyle::default()
+                }),
+            };
+            WorkflowState {
+                name: state.name,
+                docstatus,
+                style,
+                edit_roles: state.edit_roles,
+            }
+        })
+        .collect();
+    let transitions = raw
+        .transitions
+        .into_iter()
+        .map(|t| Transition {
+            action: t.action,
+            from: t.from,
+            to: t.to,
+            roles: t.roles,
+        })
+        .collect();
+    Workflow {
+        states,
+        transitions,
+    }
 }
 
 /// A `[[permissions]]` entry; every right defaults to false.
@@ -164,6 +249,7 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         permissions: raw.permissions.into_iter().map(Into::into).collect(),
         title_field: raw.title_field,
         list_fields: raw.list_fields,
+        workflow: raw.workflow.map(|w| convert_workflow(w, &mut errors)),
     };
     errors.extend(doctype.check(&failed));
     if errors.is_empty() {
@@ -1098,5 +1184,512 @@ type = "date"
             vec![DefinitionError::ChildWithPermissions]
         );
         assert!(from_toml_str(child).is_ok());
+    }
+
+    // ---- [workflow] (M8.1) ----
+
+    const ORDER: &str = "name = \"order\"\nlabel = \"O\"\nsubmittable = true\n";
+
+    /// A valid workflow over a submittable DocType: Draft -> Pending -> Approved -> Cancelled,
+    /// with a way back from Pending to Draft.
+    const WORKFLOW: &str = r#"
+[workflow]
+[[workflow.states]]
+name = "Draft"
+docstatus = 0
+[[workflow.states]]
+name = "Pending"
+docstatus = 0
+style = "warning"
+edit_roles = ["Manager"]
+[[workflow.states]]
+name = "Approved"
+docstatus = 1
+style = "success"
+[[workflow.states]]
+name = "Cancelled"
+docstatus = 2
+style = "danger"
+[[workflow.transitions]]
+action = "Send"
+from = "Draft"
+to = "Pending"
+roles = ["Clerk"]
+[[workflow.transitions]]
+action = "Reject"
+from = "Pending"
+to = "Draft"
+roles = ["Manager", "Clerk"]
+[[workflow.transitions]]
+action = "Approve"
+from = "Pending"
+to = "Approved"
+roles = ["Manager"]
+[[workflow.transitions]]
+action = "Cancel"
+from = "Approved"
+to = "Cancelled"
+roles = ["Manager"]
+"#;
+
+    fn with_workflow(doctype: &str, workflow: &str) -> String {
+        format!("{doctype}{workflow}")
+    }
+
+    /// The valid workflow with `from` replaced by `to` (it must occur).
+    fn edited(from: &str, to: &str) -> String {
+        assert!(WORKFLOW.contains(from), "{from}");
+        with_workflow(ORDER, &WORKFLOW.replacen(from, to, 1))
+    }
+
+    #[test]
+    fn parses_a_valid_workflow() {
+        let doctype = from_toml_str(&with_workflow(ORDER, WORKFLOW)).unwrap();
+        let workflow = doctype.workflow.expect("workflow");
+        let states: Vec<_> = workflow
+            .states
+            .iter()
+            .map(|s| (s.name.as_str(), s.docstatus.as_i16(), s.style.name()))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("Draft", 0, "neutral"),
+                ("Pending", 0, "warning"),
+                ("Approved", 1, "success"),
+                ("Cancelled", 2, "danger"),
+            ]
+        );
+        assert_eq!(workflow.states[1].edit_roles, ["Manager"]);
+        assert!(workflow.states[0].edit_roles.is_empty());
+        assert_eq!(workflow.transitions.len(), 4);
+        let reject = &workflow.transitions[1];
+        assert_eq!(
+            (
+                &*reject.action,
+                &*reject.from,
+                &*reject.to,
+                &reject.roles[..]
+            ),
+            (
+                "Reject",
+                "Pending",
+                "Draft",
+                &["Manager".to_owned(), "Clerk".to_owned()][..]
+            )
+        );
+        // No `[workflow]` means none, and a non-submittable DocType may have a draft-only one.
+        assert!(from_toml_str(ORDER).unwrap().workflow.is_none());
+        let drafts = r#"name = "t"
+label = "T"
+[workflow]
+[[workflow.states]]
+name = "Open"
+docstatus = 0
+[[workflow.states]]
+name = "Closed"
+docstatus = 0
+[[workflow.transitions]]
+action = "Close"
+from = "Open"
+to = "Closed"
+roles = ["A"]
+"#;
+        assert!(from_toml_str(drafts).unwrap().workflow.is_some());
+    }
+
+    #[test]
+    fn workflow_keys_are_strict() {
+        for (text, what) in [
+            (
+                edited("style = \"warning\"", "colour = \"red\""),
+                "state key",
+            ),
+            (
+                edited("roles = [\"Clerk\"]", "roles = [\"Clerk\"]\nextra = 1"),
+                "transition key",
+            ),
+            (
+                with_workflow(ORDER, "[workflow]\nverb = 1\n"),
+                "workflow key",
+            ),
+            (
+                with_workflow(ORDER, "[workflow]\n[[workflow.states]]\ndocstatus = 0\n"),
+                "state without a name",
+            ),
+            (
+                with_workflow(ORDER, "[workflow]\n[[workflow.states]]\nname = \"A\"\n"),
+                "state without a docstatus",
+            ),
+            (
+                edited("action = \"Send\"", "action = 5"),
+                "action of the wrong type",
+            ),
+        ] {
+            assert!(
+                matches!(from_toml_str(&text), Err(MetaError::Parse(_))),
+                "{what}: {:?}",
+                from_toml_str(&text)
+            );
+        }
+    }
+
+    fn workflow_errors(text: &str) -> Vec<DefinitionError> {
+        invalid(text)
+    }
+
+    #[test]
+    fn a_workflow_on_a_child_doctype_is_refused() {
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\n";
+        assert_eq!(
+            workflow_errors(&with_workflow(child, WORKFLOW)),
+            vec![DefinitionError::ChildWithWorkflow]
+        );
+    }
+
+    #[test]
+    fn a_workflow_needs_states_and_a_draft_initial_state() {
+        assert_eq!(
+            workflow_errors(&with_workflow(ORDER, "[workflow]\n")),
+            vec![DefinitionError::WorkflowNoStates]
+        );
+        let not_draft = r#"
+[workflow]
+[[workflow.states]]
+name = "Done"
+docstatus = 1
+"#;
+        assert_eq!(
+            workflow_errors(&with_workflow(ORDER, not_draft)),
+            vec![DefinitionError::WorkflowInitialNotDraft {
+                state: "Done".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn state_names_are_checked() {
+        for (name, reason) in [
+            ("", "must not be empty"),
+            ("   ", "must not be empty"),
+            (&"x".repeat(65), "is longer than 64 characters"),
+        ] {
+            let text = edited("name = \"Cancelled\"", &format!("name = \"{name}\""));
+            let errors = workflow_errors(&text);
+            assert!(
+                errors.contains(&DefinitionError::WorkflowName {
+                    kind: "state",
+                    name: name.to_owned(),
+                    reason
+                }),
+                "{errors:?}"
+            );
+        }
+        // The limit is 64 characters, not bytes, and exactly 64 is fine.
+        let long = "é".repeat(64);
+        let ok = edited("name = \"Cancelled\"", &format!("name = \"{long}\""));
+        let ok = ok.replace("to = \"Cancelled\"", &format!("to = \"{long}\""));
+        assert!(from_toml_str(&ok).is_ok());
+        // Names are case-sensitive: `draft` and `Draft` are two states.
+        let ok = edited("name = \"Cancelled\"", "name = \"draft\"")
+            .replace("to = \"Cancelled\"", "to = \"draft\"");
+        assert!(from_toml_str(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_state_name_is_unique() {
+        let text = edited("name = \"Cancelled\"", "name = \"Pending\"")
+            .replace("to = \"Cancelled\"", "to = \"Pending\"");
+        let errors = workflow_errors(&text);
+        assert!(
+            errors.contains(&DefinitionError::WorkflowDuplicateState {
+                state: "Pending".into()
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn docstatus_rules_of_states() {
+        // Not 0, 1 or 2. The state is then a draft in the other checks, so a move into it may
+        // be reported as well.
+        let errors = workflow_errors(&edited(
+            "name = \"Cancelled\"\ndocstatus = 2",
+            "name = \"Cancelled\"\ndocstatus = 3",
+        ));
+        assert_eq!(
+            errors[0],
+            DefinitionError::WorkflowInvalidDocStatus {
+                state: "Cancelled".into(),
+                found: 3
+            }
+        );
+        // 1 and 2 need a submittable DocType.
+        let plain = with_workflow("name = \"order\"\nlabel = \"O\"\n", WORKFLOW);
+        let errors = workflow_errors(&plain);
+        assert!(
+            errors.contains(&DefinitionError::WorkflowStateNeedsSubmittable {
+                state: "Approved".into(),
+                docstatus: 1
+            })
+        );
+        assert!(
+            errors.contains(&DefinitionError::WorkflowStateNeedsSubmittable {
+                state: "Cancelled".into(),
+                docstatus: 2
+            })
+        );
+        // An unknown style.
+        assert_eq!(
+            workflow_errors(&edited("style = \"warning\"", "style = \"red\"")),
+            vec![DefinitionError::WorkflowUnknownStyle {
+                state: "Pending".into(),
+                found: "red".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn edit_roles_are_for_drafts_and_valid_role_names() {
+        assert_eq!(
+            workflow_errors(&edited(
+                "style = \"success\"",
+                "style = \"success\"\nedit_roles = [\"Manager\"]"
+            )),
+            vec![DefinitionError::WorkflowEditRolesNotDraft {
+                state: "Approved".into()
+            }]
+        );
+        let errors = workflow_errors(&edited(
+            "edit_roles = [\"Manager\"]",
+            "edit_roles = [\"Manager\", \" \"]",
+        ));
+        assert_eq!(
+            errors,
+            vec![DefinitionError::WorkflowInvalidRole {
+                place: "state `Pending` edit_roles".into(),
+                role: " ".into(),
+                reason: "must not be blank"
+            }]
+        );
+    }
+
+    #[test]
+    fn transition_endpoints_must_be_states() {
+        let errors = workflow_errors(&edited("from = \"Draft\"", "from = \"Nowhere\""));
+        assert!(errors.contains(&DefinitionError::WorkflowUnknownState {
+            action: "Send".into(),
+            from: "Nowhere".into(),
+            key: "from",
+            state: "Nowhere".into()
+        }));
+        let errors = workflow_errors(&edited("to = \"Pending\"", "to = \"Nowhere\""));
+        assert!(errors.contains(&DefinitionError::WorkflowUnknownState {
+            action: "Send".into(),
+            from: "Draft".into(),
+            key: "to",
+            state: "Nowhere".into()
+        }));
+    }
+
+    #[test]
+    fn actions_are_checked_and_unique_per_from_state() {
+        for (action, reason) in [
+            ("", "must not be empty"),
+            (&"a".repeat(65), "is longer than 64 characters"),
+        ] {
+            let errors = workflow_errors(&edited(
+                "action = \"Send\"",
+                &format!("action = \"{action}\""),
+            ));
+            assert_eq!(
+                errors,
+                vec![DefinitionError::WorkflowName {
+                    kind: "action",
+                    name: action.to_owned(),
+                    reason
+                }]
+            );
+        }
+        // The same action from the same state twice is refused; from another state it is fine
+        // (`Reject` and `Approve` could both be called `Decide` only from different states).
+        let twice = WORKFLOW.replacen(
+            "action = \"Approve\"\nfrom = \"Pending\"",
+            "action = \"Reject\"\nfrom = \"Pending\"",
+            1,
+        );
+        assert_eq!(
+            workflow_errors(&with_workflow(ORDER, &twice)),
+            vec![DefinitionError::WorkflowDuplicateAction {
+                action: "Reject".into(),
+                from: "Pending".into()
+            }]
+        );
+        assert!(from_toml_str(&edited("action = \"Cancel\"", "action = \"Send\"")).is_ok());
+    }
+
+    #[test]
+    fn transition_roles_are_required_valid_and_unique() {
+        assert_eq!(
+            workflow_errors(&edited("roles = [\"Clerk\"]", "roles = []")),
+            vec![DefinitionError::WorkflowNoRoles {
+                action: "Send".into(),
+                from: "Draft".into()
+            }]
+        );
+        // Missing `roles` is the same as empty.
+        assert_eq!(
+            workflow_errors(&edited("roles = [\"Clerk\"]\n", "")),
+            vec![DefinitionError::WorkflowNoRoles {
+                action: "Send".into(),
+                from: "Draft".into()
+            }]
+        );
+        assert_eq!(
+            workflow_errors(&edited("roles = [\"Clerk\"]", "roles = [\"\"]")),
+            vec![DefinitionError::WorkflowInvalidRole {
+                place: "transition `Send` from `Draft`".into(),
+                role: String::new(),
+                reason: "must be 1 to 140 characters"
+            }]
+        );
+        assert_eq!(
+            workflow_errors(&edited(
+                "roles = [\"Clerk\"]",
+                "roles = [\"Clerk\", \"Clerk\"]"
+            )),
+            vec![DefinitionError::WorkflowDuplicateRole {
+                action: "Send".into(),
+                from: "Draft".into(),
+                role: "Clerk".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_transition_must_change_the_state_and_make_an_allowed_move() {
+        assert_eq!(
+            workflow_errors(&edited("to = \"Pending\"", "to = \"Draft\"")),
+            vec![
+                DefinitionError::WorkflowSelfTransition {
+                    action: "Send".into(),
+                    state: "Draft".into()
+                },
+                // Pending is now only reachable through... nothing.
+                DefinitionError::WorkflowUnreachableState {
+                    state: "Pending".into()
+                },
+                DefinitionError::WorkflowUnreachableState {
+                    state: "Approved".into()
+                },
+                DefinitionError::WorkflowUnreachableState {
+                    state: "Cancelled".into()
+                },
+            ]
+        );
+        // Draft to cancelled (0 to 2), submitted back to draft (1 to 0) and anything out of a
+        // cancelled state are refused.
+        let bad =
+            |from: &str, to: &str, from_docstatus, to_docstatus| DefinitionError::WorkflowBadMove {
+                action: "X".into(),
+                from: from.into(),
+                to: to.into(),
+                from_docstatus,
+                to_docstatus,
+            };
+        for (from, to, a, b) in [
+            ("Draft", "Cancelled", 0, 2),
+            ("Approved", "Draft", 1, 0),
+            ("Cancelled", "Approved", 2, 1),
+            ("Cancelled", "Draft", 2, 0),
+        ] {
+            let extra = format!(
+                "[[workflow.transitions]]\naction = \"X\"\nfrom = \"{from}\"\nto = \"{to}\"\nroles = [\"A\"]\n"
+            );
+            assert_eq!(
+                workflow_errors(&with_workflow(ORDER, &format!("{WORKFLOW}{extra}"))),
+                vec![bad(from, to, a, b)],
+                "{from} to {to}"
+            );
+        }
+        // 0 to 0, 0 to 1, 1 to 1 and 1 to 2 are the allowed moves.
+        let extra = "[[workflow.transitions]]\naction = \"Note\"\nfrom = \"Approved\"\nto = \"Approved2\"\nroles = [\"A\"]\n\
+                     [[workflow.states]]\nname = \"Approved2\"\ndocstatus = 1\n";
+        // (the state table must come before transitions in TOML order of definition only for
+        // readability: arrays of tables may be written in any order)
+        assert!(from_toml_str(&with_workflow(ORDER, &format!("{WORKFLOW}{extra}"))).is_ok());
+    }
+
+    #[test]
+    fn every_state_must_be_reachable_from_the_initial_state() {
+        let orphan = format!("{WORKFLOW}[[workflow.states]]\nname = \"Orphan\"\ndocstatus = 0\n");
+        assert_eq!(
+            workflow_errors(&with_workflow(ORDER, &orphan)),
+            vec![DefinitionError::WorkflowUnreachableState {
+                state: "Orphan".into()
+            }]
+        );
+        // A transition out of the orphan does not make it reachable.
+        let island = format!(
+            "{orphan}[[workflow.transitions]]\naction = \"Go\"\nfrom = \"Orphan\"\nto = \"Draft\"\nroles = [\"A\"]\n"
+        );
+        assert_eq!(
+            workflow_errors(&with_workflow(ORDER, &island)),
+            vec![DefinitionError::WorkflowUnreachableState {
+                state: "Orphan".into()
+            }]
+        );
+        // The order of states does not matter for reachability, only for the initial state.
+        let late = format!(
+            "{WORKFLOW}[[workflow.states]]\nname = \"Late\"\ndocstatus = 0\n\
+             [[workflow.transitions]]\naction = \"Later\"\nfrom = \"Draft\"\nto = \"Late\"\nroles = [\"A\"]\n"
+        );
+        assert!(from_toml_str(&with_workflow(ORDER, &late)).is_ok());
+    }
+
+    #[test]
+    fn a_field_cannot_be_named_like_the_state_column() {
+        let field = "[[fields]]\nname = \"workflow_state\"\ntype = \"data\"\n";
+        assert_eq!(
+            workflow_errors(&with_workflow(&format!("{ORDER}{field}"), WORKFLOW)),
+            vec![DefinitionError::WorkflowStateFieldName]
+        );
+        // Without a workflow the name is an ordinary field name.
+        assert!(from_toml_str(&format!("{ORDER}{field}")).is_ok());
+    }
+
+    #[test]
+    fn all_workflow_errors_are_reported_together_with_the_others() {
+        let text = format!(
+            "name = \"Order\"\nlabel = \"\"\n{}",
+            r#"
+[workflow]
+[[workflow.states]]
+name = "A"
+docstatus = 1
+[[workflow.transitions]]
+action = "Go"
+from = "A"
+to = "Nowhere"
+"#
+        );
+        let errors = workflow_errors(&text);
+        assert!(errors.contains(&DefinitionError::EmptyLabel), "{errors:?}");
+        assert!(
+            errors.contains(&DefinitionError::WorkflowInitialNotDraft { state: "A".into() }),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, DefinitionError::WorkflowNoRoles { .. })),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, DefinitionError::WorkflowUnknownState { .. })),
+            "{errors:?}"
+        );
     }
 }

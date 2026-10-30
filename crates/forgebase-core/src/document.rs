@@ -478,6 +478,7 @@ mod tests {
             permissions: vec![],
             title_field: None,
             list_fields: None,
+            workflow: None,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, true),
                 f("notes", FieldType::Text, false),
@@ -863,6 +864,7 @@ mod tests {
             permissions: vec![],
             title_field: None,
             list_fields: None,
+            workflow: None,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, false),
                 f(
@@ -883,6 +885,7 @@ mod tests {
             permissions: vec![],
             title_field: None,
             list_fields: None,
+            workflow: None,
             fields: vec![
                 f("qty", FieldType::Int, true),
                 f("note", FieldType::Data { max_length: 3 }, false),

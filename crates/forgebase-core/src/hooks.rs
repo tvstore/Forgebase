@@ -23,6 +23,23 @@
 //! | submit | lock and load the stored document (as above), docstatus check (draft only), `validate`, `before_submit`, framework validation of the whole document, Link resolution, write with docstatus 1 |
 //! | cancel | lock and load the stored document (as above), docstatus check (submitted only), `before_cancel`, write with docstatus 2 |
 //! | amend | lock and load the cancelled document (as above), docstatus check (cancelled only, not amended yet), then the **insert** pipeline on a copy of it: `before_insert`, `validate`, framework validation, Link resolution, naming (the amended name), write as a draft |
+//! | transition | lock and load the stored document (as above), find the transition from its state, check the right and the role, `before_transition`, then the pipeline of the docstatus move (below), write the new state and the log row |
+//!
+//! A **transition** (M8.1, ADR 0015) exists only for a DocType with a `[workflow]`. After
+//! `before_transition` (with [`Operation::Transition`]; the hook sees the transition in
+//! [`HookContext::transition`]) it continues like the operation it stands for:
+//!
+//! | Move | After `before_transition` |
+//! |---|---|
+//! | draft to draft | `validate` ([`Operation::Transition`]), framework validation of the whole document, Link resolution, write |
+//! | draft to submitted | the **submit** pipeline: `validate` and `before_submit` ([`Operation::Submit`]), framework validation, Link resolution, write with docstatus 1 |
+//! | submitted to submitted | like an update of a submitted document: `validate` ([`Operation::Transition`]), only `allow_on_submit` fields may differ, framework validation, write |
+//! | submitted to cancelled | the **cancel** pipeline: `before_cancel` ([`Operation::Cancel`]), write with docstatus 2 |
+//!
+//! On a DocType with a workflow plain submit and cancel are refused, so the submit and cancel
+//! hooks run for transitions only. In a submitted-to-submitted or submitted-to-cancelled
+//! transition `before_transition` may change `allow_on_submit` fields only; any other change is
+//! refused with `DbError::FieldLocked`.
 //!
 //! **Permissions** come first (M3.2, ADR 0011): `forgebase-db` checks the caller's rights before
 //! the first step, and in the "lock and load" steps a document the caller cannot read is "not
@@ -203,6 +220,38 @@ pub enum Operation {
     Cancel,
     /// A cancelled document is being amended: a new draft is created from a copy of it.
     Amend,
+    /// A document of a DocType with a workflow is taking a transition (M8.1, ADR 0015). The
+    /// `before_transition` hook runs for it, and so do the `validate` hooks of a move that
+    /// does not submit or cancel; [`HookContext::transition`] says which transition. The
+    /// hooks of a move that submits or cancels run with [`Operation::Submit`] or
+    /// [`Operation::Cancel`].
+    Transition,
+}
+
+/// The transition a hook runs for, see [`HookContext::transition`].
+///
+/// `#[non_exhaustive]`: build one with [`TransitionInfo::new`] (in a test that calls a hook
+/// directly); the fields are public to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TransitionInfo {
+    /// The action, as written in the workflow (the label of the button).
+    pub action: String,
+    /// The state the document is in.
+    pub from: String,
+    /// The state the document will be in.
+    pub to: String,
+}
+
+impl TransitionInfo {
+    /// The transition `action` from state `from` to state `to`.
+    pub fn new(action: impl Into<String>, from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            action: action.into(),
+            from: from.into(),
+            to: to.into(),
+        }
+    }
 }
 
 /// What a hook is told about the operation, besides the document.
@@ -226,6 +275,8 @@ pub struct HookContext<'a> {
     pub actor: &'a str,
     /// The operation.
     pub operation: Operation,
+    /// The transition, for [`Operation::Transition`]; `None` for every other operation.
+    pub transition: Option<&'a TransitionInfo>,
     jobs: Option<&'a EnqueuedJobs>,
 }
 
@@ -234,6 +285,7 @@ impl PartialEq for HookContext<'_> {
         self.doctype == other.doctype
             && self.actor == other.actor
             && self.operation == other.operation
+            && self.transition == other.transition
             && match (self.jobs, other.jobs) {
                 (None, None) => true,
                 (Some(a), Some(b)) => std::ptr::eq(a, b),
@@ -252,8 +304,16 @@ impl<'a> HookContext<'a> {
             doctype,
             actor,
             operation,
+            transition: None,
             jobs: None,
         }
+    }
+
+    /// This context for the transition `transition`. The framework sets it for
+    /// [`Operation::Transition`]; an app's unit test of a `before_transition` hook uses it.
+    pub const fn with_transition(mut self, transition: &'a TransitionInfo) -> Self {
+        self.transition = Some(transition);
+        self
     }
 
     /// This context with a collector for the jobs a hook enqueues. The framework gives every
@@ -371,6 +431,28 @@ pub trait DocTypeHooks: Send + Sync {
         let _ = (ctx, doc);
         Ok(())
     }
+
+    /// Runs when a document of a DocType with a workflow takes a transition (M8.1, ADR 0015),
+    /// **before** the `validate`, `before_submit` and `before_cancel` hooks of the move. `ctx`
+    /// has [`Operation::Transition`] and [`HookContext::transition`] (the action and the two
+    /// states); the caller's right and role were checked before. `doc` is the **whole**
+    /// stored document and may be modified: for a draft-to-draft and a draft-to-submitted
+    /// transition the changes are validated and written with the new state; for a transition
+    /// from a submitted state only `allow_on_submit` fields may change (any other change is
+    /// refused with `DbError::FieldLocked`). Changing `doc.name` is ignored.
+    ///
+    /// This is where a condition on a transition is written, in Rust (the workflow file has
+    /// no expressions): return `Err` to veto it. Like every hook it is synchronous, has no
+    /// database access and may enqueue jobs (ADR 0013): a job exists if and only if the
+    /// transition committed, which is how an app notifies someone about it.
+    fn before_transition(
+        &self,
+        ctx: &HookContext<'_>,
+        doc: &mut Document,
+    ) -> Result<(), HookError> {
+        let _ = (ctx, doc);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -404,6 +486,23 @@ mod tests {
         let error = ctx.enqueue("crm.welcome", json!({})).expect_err("refused");
         assert!(error.message().contains("no job collector"), "{error}");
         assert_ne!(ctx, ctx.with_jobs(&EnqueuedJobs::new()));
+    }
+
+    #[test]
+    fn the_transition_is_part_of_the_context() {
+        let ctx = HookContext::new("order", "ann", Operation::Transition);
+        assert_eq!(ctx.transition, None);
+        let info = TransitionInfo::new("Approve", "Pending", "Approved");
+        let with = ctx.with_transition(&info);
+        assert_eq!(
+            with.transition.map(|t| (&*t.action, &*t.from, &*t.to)),
+            Some(("Approve", "Pending", "Approved"))
+        );
+        assert_ne!(ctx, with);
+        assert_eq!(
+            with,
+            ctx.with_transition(&TransitionInfo::new("Approve", "Pending", "Approved"))
+        );
     }
 
     #[test]
