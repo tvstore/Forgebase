@@ -1,4 +1,4 @@
-// The smoke test of the desk (M4.2, extended in UX.2 and UX.4): login -> home -> list -> search -> create
+// The smoke test of the desk (M4.2, extended in UX.2, UX.4 and UX.5): login -> home -> list -> search -> create
 // (with a child row) -> save (toast) -> edit -> submit (badge) -> the More menu on the example
 // `sales_order` DocType (submittable, naming series, a child table, a Link to `customer`), then a
 // user without the submit right. Home, the list and the form (a draft and a submitted order) are
@@ -15,7 +15,7 @@
 // Administrator, updated, deleted, a stale one), the Columns menu and the group-by summary panel.
 
 import { expect, test } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
 const PASSWORD = process.env.E2E_PASSWORD ?? 'e2e-test-password';
 const CUSTOMER = 'ada@example.com';
@@ -870,4 +870,80 @@ test('the Summary panel counts by status, follows the filters and a click on a g
   await expectLoaded(page);
   if (count <= 20) await expect(page.getByRole('status').filter({ hasText: `Showing 1\u2013${count}` })).toBeVisible();
   await expectNoHorizontalScroll(page, 'the list after a group was chosen');
+});
+
+/** What a keyboard user sees on the focused element: an outline of at least 2 px, or a box shadow. */
+async function focusIndicator(target: Locator): Promise<{ outline: boolean; shadow: boolean; text: string }> {
+  return target.evaluate((el) => {
+    const style = getComputedStyle(el);
+    const outline = style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) >= 2 && style.outlineColor !== 'rgba(0, 0, 0, 0)';
+    return { outline, shadow: style.boxShadow !== 'none', text: el.tagName + (el.getAttribute('aria-label') ?? el.textContent ?? '').slice(0, 30) };
+  });
+}
+
+/**
+ * Walks forward with the Tab key until each target (in page order) has the focus, and asserts that
+ * it shows an outline of at least 2 px (UX.5: the fills of the fields have no 3:1 border, so the
+ * keyboard focus must be clearly visible). `shadowOk` is for a control whose indicator is a shadow.
+ */
+async function expectKeyboardFocusVisible(page: Page, targets: Locator[], shadowOk = false): Promise<void> {
+  for (const target of targets) {
+    let found = false;
+    for (let i = 0; i < 150 && !found; i++) {
+      await page.keyboard.press('Tab');
+      found = await target.evaluate((el) => el === document.activeElement);
+    }
+    expect(found, 'Tab reaches the control').toBe(true);
+    await expect
+      .poll(async () => {
+        const seen = await focusIndicator(target);
+        return seen.outline || (shadowOk && seen.shadow);
+      }, { message: 'the focused control shows a focus indicator' })
+      .toBe(true);
+  }
+}
+
+test('keyboard focus is visible on the controls of a form, the list toolbar and the command bar (UX.5)', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await login(page, 'e2e_manager');
+
+  // A new sales order: a sidebar link, the primary Save, a text input, a textarea, a cell input and
+  // the secondary "Add row" button.
+  await page.goto('/desk/#/new/sales_order');
+  await expect(page.getByRole('heading', { name: 'New Sales Order', exact: true })).toBeFocused();
+  await page.getByRole('button', { name: 'Add row' }).click();
+  await expect(page.getByLabel('Description, row 1')).toBeFocused();
+  await page.getByRole('heading', { name: 'New Sales Order', exact: true }).focus();
+  await expectKeyboardFocusVisible(page, [
+    page.locator('.sidebar .side-link').first(),
+    page.getByRole('button', { name: 'Save', exact: true }),
+    page.getByLabel('Customer'),
+    page.getByLabel('Remarks'),
+    page.getByLabel('Description, row 1'),
+    page.getByRole('button', { name: 'Remove row 1' }),
+    page.getByRole('button', { name: 'Add row' }),
+  ]);
+
+  // The list toolbar: the search field, the secondary Filter button and, inside the panel, a select.
+  await page.goto('/desk/#/list/sales_order');
+  await page.getByRole('button', { name: 'Leave and discard' }).click(); // the form has an unsaved row
+  await expectLoaded(page);
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
+  await page.getByRole('button', { name: 'Add filter' }).click();
+  const search = page.getByRole('searchbox');
+  await search.focus();
+  await expectKeyboardFocusVisible(page, [
+    page.getByRole('button', { name: 'Filter', exact: true }),
+    page.locator('.filter-row select').first(),
+  ]);
+  await search.focus();
+  await expect.poll(async () => (await focusIndicator(search)).outline).toBe(true);
+
+  // The command bar: its input has no outline of its own; the row shows a navy bar (a box shadow).
+  await page.keyboard.press('Control+k');
+  const bar = page.getByRole('dialog', { name: 'Search or jump to' });
+  await expect(bar.getByRole('combobox')).toBeFocused();
+  await expect
+    .poll(async () => bar.locator('.command-input').evaluate((el) => getComputedStyle(el).boxShadow !== 'none'))
+    .toBe(true);
 });

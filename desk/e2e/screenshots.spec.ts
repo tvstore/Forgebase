@@ -4,7 +4,7 @@
 //   SCREENSHOTS=1 SCREENSHOT_DIR=/some/dir npx playwright test screenshots
 //
 // It adds a few sample documents (customers, and orders that are a draft, submitted and
-// cancelled, so that every status badge shows), then takes the login page, home, list, form (draft and
+// cancelled, so that every status badge shows), then takes the login page, home, list, form (draft, focused field and cell, error state, and
 // submitted), the cancel dialog and the command bar at 1280, 800 and 375 px (and the list at 320 px), and asserts that
 // no page scrolls sideways at those phone widths. M8.2 adds the workflow screens (workflow-*: a draft, a request
 // waiting for approval with its actions, the confirmation, an approved one with its history, and the list with
@@ -89,6 +89,7 @@ async function seed(page: Page): Promise<{ draft: string; submitted: string; can
 }
 
 test('screenshots of login, home, list and form', async ({ page }) => {
+  test.setTimeout(120_000); // many screenshots at three widths
   // ---- login (logged out) -------------------------------------------------------------
   for (const width of WIDTHS) {
     await page.setViewportSize({ width, height: 800 });
@@ -127,6 +128,23 @@ test('screenshots of login, home, list and form', async ({ page }) => {
     await expect(page.getByLabel('Description, row 1')).toBeVisible();
     await noSideScroll(page, `form at ${width}`);
     await snap(page, `${DIR}/form-${width}.png`);
+
+    // UX.5: a focused field (white, grey border, navy keyboard ring) and a focused child-table cell.
+    await page.getByLabel('Remarks').focus();
+    await snap(page, `${DIR}/form-focus-${width}.png`);
+    await page.getByLabel('Description, row 1').focus();
+    await snap(page, `${DIR}/form-cell-focus-${width}.png`);
+
+    // UX.5: the error state, a field and a child-table cell with a problem (an empty row, then Save).
+    await page.goto('/desk/#/new/sales_order');
+    await expect(page.getByRole('heading', { name: 'New Sales Order', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Add row' }).click();
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByRole('alert')).toBeVisible();
+    await noSideScroll(page, `form with errors at ${width}`);
+    await snap(page, `${DIR}/form-error-${width}.png`);
+    await page.goto('/desk/#/list/sales_order');
+    await page.getByRole('button', { name: 'Leave and discard' }).click(); // the new form has an unsaved row
 
     await page.goto(`/desk/#/form/sales_order/${encodeURIComponent(docs.submitted)}`);
     await expect(page.locator('.status-badge')).toHaveText('Submitted');

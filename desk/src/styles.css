@@ -1,11 +1,14 @@
 /* The desk stylesheet: Tailwind CSS v4, compiled at build time (ADR 0017) into one static file.
-   Corporate theme: navy (the logo banner's background) as the only accent, cool neutrals and no
+   Corporate theme: navy (the logo banner's background) as the only accent, neutral greys and no
    yellow (it lives only inside the logo mark). Inter (self-hosted, Latin subset) with the system
    font stack as the fallback, no external files (CSP). The tokens are in @theme below; the
    contrast ratios (WCAG AA) are in docs/blueprint/architecture.md, section 11.
 
-   UX.4 look: a light page, white cards with a hairline and a soft shadow, filled (grey) inputs with
-   a navy focus ring, pill badges with a status dot, compact type (13.5 px, tabular numbers).
+   UX.4 look: a light page, white cards, filled inputs, pill badges with a status dot, compact type
+   (13.5 px, tabular numbers). UX.5 ("soft neutral") refines it: a neutral grey scale instead of the
+   bluish slate, flat cards (a hairline, no shadow), borderless filled inputs that turn white on
+   focus (plus a navy ring for the keyboard), a bordered child-table grid with plain text-like
+   cells, and softer text greys (ADR 0017, UX.5).
    Motion is 150-200 ms CSS only (transitions and keyframes, CSP-safe) and is switched off as a
    whole under `prefers-reduced-motion` (end of this file).
 
@@ -38,26 +41,30 @@
   --color-primary-hover: #142046;
   --color-primary-50: #eef1f8;
 
-  /* Surfaces and lines */
-  --color-page: #f7f8fa;
+  /* Surfaces and lines: a neutral grey scale (UX.5) */
+  --color-page: #f8f8f8;
   --color-surface: #ffffff;
-  --color-line: #ebedf0; /* hairlines: cards, tables, dividers */
-  --color-line-strong: #e2e5e9;
-  --color-fill: #f3f4f6; /* filled inputs, hover */
-  --color-row: #fafbfc; /* a table row under the pointer */
-  --color-edge: #7a828f; /* borders of controls: 3:1 on white and on the fill is required */
+  --color-line: #ededed; /* card borders, the child-table grid, menus */
+  --color-divider: #f0f0f0; /* dividers inside a card, table row lines */
+  --color-line-strong: #e2e2e2; /* the border of a secondary button */
+  --color-fill: #f3f3f3; /* filled inputs, hover of a menu item */
+  --color-fill-hover: #ededed; /* a filled input under the pointer */
+  --color-row: #fafafa; /* a table row under the pointer */
+  --color-edge: #c7c7c7; /* the border of a focused input, the focused cell, an empty state */
 
-  /* Text. Muted is darker than the mockup's #7c838f (3.8:1 on white) to reach AA. */
-  --color-ink: #171a1f;
-  --color-ink-soft: #4a515c;
-  --color-muted: #5e6572;
+  /* Text. Body #383838, headings and strong values #171717, labels, hints and table captions #6b6b6b
+     (5.3:1 on white; #7c7c7c would be 4.2:1 and fails AA). */
+  --color-ink: #171717;
+  --color-ink-soft: #383838;
+  --color-muted: #6b6b6b;
 
   /* States */
   --color-danger: #b42318;
   --color-danger-hover: #8f1b12;
-  --color-danger-bg: #fdf0ef;
-  --color-badge-neutral: #eef0f2;
-  --color-badge-neutral-ink: #4a515c;
+  --color-danger-bg: #fef3f2;
+  --color-danger-edge: #fda29b; /* the border of a field with an error */
+  --color-badge-neutral: #f3f3f3;
+  --color-badge-neutral-ink: #525252;
   --color-badge-success: #e6f4ea;
   --color-badge-success-ink: #137333;
   --color-badge-warning: #fdf1dc;
@@ -66,7 +73,7 @@
   --color-badge-danger-ink: #9b2c20;
   --color-badge-info: #e6effb;
   --color-badge-info-ink: #1d4e9e;
-  --color-toast: #171a1f;
+  --color-toast: #171717;
   --color-toast-ok: #4ade80;
 
   --text-ui: 0.84375rem; /* 13.5 px */
@@ -74,10 +81,9 @@
   --text-xs: 0.75rem; /* 12 px */
 
   --radius-control: 0.5rem;
-  --radius-card: 0.75rem;
-  --shadow-card: 0 1px 2px rgb(16 24 40 / 4%), 0 1px 3px rgb(16 24 40 / 6%);
-  --shadow-button: 0 1px 2px rgb(16 24 40 / 6%);
-  --shadow-pop: 0 12px 32px rgb(16 24 40 / 12%);
+  --radius-card: 0.625rem; /* 10 px; cards have no shadow, menus, dialogs and the toast do */
+  --shadow-field: 0 1px 2px rgb(0 0 0 / 6%); /* a focused input */
+  --shadow-pop: 0 12px 32px rgb(0 0 0 / 12%);
 
   --breakpoint-xs: 30rem; /* 480 px */
 
@@ -122,7 +128,7 @@
 @layer base {
   html {
     font-family: var(--font-sans);
-    color: var(--color-ink);
+    color: var(--color-ink-soft);
     background: var(--color-page);
     /* A focused control is never hidden behind the top bar and the sticky page header. */
     scroll-padding-top: 10rem;
@@ -141,7 +147,7 @@
   }
 
   h2 {
-    @apply m-0 text-ui leading-tight font-semibold;
+    @apply m-0 text-ui leading-tight font-semibold text-ink;
   }
 
   p {
@@ -161,11 +167,27 @@
     cursor: pointer;
   }
 
-  /* Filled controls: a grey fill and a border that reaches 3:1 (WCAG 1.4.11), navy when focused. */
+  /* Filled controls (UX.5, "soft neutral"): a grey fill with a border of the same colour (so it is
+     invisible), a darker fill under the pointer, white with a grey border and a hair of shadow when
+     focused. The keyboard gets a navy ring on top (:focus-visible): the fill alone has no 3:1
+     boundary (WCAG 1.4.11, an owner-accepted trade-off, ADR 0017 UX.5), so every field has a label
+     above it and a visible focus. A field with an error is pink with a rose border. */
   input,
   select,
   textarea {
-    @apply min-h-[2.125rem] w-full max-w-full min-w-0 rounded-control border border-edge bg-fill px-3 py-1 text-ui text-ink transition-[border-color,box-shadow,background-color] duration-150;
+    @apply min-h-[2.125rem] w-full max-w-full min-w-0 rounded-control border border-fill bg-fill px-2.5 py-1 text-ui text-ink-soft transition-[border-color,box-shadow,background-color] duration-150;
+  }
+
+  input:hover:not(:focus, :disabled),
+  select:hover:not(:focus, :disabled),
+  textarea:hover:not(:focus, :disabled) {
+    @apply border-fill-hover bg-fill-hover;
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus {
+    @apply border-edge bg-surface shadow-(--shadow-field);
   }
 
   input[type='checkbox'] {
@@ -181,18 +203,34 @@
     color: var(--color-muted);
   }
 
+  /* The keyboard ring: navy at 60% is 4:1 on white and on the page, 2 px, right at the border. */
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible {
-    @apply border-primary bg-surface outline-2 outline-offset-0;
+    @apply outline-2 outline-offset-0 outline-primary/60;
   }
 
-  [aria-invalid='true'] {
-    @apply border-2 border-danger;
+  /* :not(:disabled) only raises the specificity above the hover rule, so the error stays visible. */
+  input[aria-invalid='true']:not(:disabled),
+  select[aria-invalid='true']:not(:disabled),
+  textarea[aria-invalid='true']:not(:disabled) {
+    @apply border-danger-edge bg-danger-bg;
+  }
+
+  input[aria-invalid='true']:focus,
+  select[aria-invalid='true']:focus,
+  textarea[aria-invalid='true']:focus {
+    @apply bg-surface;
+  }
+
+  input:disabled,
+  select:disabled,
+  textarea:disabled {
+    @apply cursor-not-allowed text-muted;
   }
 
   label {
-    @apply text-small font-medium text-ink-soft;
+    @apply text-small font-medium text-muted;
   }
 
   table {
@@ -201,7 +239,7 @@
 
   th,
   td {
-    @apply border-b border-line px-3.5 py-[0.6875rem] text-left align-middle text-ui tabular-nums;
+    @apply border-b border-divider px-3.5 py-[0.6875rem] text-left align-middle text-ui tabular-nums;
   }
 
   caption {
@@ -251,7 +289,7 @@
   /* ---------- Buttons ---------- */
 
   .btn {
-    @apply inline-flex min-h-[2.125rem] items-center justify-center gap-1.5 rounded-control border border-line-strong bg-surface px-3.5 py-1 text-ui leading-tight font-medium whitespace-nowrap text-ink no-underline shadow-(--shadow-button) transition-colors duration-150 hover:bg-fill hover:no-underline;
+    @apply inline-flex min-h-8 items-center justify-center gap-1.5 rounded-control border border-line-strong bg-surface px-3.5 py-1 text-ui leading-tight font-medium whitespace-nowrap text-ink-soft no-underline transition-colors duration-150 hover:bg-page hover:no-underline;
   }
 
   .btn-primary {
@@ -263,7 +301,7 @@
   }
 
   .btn-ghost {
-    @apply border-transparent bg-transparent shadow-none;
+    @apply border-transparent bg-transparent hover:bg-fill;
   }
 
   .btn-small {
@@ -291,7 +329,7 @@
   /* A read-only or locked value is plain text (a <dl> of label and value), not a greyed input:
      it lines up with the other labels and a screen reader still reads it with its label. */
   .readonly dt {
-    @apply text-small font-medium text-ink-soft;
+    @apply text-small font-medium text-muted;
   }
 
   .readonly dd {
@@ -362,7 +400,7 @@
   /* ---------- Cards ---------- */
 
   .card {
-    @apply min-w-0 rounded-card border border-line bg-surface p-5 shadow-(--shadow-card);
+    @apply min-w-0 rounded-card border border-line bg-surface p-5;
   }
 
   .card > h2,
@@ -654,7 +692,7 @@
   }
 
   .menu-list {
-    @apply absolute top-[calc(100%+0.25rem)] z-40 grid min-w-44 animate-menu-in rounded-card border border-line bg-surface p-1 text-ink shadow-(--shadow-pop);
+    @apply absolute top-[calc(100%+0.25rem)] z-40 grid min-w-44 animate-menu-in rounded-card border border-line bg-surface p-1 text-ink-soft shadow-(--shadow-pop);
     @apply max-h-[min(24rem,70vh)] max-w-[min(20rem,calc(100vw-2rem))] overflow-y-auto;
   }
 
@@ -667,7 +705,7 @@
   }
 
   .menu-item {
-    @apply rounded-control border-0 bg-transparent px-3 py-2 text-left text-ui text-ink transition-colors duration-150 hover:bg-fill;
+    @apply rounded-control border-0 bg-transparent px-3 py-2 text-left text-ui text-ink-soft transition-colors duration-150 hover:bg-fill;
   }
 
   .menu-item[aria-disabled='true'] {
@@ -688,7 +726,7 @@
   }
 
   .menu-sep {
-    @apply my-1 h-px bg-line;
+    @apply my-1 h-px bg-divider;
   }
 
   .menu-choice {
@@ -759,11 +797,11 @@
   }
 
   .doctype-list li {
-    @apply flex items-center justify-between gap-3 border-t border-line py-1.5 first:border-t-0;
+    @apply flex items-center justify-between gap-3 border-t border-divider py-1.5 first:border-t-0;
   }
 
   .doctype-link {
-    @apply inline-flex min-w-0 flex-1 items-center gap-2.5 py-1 font-medium text-ink no-underline hover:text-primary hover:underline;
+    @apply inline-flex min-w-0 flex-1 items-center gap-2.5 py-1 font-medium text-ink-soft no-underline hover:text-primary hover:underline;
   }
 
   .doctype-link > span {
@@ -780,11 +818,11 @@
   .list-card {
     /* Not overflow-hidden: the Views and Columns menus of the toolbar may reach below a short card.
        The first and last bars round their own corners instead. */
-    @apply min-w-0 rounded-card border border-line bg-surface shadow-(--shadow-card);
+    @apply min-w-0 rounded-card border border-line bg-surface;
   }
 
   .toolbar {
-    @apply flex flex-wrap items-center gap-2 rounded-t-card border-b border-line px-3.5 py-3;
+    @apply flex flex-wrap items-center gap-2 rounded-t-card border-b border-divider px-3.5 py-3;
   }
 
   .search-wrap {
@@ -835,7 +873,7 @@
   /* ---------- Group-by summary ---------- */
 
   .summary {
-    @apply border-b border-line bg-page px-3.5 py-3;
+    @apply border-b border-divider bg-page px-3.5 py-3;
   }
 
   .summary-head {
@@ -855,7 +893,7 @@
   }
 
   .summary-values legend {
-    @apply mb-1.5 p-0 text-small font-medium text-ink-soft;
+    @apply mb-1.5 p-0 text-small font-medium text-muted;
   }
 
   /* On a phone the field select has a row of its own (it is not truncated); the calculation and the remove button share the next. */
@@ -910,7 +948,7 @@
   }
 
   .filters {
-    @apply border-b border-line bg-page px-3.5 py-3;
+    @apply border-b border-divider bg-page px-3.5 py-3;
   }
 
   .filters fieldset {
@@ -918,7 +956,7 @@
   }
 
   .filters legend {
-    @apply mb-2 p-0 text-small font-semibold text-ink-soft;
+    @apply mb-2 p-0 text-small font-semibold text-muted;
   }
 
   .filter-row {
@@ -1008,7 +1046,7 @@
   }
 
   .paging {
-    @apply flex flex-wrap items-center gap-x-3 gap-y-2 rounded-b-card border-t border-line px-3.5 py-2.5 text-small text-muted;
+    @apply flex flex-wrap items-center gap-x-3 gap-y-2 rounded-b-card border-t border-divider px-3.5 py-2.5 text-small text-muted;
   }
 
   .empty {
@@ -1082,21 +1120,37 @@
     @apply mb-0 px-5 pt-4 pb-3;
   }
 
+  /* UX.5: the rows are one bordered grid inside the card (it still scrolls sideways on its own on a
+     phone); the rounded corners clip the header row. */
   .table-card .table-wrap {
-    @apply border-t border-line;
+    @apply mx-5 mb-3 rounded-control border border-line;
+  }
+
+  .table-card .table-wrap:last-child {
+    @apply mb-5; /* a read-only table has no "Add row" bar under it */
   }
 
   .table-card .table-foot {
-    @apply flex flex-wrap items-center gap-3 border-t border-line px-5 py-3;
+    @apply flex flex-wrap items-center gap-3 px-5 pb-5;
   }
 
   .table-card .table-empty {
-    @apply m-0 border-t border-line px-5 py-4;
+    @apply m-0 border-t border-divider px-5 py-4;
   }
 
-  .grid-table th,
+  /* The cells hold plain, text-like inputs (no box of their own): a transparent field that shows a
+     fill under the pointer and turns white with a grey outline when it is the active cell. A cell
+     has 2 px of padding so that the active cell floats inside its grid line. */
+  .grid-table th {
+    @apply px-3 py-2.5;
+  }
+
   .grid-table td {
-    @apply px-2.5 py-2;
+    @apply min-w-28 p-0.5 align-top;
+  }
+
+  .grid-table thead th {
+    @apply bg-page;
   }
 
   .grid-table thead th:first-child,
@@ -1104,12 +1158,8 @@
     @apply w-12 text-center font-normal text-muted;
   }
 
-  .grid-table td {
-    @apply min-w-28 align-top;
-  }
-
   .grid-table td.cell-readonly {
-    @apply align-middle font-medium wrap-anywhere text-ink;
+    @apply px-3 py-[0.6875rem] align-middle font-medium wrap-anywhere text-ink;
   }
 
   .grid-table td.cell-readonly.num {
@@ -1121,12 +1171,33 @@
   }
 
   .grid-table .remove-cell {
-    @apply w-[1%] min-w-0 whitespace-nowrap;
+    @apply w-[1%] min-w-0 px-2 pt-[0.4375rem] whitespace-nowrap;
   }
 
   .grid-table input,
   .grid-table select {
-    @apply min-h-[2.125rem];
+    @apply min-h-[2.375rem] rounded-md border-transparent bg-transparent px-2.5 shadow-none hover:border-transparent hover:bg-page;
+  }
+
+  /* The active cell: white, a 1.5 px grey outline inside the cell. The keyboard gets the navy ring
+     (a 2 px outline, as the other fields): the grey alone is not 3:1. */
+  .grid-table input:focus,
+  .grid-table select:focus {
+    @apply border-transparent bg-surface shadow-none outline-[1.5px] -outline-offset-[1.5px] outline-edge;
+  }
+
+  .grid-table input:focus-visible,
+  .grid-table select:focus-visible {
+    @apply outline-2 -outline-offset-2 outline-primary/60;
+  }
+
+  .grid-table input[aria-invalid='true']:not(:disabled),
+  .grid-table select[aria-invalid='true']:not(:disabled) {
+    @apply border-danger-edge bg-danger-bg;
+  }
+
+  .grid-table .field-error {
+    @apply px-2.5 pt-0.5 pb-1;
   }
 
   @media (max-width: 599px) {
@@ -1221,7 +1292,7 @@
 
   .dialog {
     /* m-auto! beats any spacing rule: a modal dialog is centred by its auto margins */
-    @apply m-auto! w-[min(28rem,calc(100vw-2rem))] rounded-card border-0 bg-surface p-6 text-ink shadow-(--shadow-pop);
+    @apply m-auto! w-[min(28rem,calc(100vw-2rem))] rounded-card border-0 bg-surface p-6 text-ink-soft shadow-(--shadow-pop);
   }
 
   .dialog[open] {
@@ -1230,7 +1301,7 @@
 
   .dialog::backdrop,
   .command::backdrop {
-    background: rgb(23 26 31 / 45%);
+    background: rgb(23 23 23 / 45%);
   }
 
   .dialog[open]::backdrop,
@@ -1257,7 +1328,7 @@
   /* ---------- Command bar ---------- */
 
   .command {
-    @apply mx-auto! mt-[10vh]! mb-0! w-[min(36rem,calc(100vw-2rem))] max-w-none overflow-hidden rounded-card border-0 bg-surface p-0 text-ink shadow-(--shadow-pop);
+    @apply mx-auto! mt-[10vh]! mb-0! w-[min(36rem,calc(100vw-2rem))] max-w-none overflow-hidden rounded-card border-0 bg-surface p-0 text-ink-soft shadow-(--shadow-pop);
   }
 
   .command[open] {
@@ -1265,7 +1336,7 @@
   }
 
   .command-input {
-    @apply flex items-center gap-2 border-b border-line px-4;
+    @apply flex items-center gap-2 border-b border-divider px-4;
   }
 
   /* The input has no outline of its own (it sits in this row); the row shows the focus with a
@@ -1308,7 +1379,7 @@
   }
 
   .command-option {
-    @apply flex cursor-pointer items-center gap-2.5 rounded-control px-2.5 py-2 text-ui text-ink;
+    @apply flex cursor-pointer items-center gap-2.5 rounded-control px-2.5 py-2 text-ui text-ink-soft;
   }
 
   .command-option[aria-selected='true'] {
