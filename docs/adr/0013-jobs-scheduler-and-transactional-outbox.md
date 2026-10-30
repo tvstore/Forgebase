@@ -52,7 +52,7 @@ These choices were made while implementing M6.2 and are reviewed with that chang
 
 **Where things live.** `forgebase-db::schedule` has the schedule values (`Spec`), the pure function `next_after`, the sync of the table and the tick. The SQL of the clean-up jobs is next to the code whose rules it must follow: `jobs::purge_finished`, `auth::purge_login_failures`, `auth::purge_sessions`. The `forgebase` crate has `Schedule`, `App::schedule`, the built-in handlers and the call of the tick in the worker loop.
 
-**The table (migration 0006).** `fb_schedule`: `name` (the full job name, primary key), `spec` (canonical text such as `every 15m`, `daily 02:00`, `weekly mon 02:00`, used to detect a changed schedule), `next_run_at`, `last_run_at`, `updated_at`. A partial index `fb_job (finished_at) WHERE status = 'done'` serves the purge of finished jobs.
+**The table (migration 0006).** `fb_schedule`: `name` (the full job name, primary key), `spec` (canonical text such as `every 15m`, `daily 02:00`, `weekly mon 02:00`, used to detect a changed schedule), `next_run_at`, `last_run_at`, `updated_at`. A partial index `fb_job (finished_at) WHERE status = 'done'` served the purge of finished jobs (replaced by `fb_job_finished_idx` in migration 0007, below).
 
 **Schedules.** `Schedule::every_minutes(n)` (1 to 1440), `daily_at(hour, minute)`, `weekly_on(weekday, hour, minute)`; all UTC. They store raw values; invalid ones (`n` of 0 or above 1440, an hour above 23, a minute above 59) are startup errors, like `JobOptions`. `App::schedule(job, schedule)` names a job of the **same app**; a job that app did not register, a second schedule for a job and an invalid schedule are startup errors. **Epoch alignment:** every N minutes ticks at the times where the minutes since 1970-01-01 00:00 UTC are divisible by N (every 15 is :00, :15, :30, :45; every 1440 is midnight UTC; 7 does not repeat each hour). This makes the ticks independent of when a worker or a schedule started. `next_after(schedule, t)` returns the first time strictly after `t`; it is a pure function with unit tests for the boundaries of minutes, days, months, years and the leap day.
 
@@ -74,7 +74,7 @@ These choices were made while implementing M6.2 and are reviewed with that chang
 
 | Job | Deletes | Schedule |
 |---|---|---|
-| `forgebase.purge_jobs` | `done` jobs finished more than 7 days ago | daily at 03:00 UTC |
+| `forgebase.purge_jobs` | `done` and `dead` jobs finished more than 7 days ago | daily at 03:00 UTC |
 | `forgebase.purge_login_failures` | `fb_login_failure` rows that no longer count or lock | every 60 minutes |
 | `forgebase.purge_sessions` | sessions `validate_session` would refuse as expired (`now() >= expires_at` or `now() >= last_seen_at + 24 h`) | every 60 minutes |
 
