@@ -4,7 +4,7 @@
 Reads one changed path per line on stdin and prints `key=value` lines for $GITHUB_OUTPUT:
 
   rust=true|false       a Rust job reads one of the paths (anything unknown counts as Rust)
-  desk=true|false       a path under desk/ other than a Markdown file
+  desk=true|false       a path under desk/ other than a Markdown file, or a DESK_ALSO path
   e2e=true|false        rust or desk
   docs_only=true|false  at least one path, and every path is documentation
   all=true|false        .github/ changed, or the event is schedule or workflow_dispatch
@@ -24,6 +24,9 @@ ALWAYS_ALL_EVENTS = {"schedule", "workflow_dispatch"}
 RUST_PREFIXES = ("crates/", "examples/", ".cargo/")
 RUST_FILES = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml"}
 DOC_FILES = {"AGENTS.md", "CHANGELOG.md", "LICENSE"}
+# Files outside desk/ that the desk reads (desk/src/icons.test.ts imports the first one). They
+# stay Rust and also run the desk job. Add a path here when a desk file imports from outside desk/.
+DESK_ALSO = {"crates/forgebase-core/src/doctype_icons.txt"}
 
 
 def classify_path(path):
@@ -49,7 +52,7 @@ def classify(paths, event=""):
         return {"rust": True, "desk": True, "e2e": True, "docs_only": False, "all": True}
     kinds = [classify_path(p) for p in paths if p.strip()]
     rust = "rust" in kinds
-    desk = "desk" in kinds
+    desk = "desk" in kinds or any(p.strip().removeprefix("./") in DESK_ALSO for p in paths)
     return {
         "rust": rust,
         "desk": desk,

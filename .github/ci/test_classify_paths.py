@@ -41,6 +41,11 @@ class ClassifyTest(unittest.TestCase):
     def test_crates_only(self):
         self.assertEqual(flags(["crates/forgebase-core/src/lib.rs"]), expect(rust=True, e2e=True))
 
+    def test_desk_also_file_runs_desk_and_rust(self):
+        # desk/src/icons.test.ts imports this file.
+        self.assertEqual(flags(["crates/forgebase-core/src/doctype_icons.txt"]),
+                         expect(rust=True, desk=True, e2e=True))
+
     def test_markdown_inside_crates_is_rust(self):
         # include_str! compiles this file into the binary.
         self.assertEqual(flags(["crates/forgebase/templates/app/README.md"]),

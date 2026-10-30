@@ -266,7 +266,7 @@ The owner looked at the desk after UX.4 and was happy with the UX but not with t
 
 ### CI cost (2026-10-30, "setuju C-1 sampai C-5"; information session)
 
-The private repository hit GitHub's usage limit. The owner: *"maaf saya suruh hapus karena repo private kena limit usage $12 lebih saya kena peringatan github"*, and approved the plan with *"setuju C-1 sampai C-5"*. Measured before the change: one run was 7 jobs and about 24 job-minutes (check 14.0, e2e 3.2, deny 2.3, app-template 2.1, sites 1.4, msrv 0.8, desk 0.5), about 121 runs in 2.2 days, no dependency cache. Behaviour of the checks is unchanged; only when and how they run.
+The private repository hit GitHub's usage limit. The owner: *"maaf saya suruh hapus karena repo private kena limit usage $12 lebih saya kena peringatan github"*, and approved the plan with *"setuju C-1 sampai C-5"*. Measured before the change: one run was 7 jobs and about 24 job-minutes (check 14.0, e2e 3.2, deny 2.3, app-template 2.1, sites 1.4, msrv 0.8, desk 0.5), about 121 runs in 2.2 days, no dependency cache. The checks themselves are unchanged; which ones run, and when, depends on the trigger and the changed paths.
 
 | Decision | Recorded in |
 |---|---|

@@ -58,14 +58,20 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           : > "$RUNNER_TEMP/changed.txt"
           if [ "$EVENT" = pull_request ]; then
             git -c core.quotepath=false diff --name-only --no-renames "$BASE...$HEAD" > "$RUNNER_TEMP/changed.txt"
             cat "$RUNNER_TEMP/changed.txt"
           fi
-          python3 .github/ci/classify-paths.py --event "$EVENT" < "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+          python3 .github/ci/classify-paths.py --event "$EVENT" < "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/outputs.txt"
+          # Fail closed: an empty or malformed result must fail the job, not skip every check.
+          cat "$RUNNER_TEMP/outputs.txt"
+          [ "$(cut -d= -f1 "$RUNNER_TEMP/outputs.txt" | paste -sd,)" = "rust,desk,e2e,docs_only,all" ]
+          [ "$(grep -cE '^[a-z0-9_]+=(true|false)$' "$RUNNER_TEMP/outputs.txt")" = 5 ]
+          cat "$RUNNER_TEMP/outputs.txt" >> "$GITHUB_OUTPUT"
 
   # Offline check of the relative links and anchors in the Markdown files (about 10 seconds).
   docs:
@@ -241,8 +247,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-msrv-deny-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-msrv-deny-
+          key: ${{ runner.os }}-msrv-deny-msrv1.97-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-deny-msrv1.97-
       - run: rustup toolchain install 1.97 --profile minimal
       - run: cargo +1.97 check --workspace --all-targets --all-features --locked
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
