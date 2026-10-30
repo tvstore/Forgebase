@@ -335,6 +335,8 @@ test('the recent documents of one user are not shown to the next user of the tab
   const name = decodeURIComponent(page.url().split('/').pop() ?? '');
 
   await expect(toast(page, 'Saved')).toBeVisible();
+  // The saved order is listed as recent once its form has loaded: wait for that, not for the toast.
+  await expect(page.locator('.doc-title-name')).toHaveText(name);
   const bar = page.getByRole('dialog', { name: 'Search or jump to' });
   await page.keyboard.press('Control+k');
   await expect(bar).toBeVisible();
