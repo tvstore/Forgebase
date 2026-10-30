@@ -58,7 +58,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
     <div>
       {rows.length > 0 ? (
         <div className="table-wrap" ref={wrap}>
-          <table>
+          <table className="grid-table">
             <caption className="visually-hidden">{field.label}</caption>
             <thead>
               <tr>
@@ -70,7 +70,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                   </th>
                 ))}
                 {readOnly ? null : (
-                  <th scope="col">
+                  <th scope="col" className="remove-cell">
                     <span className="visually-hidden">Remove</span>
                   </th>
                 )}
@@ -97,7 +97,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                           ariaLabel={`${c.label}, row ${index + 1}`}
                         />
                         {message ? (
-                          <p id={`${cellId}-error`} className="error field-error">
+                          <p id={`${cellId}-error`} className="field-error">
                             {message}
                           </p>
                         ) : null}
@@ -105,17 +105,18 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                     );
                   })}
                   {readOnly ? null : (
-                    <td>
+                    <td className="remove-cell">
                       <button
                         type="button"
-                        className="remove"
+                        className="btn btn-ghost btn-small remove"
+                        aria-label={`Remove row ${index + 1}`}
                         onClick={() => {
                           onChange(rows.filter((_, i) => i !== index));
                           const next = focusAfterRemove(index, rows.length);
                           pending.current = next.kind === 'add' ? { kind: 'add' } : { kind: 'remove', row: next.index };
                         }}
                       >
-                        Remove row {index + 1}
+                        Remove
                       </button>
                     </td>
                   )}
@@ -125,10 +126,10 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
           </table>
         </div>
       ) : (
-        <p>{readOnly ? 'No rows.' : 'No rows yet.'}</p>
+        <p className="hint">{readOnly ? 'No rows.' : 'No rows yet.'}</p>
       )}
       {tableError ? (
-        <p id={errorId} className="error field-error">
+        <p id={errorId} className="field-error">
           {tableError}
         </p>
       ) : null}
@@ -136,13 +137,14 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
         <button
           type="button"
           ref={addButton}
+          className="btn btn-small"
           aria-describedby={tableError ? errorId : undefined}
           onClick={() => {
             onChange([...rows, blankRow(columns)]);
             pending.current = { kind: 'cell', row: rows.length };
           }}
         >
-          Add row
+          <span aria-hidden="true">+ </span>Add row
         </button>
       )}
     </div>

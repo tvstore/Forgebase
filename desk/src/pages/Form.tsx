@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { isAddressable } from '../access';
 import { ApiError, getDocTypeMeta, getDocument } from '../api';
 import { DocumentForm } from '../components/DocumentForm';
+import { Skeleton } from '../components/Skeleton';
 import { listHref } from '../router';
 import type { DocTypeMeta, DocumentRow } from '../types';
 
@@ -51,37 +52,37 @@ export function Form({ doctype, docName, username }: Props) {
 
   if (!addressable) {
     return (
-      <main>
+      <div className="page">
         <h1>{doctype}</h1>
-        <p role="alert" className="error">
+        <p role="alert" className="alert">
           The document name {JSON.stringify(docName)} cannot be opened in the desk: a REST path cannot
           address a document named "." or "..".
         </p>
         <p>
           <a href={listHref(doctype)}>Back to the list</a>
         </p>
-      </main>
+      </div>
     );
   }
   if (load.status === 'loading') {
     return (
-      <main>
+      <div className="page" aria-busy="true">
         <h1>{docName ?? `New ${doctype}`}</h1>
-        <p>Loading...</p>
-      </main>
+        <Skeleton lines={6} />
+      </div>
     );
   }
   if (load.status === 'error') {
     return (
-      <main>
+      <div className="page">
         <h1>{docName ?? `New ${doctype}`}</h1>
-        <p role="alert" className="error">
+        <p role="alert" className="alert">
           {load.message}
         </p>
         <p>
           <a href={listHref(doctype)}>Back to the list</a>
         </p>
-      </main>
+      </div>
     );
   }
   return <DocumentForm meta={load.meta} initial={load.doc} username={username} />;

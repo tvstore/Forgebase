@@ -1,13 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { ApiError, getSession, logout, setUnauthenticatedHandler } from './api';
+import { ApiError, getMeta, getSession, logout, setUnauthenticatedHandler } from './api';
+import { Layout } from './components/Layout';
+import { Logo } from './components/Logo';
+import { ToastProvider } from './components/Toast';
 import { Form } from './pages/Form';
 import { Home } from './pages/Home';
 import { List } from './pages/List';
 import { Login } from './pages/Login';
 import { homeHref, loginHref, navigate, parseHash, useHash } from './router';
 import type { Route } from './router';
-import type { SessionInfo } from './types';
+import type { DocTypeSummary, SessionInfo } from './types';
+
+/** The DocTypes the user can read (sidebar and home page), loaded once after login. */
+export type DocTypes = { status: 'loading' } | { status: 'ready'; list: DocTypeSummary[] } | { status: 'error'; message: string };
 
 type Auth =
   | { status: 'loading' }
@@ -50,6 +56,27 @@ export function App() {
     if (wanted === 'app' && route.name === 'login') navigate(homeHref(), true);
   }, [wanted, route.name]);
 
+  const [doctypes, setDoctypes] = useState<DocTypes>({ status: 'loading' });
+  const loggedIn = auth.status === 'in';
+  useEffect(() => {
+    if (!loggedIn) return;
+    let cancelled = false;
+    getMeta().then(
+      (list) => {
+        if (!cancelled) setDoctypes({ status: 'ready', list });
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setDoctypes({ status: 'error', message: e instanceof ApiError ? e.message : 'Cannot reach the server.' });
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+      setDoctypes({ status: 'loading' });
+    };
+  }, [loggedIn]);
+
   const onLoggedIn = (session: SessionInfo) => {
     setAuth({ status: 'in', username: session.username });
     navigate(homeHref());
@@ -64,42 +91,42 @@ export function App() {
 
   if (auth.status === 'loading') {
     return (
-      <main>
+      <main className="splash">
+        <Logo size={40} />
         <p>Loading...</p>
       </main>
     );
   }
   if (auth.status === 'error') {
     return (
-      <main>
-        <p role="alert" className="error">
+      <main className="splash">
+        <Logo size={40} />
+        <p role="alert" className="alert">
           {auth.message}
         </p>
       </main>
     );
   }
-  if (auth.status === 'out') return <Login onLoggedIn={onLoggedIn} />;
 
   return (
-    <>
-      <header className="app-header">
-        <a className="brand" href={homeHref()}>
-          Forgebase Desk
-        </a>
-        <nav aria-label="Main">
-          <a href={homeHref()}>Home</a>
-        </nav>
-        <span className="user">{auth.username}</span>
-        <button type="button" onClick={onLogout}>
-          Log out
-        </button>
-      </header>
-      <Page route={route} username={auth.username} />
-    </>
+    <ToastProvider>
+      {auth.status === 'out' ? (
+        <Login onLoggedIn={onLoggedIn} />
+      ) : (
+        <Layout
+          username={auth.username}
+          route={route}
+          doctypes={doctypes.status === 'ready' ? doctypes.list : []}
+          onLogout={onLogout}
+        >
+          <Page route={route} username={auth.username} doctypes={doctypes} />
+        </Layout>
+      )}
+    </ToastProvider>
   );
 }
 
-function Page({ route, username }: { route: Route; username: string }) {
+function Page({ route, username, doctypes }: { route: Route; username: string; doctypes: DocTypes }) {
   switch (route.name) {
     case 'list':
       return <List key={route.doctype} doctype={route.doctype} params={route.params} />;
@@ -116,15 +143,15 @@ function Page({ route, username }: { route: Route; username: string }) {
       );
     case 'login': // being redirected to the home page
     case 'home':
-      return <Home />;
+      return <Home doctypes={doctypes} />;
     case 'notfound':
       return (
-        <main>
+        <div className="page">
           <h1>Not found</h1>
           <p>
             <a href={homeHref()}>Go to the home page</a>
           </p>
-        </main>
+        </div>
       );
   }
 }
