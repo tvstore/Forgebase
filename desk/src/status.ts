@@ -2,7 +2,7 @@
 
 import { docStatusLabel, docStatusOf } from './access';
 
-export type Tone = 'neutral' | 'success' | 'danger' | 'warning';
+export type Tone = 'neutral' | 'success' | 'danger' | 'warning' | 'info';
 
 export interface BadgeSpec {
   label: string;
