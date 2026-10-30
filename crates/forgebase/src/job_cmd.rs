@@ -10,24 +10,21 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::args::JobCommand;
+use crate::config::SiteContext;
 use crate::error::CliError;
 use crate::run::{read_data, write_stdout};
 
 /// How many characters of the last error `job list` shows.
 const ERROR_CHARS: usize = 40;
 
-pub(crate) async fn job(
-    url: &str,
-    registry: &Registry,
-    command: JobCommand,
-) -> Result<(), CliError> {
+pub(crate) async fn job(site: &SiteContext, command: JobCommand) -> Result<(), CliError> {
+    let registry: &Registry = &site.registry;
     // Read the payload before the database is touched.
     let payload = match &command {
         JobCommand::Enqueue { payload, .. } => Some(parse_payload(&read_data(payload)?)?),
         _ => None,
     };
-    let pool = forgebase_db::connect(url).await?;
-    let client = pool.get().await.map_err(DbError::from)?;
+    let client = site.pool.get().await.map_err(DbError::from)?;
     let client = &**client;
     match command {
         JobCommand::List {

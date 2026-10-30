@@ -12,12 +12,16 @@ use crate::compose::StartupError;
 /// Everything that can make a command fail.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    /// `FORGEBASE_DATABASE_URL` is missing or empty.
+    /// `FORGEBASE_DATABASE_URL` (the database URL of the implicit site) is missing or empty.
     #[error(
         "{0} is not set; set it to the PostgreSQL URL, for example postgres://user:password@localhost:5432/database"
     )]
     MissingDatabaseUrl(&'static str),
-    /// An environment variable of `serve` has an unusable value.
+    /// The command line names no usable site (`--site` missing or unknown). Exit code 2, like
+    /// every usage error.
+    #[error("{0}")]
+    Usage(String),
+    /// The config file or an environment variable has an unusable value.
     #[error("{0}")]
     Config(String),
     /// The server could not listen or stopped with an I/O error.

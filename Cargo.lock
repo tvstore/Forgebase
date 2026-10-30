@@ -361,10 +361,12 @@ dependencies = [
  "forgebase-db",
  "forgebase-http",
  "rust_decimal",
+ "serde",
  "serde_json",
  "thiserror",
  "time",
  "tokio",
+ "toml",
  "tower",
 ]
 

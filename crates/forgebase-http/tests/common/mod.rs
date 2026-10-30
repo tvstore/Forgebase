@@ -406,6 +406,36 @@ impl Req {
     }
 }
 
+/// Sends `request` into `app` (any router, for example one with several sites).
+pub async fn send_to(app: &Router, request: Req) -> Reply {
+    let mut builder = Request::builder().method(request.method).uri(&request.uri);
+    if let Some(host) = &request.host {
+        builder = builder.header("host", host);
+    }
+    for (name, value) in &request.headers {
+        builder = builder.header(name, value);
+    }
+    let body = match request.body {
+        Some((content_type, bytes)) => {
+            builder = builder.header("content-type", content_type);
+            Body::from(bytes)
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).expect("request"))
+        .await
+        .expect("infallible");
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
+    Reply {
+        status: parts.status,
+        headers: parts.headers,
+        text: String::from_utf8(bytes.to_vec()).expect("UTF-8 body"),
+    }
+}
+
 /// A database, the router on it and a log of every reply.
 pub struct Env {
     pub db: TestDb,
@@ -439,33 +469,7 @@ impl Env {
     }
 
     pub async fn send(&self, request: Req) -> Reply {
-        let mut builder = Request::builder().method(request.method).uri(&request.uri);
-        if let Some(host) = &request.host {
-            builder = builder.header("host", host);
-        }
-        for (name, value) in &request.headers {
-            builder = builder.header(name, value);
-        }
-        let body = match request.body {
-            Some((content_type, bytes)) => {
-                builder = builder.header("content-type", content_type);
-                Body::from(bytes)
-            }
-            None => Body::empty(),
-        };
-        let response = self
-            .app
-            .clone()
-            .oneshot(builder.body(body).expect("request"))
-            .await
-            .expect("infallible");
-        let (parts, body) = response.into_parts();
-        let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
-        let reply = Reply {
-            status: parts.status,
-            headers: parts.headers,
-            text: String::from_utf8(bytes.to_vec()).expect("UTF-8 body"),
-        };
+        let reply = send_to(&self.app, request).await;
         self.log.lock().expect("log").push(reply.clone());
         reply
     }

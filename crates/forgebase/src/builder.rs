@@ -4,11 +4,13 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 
 use crate::app::App;
 use crate::args::Cli;
 use crate::compose::{StartupError, compose};
+use crate::error::CliError;
 use crate::run::run;
 
 /// A Forgebase binary: the apps compiled into it, and the command line that runs them.
@@ -85,8 +87,11 @@ impl Forgebase {
             Ok(runtime) => runtime,
             Err(error) => return fail(&format!("cannot start the async runtime: {error}")),
         };
-        match runtime.block_on(run(cli.command, &self.apps)) {
+        match runtime.block_on(run(cli, &self.apps)) {
             Ok(()) => ExitCode::SUCCESS,
+            Err(CliError::Usage(message)) => {
+                usage(&Cli::command().error(ErrorKind::InvalidValue, message))
+            }
             Err(error) => fail(&error.to_string()),
         }
     }

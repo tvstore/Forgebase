@@ -43,3 +43,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted |
 | [0012](0012-app-model-and-public-api-boundary.md) | App model and public API boundary | Accepted |
 | [0013](0013-jobs-scheduler-and-transactional-outbox.md) | Jobs, scheduler and transactional outbox | Accepted |
+| [0014](0014-multi-site-database-per-site.md) | Multi-site: database per site | Accepted |
