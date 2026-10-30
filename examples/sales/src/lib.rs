@@ -122,7 +122,8 @@ impl DocTypeHooks for OrderRules {
     /// Manager) is limited here, `"Approve as Manager"` (Sales Manager only, checked by the
     /// framework) has no limit and no hook rule. The veto message names the way out.
     ///
-    /// `doc` is the stored order, so `total` is the value `validate` computed at the last save.
+    /// `doc` is the stored order, so `total` is the value `validate` computed when it entered
+    /// Pending Approval (that draft-to-draft transition runs `validate`).
     /// `edit_roles` on `Pending Approval` keeps a Sales User from lowering it afterwards.
     fn before_transition(
         &self,

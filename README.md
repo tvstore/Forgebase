@@ -255,7 +255,7 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
   http://localhost:8000/api/v1/resource/customer/ann@example.com
 
 # Create a sales order (its name comes from the series; use the `name` in the response below), then send it for approval and approve it
-# (a transition takes {"action", "version"}; the order has a workflow, so there is no plain submit. Cancel and amend take {"version": N}; amend answers 201 with the new draft.
+# (a transition takes {"action", "version"}; the order has a workflow, so there is no plain submit. On a DocType without a workflow, submit and cancel take {"version": N}; amend takes {"version": N} and answers 201 with the new draft.
 # The user needs a role of the transition and the right: `root` is an Administrator, who passes every role check)
 curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
   -d '{"customer": "ann@example.com", "items": [{"description": "Widget", "qty": 2, "rate": "9.50"}]}' \

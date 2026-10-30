@@ -83,6 +83,7 @@ The example wants "a Sales User may approve orders up to 10 000; above that a Sa
 
 - `"Approve"` is open to Sales User and Sales Manager and is limited by the hook;
 - `"Approve as Manager"` is open to the Sales Manager only (the framework checks the role) and has no limit and no hook rule.
+- There is no four-eyes rule in the example: a Sales User may approve an order they sent, up to the limit. An app that needs one can veto in `before_transition` when `ctx.actor` equals the document's `owner`.
 
 ```rust
 /// The largest total a Sales User may approve.
@@ -101,7 +102,7 @@ fn before_transition(&self, ctx: &HookContext<'_>, doc: &mut Document) -> Result
 }
 ```
 
-`total` is the value `validate` computed at the last save, and `edit_roles` on Pending Approval keeps a Sales User from changing it before approving. A veto answers 422 `hook_rejected` with the message, and **rolls everything back**: the state, the version, the log row and any job are unchanged. A hook is tested without a database: build the context with `HookContext::new(..).with_transition(&TransitionInfo::new("Approve", "Pending Approval", "Approved"))`, as `tests/sales.rs` does.
+`total` is the value `validate` computed when the order entered Pending Approval (that draft-to-draft transition runs `validate`), and `edit_roles` on Pending Approval keeps a Sales User from changing it before approving. A veto answers 422 `hook_rejected` with the message, and **rolls everything back**: the state, the version, the log row and any job are unchanged. A hook is tested without a database: build the context with `HookContext::new(..).with_transition(&TransitionInfo::new("Approve", "Pending Approval", "Approved"))`, as `tests/sales.rs` does.
 
 ### Using it
 
