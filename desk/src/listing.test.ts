@@ -365,6 +365,18 @@ describe('the columns menu', () => {
     expect(toggleColumn(wide, ['f0'], 'f0')).toEqual(['f0']);
   });
 
+  it('keeps at most the cap when the default columns are more than the cap', () => {
+    const fields = Array.from({ length: 11 }, (_, i) => field(`f${i}`, 'data'));
+    const wide = meta(fields, false, { list_fields: fields.map((f) => f.name) });
+    const defaults = listColumns(wide).filter((c) => c.key !== 'name').map((c) => c.key);
+    expect(defaults.length).toBeGreaterThan(MAX_COLUMNS);
+    // Any set that is not the default one holds at most MAX_COLUMNS columns.
+    const next = toggleColumn(wide, defaults, 'f10');
+    expect(next).toEqual(defaults.slice(0, MAX_COLUMNS));
+    expect(toggleColumn(wide, defaults, 'f3')?.length).toBe(MAX_COLUMNS);
+    expect(selectColumns(wide, defaults).length).toBe(MAX_COLUMNS + 1); // name + the cap
+  });
+
   it('can sort by every column of the menu, shown or not', () => {
     expect(sortableKeys(sample)).toEqual(['name', 'a', 'b', 'c', 'd', 'e', 'owner', 'modified_at', 'f', 'g']);
   });

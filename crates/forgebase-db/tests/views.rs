@@ -743,7 +743,7 @@ async fn deleting_a_user_deletes_their_private_views_only() {
     create(&db, &reg, &root(), "shared", true).await.unwrap();
     db.exec("DELETE FROM fb_user WHERE username = 'ann'").await;
     assert_eq!(
-        db.rows("SELECT label FROM fb_saved_view ORDER BY label")
+        db.rows("SELECT label FROM fb_saved_view ORDER BY label COLLATE \"C\"")
             .await,
         vec![vec!["his".to_owned()], vec!["shared".to_owned()]]
     );

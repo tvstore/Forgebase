@@ -99,6 +99,11 @@ describe('view and list state', () => {
     expect(state.filters).toBe('[{"field":"status","op":"=","value":"Draft"}]');
   });
 
+  it('never holds more columns than the server accepts', () => {
+    const many = Array.from({ length: 12 }, (_, i) => `f${i}`);
+    expect(definitionOfState({ filters: null, sort: DEFAULT_SORT }, many).columns).toEqual(many.slice(0, 8));
+  });
+
   it('saves the list state as a definition', () => {
     expect(definitionOfState({ filters: JSON.stringify([FILTER]), sort: { field: 'a', desc: true } }, ['a', 'b'])).toEqual({
       filters: [FILTER],

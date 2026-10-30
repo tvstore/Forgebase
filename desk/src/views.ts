@@ -5,7 +5,7 @@
 // list holds the same three (`filters`, `sort`, `columns`) plus `view=<id>`, which says which
 // view the state started from. The address, not the view, is the state: a reload keeps it.
 
-import { DEFAULT_SORT, sortText } from './listing';
+import { DEFAULT_SORT, MAX_COLUMNS, sortText } from './listing';
 import type { ListState, Sort } from './listing';
 
 /** The longest label of a view, in characters (the server's limit). */
@@ -125,7 +125,7 @@ export function definitionOfState(state: Pick<ListState, 'filters' | 'sort'>, co
   return {
     filters: filterList(state.filters),
     sort: isDefault ? [] : [sortText(state.sort)],
-    columns: columns ?? [],
+    columns: (columns ?? []).slice(0, MAX_COLUMNS), // the server refuses more
   };
 }
 

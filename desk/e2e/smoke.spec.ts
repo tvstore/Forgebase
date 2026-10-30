@@ -786,12 +786,21 @@ test('a view that names a field that no longer exists says so and offers to fix 
 
 test('the Columns menu hides a column, keeps the choice in the address and resets', async ({ page }) => {
   await login(page, 'e2e_manager');
+  // The rows come late, as on a slow runner. `expectLoaded` alone is no ready signal: it is also
+  // true before the list has rendered at all. Wait for the rows ("Showing ..." in the live region)
+  // before the menu is opened, so that no reload of the list can run under the clicks.
+  await page.route('**/api/v1/resource/sales_order?*', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await route.continue();
+  });
   await page.goto('/desk/#/list/sales_order');
+  const columns = page.getByRole('button', { name: 'Columns', exact: true });
+  await expect(page.getByRole('status').filter({ hasText: /^Showing / })).toBeVisible();
   await expectLoaded(page);
+  await page.unroute('**/api/v1/resource/sales_order?*');
   const header = page.getByRole('columnheader', { name: 'Order Date' });
   await expect(header).toBeVisible();
 
-  const columns = page.getByRole('button', { name: 'Columns', exact: true });
   await columns.click();
   await page.getByRole('checkbox', { name: 'Order Date' }).uncheck();
   // The menu stays open to change several columns; the column is gone and the address says so.

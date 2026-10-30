@@ -45,7 +45,6 @@
 //! | `POST /resource/{doctype}/{name}/transition` body `{"action", "version"}` (M8.1) | 200 `{"data": doc}`; DocTypes with a workflow only |
 //! | `GET /resource/{doctype}/{name}/transitions` (M8.1) | 200 `{"data": {"state", "transitions": [{"action", "to"}]}}`: what the caller may take now (role and right); hooks are not run |
 //! | `GET /resource/{doctype}/{name}/history` (M8.1) | 200 `{"data": {"history": [{"action", "from", "to", "actor", "at"}]}}`, oldest first, the newest 500 at most |
-//!
 //! | `GET /views/{doctype}` (M8.3) | 200 `{"data": [{"id", "label", "shared", "owner", "definition", "version", "modified_at"}]}`: the caller's own private views and the shared ones, shared first |
 //! | `POST /views/{doctype}` body `{"label", "definition", "shared"?}` (M8.3) | 201 `{"data": view}`; `shared` needs the Administrator role |
 //! | `PATCH /views/{doctype}/{id}` body `{"version", "label"?, "definition"?}` (M8.3) | 200 `{"data": view}`; another user's private view is 404 |

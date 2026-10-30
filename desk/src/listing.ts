@@ -282,7 +282,8 @@ export function availableColumns(meta: DocTypeMeta): Column[] {
 export function selectColumns(meta: DocTypeMeta, keys: string[] | null): Column[] {
   if (keys === null) return listColumns(meta);
   const offered = new Map(availableColumns(meta).map((c) => [c.key, c]));
-  const chosen = keys.flatMap((key) => offered.get(key) ?? []);
+  // At most the cap, as a saved view holds: what is shown is what a saved view would hold.
+  const chosen = keys.flatMap((key) => offered.get(key) ?? []).slice(0, MAX_COLUMNS);
   const first = listColumns(meta)[0];
   return first && chosen.length > 0 ? [first, ...chosen] : listColumns(meta);
 }
@@ -290,7 +291,9 @@ export function selectColumns(meta: DocTypeMeta, keys: string[] | null): Column[
 /**
  * The `columns` of the address after the user checks or unchecks `key`: the shown columns in the
  * order of the menu, or `null` when that is the default set. A column is not added past
- * [`MAX_COLUMNS`] and the last one is not removed (an empty list means the default).
+ * [`MAX_COLUMNS`] and the last one is not removed (an empty list means the default). The default
+ * set may be longer than the cap; any other set is cut to its first `MAX_COLUMNS` columns, which a
+ * saved view can hold.
  */
 export function toggleColumn(meta: DocTypeMeta, shown: string[], key: string): string[] | null {
   const offered = availableColumns(meta).map((c) => c.key);
@@ -302,7 +305,8 @@ export function toggleColumn(meta: DocTypeMeta, shown: string[], key: string): s
   const ordered = [...offered.filter((k) => next.includes(k)), ...next.filter((k) => !offered.includes(k))];
   const defaults = listColumns(meta).filter((c) => c.key !== NAME_KEY).map((c) => c.key);
   if (ordered.length === 0) return shown.length === 0 ? null : shown;
-  return ordered.length === defaults.length && ordered.every((k, i) => k === defaults[i]) ? null : ordered;
+  if (ordered.length === defaults.length && ordered.every((k, i) => k === defaults[i])) return null;
+  return ordered.slice(0, MAX_COLUMNS);
 }
 
 /** The keys a list can be sorted by: every column the menu offers, shown or not, and `name`. */

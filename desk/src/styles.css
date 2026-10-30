@@ -858,8 +858,13 @@
     @apply mb-1.5 p-0 text-small font-medium text-ink-soft;
   }
 
+  /* On a phone the field select has a row of its own (it is not truncated); the calculation and the remove button share the next. */
   .summary-value {
-    @apply grid grid-cols-[minmax(0,1fr)_minmax(0,8.5rem)_auto] items-center gap-2;
+    @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,8.5rem)_auto];
+  }
+
+  .summary-value > select:first-child {
+    @apply col-span-2 sm:col-span-1;
   }
 
   .summary-values .pill {

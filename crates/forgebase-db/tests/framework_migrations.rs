@@ -321,7 +321,7 @@ async fn migration_9_creates_the_saved_views() {
         db.rows(
             "SELECT indexname FROM pg_indexes WHERE tablename = 'fb_saved_view' \
              AND indexdef LIKE 'CREATE UNIQUE INDEX%' AND indexname <> 'fb_saved_view_pkey' \
-             ORDER BY indexname"
+             ORDER BY indexname COLLATE \"C\""
         )
         .await,
         vec![
