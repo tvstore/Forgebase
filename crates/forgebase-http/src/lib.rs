@@ -67,7 +67,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{CACHE_CONTROL, HOST, X_CONTENT_TYPE_OPTIONS};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use forgebase_core::meta::Registry;
@@ -231,8 +231,11 @@ impl Sites {
         Ok(self)
     }
 
-    /// The router of the site `headers` name, or the error response.
-    fn pick(&self, headers: &HeaderMap) -> Result<Router, ApiError> {
+    /// The router of the site `headers` name, or the error response. A request target in
+    /// absolute form (`GET http://host/path`) must name the same host as the `Host` header: the
+    /// site is chosen by `Host` alone, so a target that disagrees is refused (`400 invalid_host`)
+    /// instead of being routed by one and answered for the other.
+    fn pick(&self, uri: &Uri, headers: &HeaderMap) -> Result<Router, ApiError> {
         let invalid = || {
             ApiError::new(
                 StatusCode::BAD_REQUEST,
@@ -245,6 +248,11 @@ impl Sites {
             return Err(invalid());
         };
         let host = host_part(value.to_str().map_err(|_| invalid())?);
+        if let Some(authority) = uri.authority()
+            && authority.host().to_ascii_lowercase() != host
+        {
+            return Err(invalid());
+        }
         if let Some(router) = self.routes.get(&host) {
             return Ok(router.clone());
         }
@@ -336,7 +344,7 @@ pub async fn serve(
 /// authentication included), hands the request to that site's router and adds the headers every
 /// response gets.
 async fn dispatch(State(sites): State<Arc<Sites>>, request: Request) -> Response {
-    let mut response = match sites.pick(request.headers()) {
+    let mut response = match sites.pick(request.uri(), request.headers()) {
         Ok(router) => match router.oneshot(request).await {
             Ok(response) => response,
             Err(infallible) => match infallible {},
@@ -354,7 +362,9 @@ async fn dispatch(State(sites): State<Arc<Sites>>, request: Request) -> Response
 
 /// True for a host (as [`host_part`] leaves it) that is a plausible name or address: letters,
 /// digits, `-`, `.` and `_`, or a bracketed IPv6 address. Anything else is a malformed `Host`.
-fn is_wellformed_host(host: &str) -> bool {
+/// The config file uses the same rule for the hosts of a site, so a host that could never match
+/// a request is refused when the file is loaded.
+pub fn is_wellformed_host(host: &str) -> bool {
     if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         return !inner.is_empty()
             && inner

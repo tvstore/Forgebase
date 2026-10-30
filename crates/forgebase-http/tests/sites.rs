@@ -245,3 +245,32 @@ async fn unknown_hosts_are_404_malformed_ones_400_and_forwarding_headers_are_ign
     let reply = pair.send("c.test", forwarded(get("/api/v1/meta"))).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
+
+/// LOW-3 of the M7.1 review: a request target in absolute form must name the host of the `Host`
+/// header (case and port aside); a different one is `400 invalid_host`, never a request routed
+/// by one host and answered for the other.
+#[tokio::test]
+async fn an_absolute_form_target_must_agree_with_the_host_header() {
+    let pair = Pair::new().await;
+    // The same host (case and port ignored) is fine: the request reaches the site.
+    for (target, host) in [
+        ("http://a.test/api/v1/meta", "a.test"),
+        ("http://A.TEST:8000/api/v1/meta", "a.test:9000"),
+        ("http://a.test/api/v1/meta", "A.Test"),
+    ] {
+        let reply = pair.send(host, get(target)).await;
+        // Authentication comes after routing: a 401 shows the site was reached.
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{target} {host}");
+    }
+    // Another host in the target, on a known or an unknown host: refused.
+    for (target, host) in [
+        ("http://b.test/api/v1/meta", "a.test"),
+        ("http://a.test/api/v1/meta", "b.test"),
+        ("http://c.test/api/v1/meta", "a.test"),
+        ("http://a.test.evil.test/api/v1/meta", "a.test"),
+    ] {
+        let reply = pair.send(host, get(target)).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{target} {host}");
+        assert_eq!(reply.code(), "invalid_host", "{target} {host}");
+    }
+}
