@@ -17,13 +17,24 @@ use crate::run::{read_data, write_stdout};
 /// How many characters of the last error `job list` shows.
 const ERROR_CHARS: usize = 40;
 
-pub(crate) async fn job(site: &SiteContext, command: JobCommand) -> Result<(), CliError> {
+/// The payload of `job enqueue` (read from standard input for `-`) as JSON; `None` for the other
+/// commands. Called before the site's pool is opened, so a bad payload never touches the
+/// database.
+pub(crate) fn read_payload(command: &JobCommand) -> Result<Option<serde_json::Value>, CliError> {
+    match command {
+        JobCommand::Enqueue { payload, .. } => Ok(Some(parse_payload(&read_data(payload)?)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Runs a `job` command; `payload` is what [`read_payload`] returned. The site's registry decides
+/// which jobs are known: the jobs of the apps installed on the site, and the built-in ones.
+pub(crate) async fn job(
+    site: &SiteContext,
+    command: JobCommand,
+    payload: Option<serde_json::Value>,
+) -> Result<(), CliError> {
     let registry: &Registry = &site.registry;
-    // Read the payload before the database is touched.
-    let payload = match &command {
-        JobCommand::Enqueue { payload, .. } => Some(parse_payload(&read_data(payload)?)?),
-        _ => None,
-    };
     let client = site.pool.get().await.map_err(DbError::from)?;
     let client = &**client;
     match command {

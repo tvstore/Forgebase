@@ -24,6 +24,9 @@ pub enum DbError {
         "timed out waiting for a database lock (another transaction holds a conflicting lock); the statement that timed out was rolled back (earlier committed steps, such as framework migrations in `migrate`, stay applied), retry later"
     )]
     LockTimeout,
+    /// `create_database` cannot use the URL it was given. Never contains the URL.
+    #[error("{0}")]
+    CreateDatabase(String),
     /// The connection pool could not be created (for example an invalid database URL).
     #[error("cannot create connection pool: {0}")]
     CreatePool(#[from] deadpool_postgres::CreatePoolError),
