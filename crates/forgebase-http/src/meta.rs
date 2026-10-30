@@ -85,6 +85,28 @@ fn field(field: &DocField) -> Map<String, Json> {
     map
 }
 
+/// The workflow for the desk (M8.1): the states with their docstatus and badge style, and the
+/// transitions. The roles of the transitions and the `edit_roles` of the states are **never**
+/// sent, like the `[[permissions]]` rules: `GET .../transitions` says what the caller may do.
+fn workflow(doctype: &DocType) -> Json {
+    let Some(workflow) = &doctype.workflow else {
+        return Json::Null;
+    };
+    let states: Vec<Json> = workflow
+        .states
+        .iter()
+        .map(
+            |s| json!({"name": s.name, "docstatus": s.docstatus.as_i16(), "style": s.style.name()}),
+        )
+        .collect();
+    let transitions: Vec<Json> = workflow
+        .transitions
+        .iter()
+        .map(|t| json!({"action": t.action, "from": t.from, "to": t.to}))
+        .collect();
+    json!({"states": states, "transitions": transitions})
+}
+
 /// A field of the DocType; a Table field also carries the field list of its child DocType
 /// (`fields`), so the desk needs one request per DocType.
 fn field_with_children(state: &AppState, f: &DocField) -> Json {
@@ -164,6 +186,7 @@ pub async fn read(
             "list_fields": doctype.list_fields,
             "fields": fields,
             "rights": rights(doctype, &caller),
+            "workflow": workflow(doctype),
         }),
     ))
 }

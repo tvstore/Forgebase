@@ -245,6 +245,93 @@ write = true
 create = true
 "#;
 
+/// A submittable DocType with a workflow (M8.1): Draft, Pending (only a Manager may edit it),
+/// Approved (submitted) and Cancelled. `Reviewer` is a role of Approve but cannot submit,
+/// `Auditor` can submit and cancel but is a role of no transition, and `Own Writer` reads
+/// everything but creates, writes and submits only its own documents.
+pub const PURCHASE: &str = r#"
+name = "purchase"
+label = "Purchase"
+submittable = true
+[[fields]]
+name = "title"
+type = "data"
+required = true
+[[fields]]
+name = "amount"
+type = "int"
+[[permissions]]
+role = "Clerk"
+read = true
+create = true
+write = true
+[[permissions]]
+role = "Manager"
+read = true
+create = true
+write = true
+delete = true
+submit = true
+cancel = true
+amend = true
+[[permissions]]
+role = "Reviewer"
+read = true
+write = true
+[[permissions]]
+role = "Auditor"
+read = true
+submit = true
+cancel = true
+[[permissions]]
+role = "Own Writer"
+read = true
+[[permissions]]
+role = "Own Writer"
+create = true
+write = true
+submit = true
+if_owner = true
+
+[workflow]
+[[workflow.states]]
+name = "Draft"
+docstatus = 0
+[[workflow.states]]
+name = "Pending"
+docstatus = 0
+style = "warning"
+edit_roles = ["Manager"]
+[[workflow.states]]
+name = "Approved"
+docstatus = 1
+style = "success"
+[[workflow.states]]
+name = "Cancelled"
+docstatus = 2
+style = "danger"
+[[workflow.transitions]]
+action = "Send"
+from = "Draft"
+to = "Pending"
+roles = ["Clerk", "Own Writer"]
+[[workflow.transitions]]
+action = "Reject"
+from = "Pending"
+to = "Draft"
+roles = ["Manager"]
+[[workflow.transitions]]
+action = "Approve"
+from = "Pending"
+to = "Approved"
+roles = ["Manager", "Reviewer", "Own Writer"]
+[[workflow.transitions]]
+action = "Cancel"
+from = "Approved"
+to = "Cancelled"
+roles = ["Manager"]
+"#;
+
 /// Sets the read-only `total` of a `ledger` titled "computed" to 7, like an app's hook.
 struct LedgerTotal;
 
@@ -258,8 +345,13 @@ impl DocTypeHooks for LedgerTotal {
 }
 
 pub fn registry() -> Registry {
+    registry_with(&[])
+}
+
+/// [`registry`] and the DocTypes of `extra` (TOML texts).
+pub fn registry_with(extra: &[&str]) -> Registry {
     let mut registry = Registry::new();
-    for text in [
+    for text in extra.iter().copied().chain([
         ITEM,
         HOLDER,
         VAULT,
@@ -271,7 +363,7 @@ pub fn registry() -> Registry {
         LEDGER_LINE,
         SECRET,
         DROPBOX,
-    ] {
+    ]) {
         registry
             .add(DocType::from_toml_str(text).expect("valid DocType"))
             .expect("valid registry");
@@ -450,8 +542,17 @@ impl Env {
     }
 
     pub async fn with_config(config: AppConfig) -> Self {
+        Self::build(config, &[]).await
+    }
+
+    /// The test DocTypes and those of `extra` (TOML texts).
+    pub async fn with_doctypes(extra: &[&str]) -> Self {
+        Self::build(AppConfig::default(), extra).await
+    }
+
+    async fn build(config: AppConfig, extra: &[&str]) -> Self {
         let db = TestDb::migrated().await;
-        let registry = registry();
+        let registry = registry_with(extra);
         {
             let mut client = db.pool.get().await.expect("connection");
             sync(&mut client, &registry, &SyncOptions::default())

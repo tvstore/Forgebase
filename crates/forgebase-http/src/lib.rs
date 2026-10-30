@@ -34,7 +34,7 @@
 //! | `POST /logout` (cookie session only) | 204, cookie cleared |
 //! | `GET /session` (cookie session only, header `X-Forgebase-CSRF: refresh`, else 400) | 200 `{"data": {"username", "roles", "csrf_token"}}`, a **new** CSRF token (the old one stops working) |
 //! | `GET /meta` | 200 `{"data": [{"name", "label", "app", "submittable", "rights"}]}`: the DocTypes the caller can read; `app` is the owning app (M5.1, `null` if the registry records none) |
-//! | `GET /meta/{doctype}` | 200 `{"data": {"name", "label", "app", "naming", "submittable", "fields", "rights"}}` |
+//! | `GET /meta/{doctype}` | 200 `{"data": {"name", "label", "app", "naming", "submittable", "fields", "rights", "workflow"}}`; `workflow` is `null` or `{"states": [{"name", "docstatus", "style"}], "transitions": [{"action", "from", "to"}]}` (never the roles) |
 //! | `GET /resource/{doctype}` (`filters`, `sort`, `limit`, `offset`) | 200 `{"data": [..]}` |
 //! | `POST /resource/{doctype}` | 201 `{"data": doc}` |
 //! | `GET /resource/{doctype}/{name}` | 200 `{"data": doc}` |
@@ -42,6 +42,9 @@
 //! | `DELETE /resource/{doctype}/{name}?version=N` | 204 |
 //! | `POST /resource/{doctype}/{name}/submit` and `/cancel` body `{"version"}` | 200 `{"data": doc}` |
 //! | `POST /resource/{doctype}/{name}/amend` body `{"version"}` | 201 `{"data": new doc}` |
+//! | `POST /resource/{doctype}/{name}/transition` body `{"action", "version"}` (M8.1) | 200 `{"data": doc}`; DocTypes with a workflow only |
+//! | `GET /resource/{doctype}/{name}/transitions` (M8.1) | 200 `{"data": {"state", "transitions": [{"action", "to"}]}}`: what the caller may take now (role and right); hooks are not run |
+//! | `GET /resource/{doctype}/{name}/history` (M8.1) | 200 `{"data": {"history": [{"action", "from", "to", "actor", "at"}]}}`, oldest first, the newest 500 at most |
 //!
 //! Anything else is 404 (`/api/v1/method` is not implemented), a wrong method is 405.
 //!
@@ -308,6 +311,18 @@ fn site_router(state: AppState) -> Router {
         .route(
             "/api/v1/resource/{doctype}/{name}/amend",
             post(routes::amend),
+        )
+        .route(
+            "/api/v1/resource/{doctype}/{name}/transition",
+            post(routes::transition),
+        )
+        .route(
+            "/api/v1/resource/{doctype}/{name}/transitions",
+            get(routes::transitions),
+        )
+        .route(
+            "/api/v1/resource/{doctype}/{name}/history",
+            get(routes::history),
         );
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {
