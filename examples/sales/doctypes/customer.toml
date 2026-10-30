@@ -3,6 +3,9 @@
 name = "customer"
 label = "Customer"
 naming = { field = "email" }
+# How the desk names a customer and which columns its list shows after `name` (UX.1).
+title_field = "full_name"
+list_fields = ["full_name", "customer_group", "tier"]
 
 [[fields]]
 name = "email"
@@ -52,6 +55,8 @@ options = ["standard", "silver", "gold"]
 name = "customer_group"
 type = "link"
 target = "customer_group"
+
+# Labels are the humanized field names ("Full Name", "Loyalty Points", ...) unless a field sets `label`.
 
 # Who may do what (ADR 0011). The `forgebase doc` commands run as the trusted system context and ignore these rules;
 # they apply to real users (HTTP API, M3.3). A DocType without rules is closed to everyone except `Administrator`.

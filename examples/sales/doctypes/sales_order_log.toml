@@ -7,6 +7,8 @@ label = "Sales Order Log"
 # write a second row for the same event. The job checks first, which keeps the normal path quiet; if two deliveries run at the
 # same moment, the unique key refuses the second insert and the job looks again and finds the row, so it succeeds.
 naming = { field = "key" }
+title_field = "key"
+list_fields = ["key", "sales_order", "event", "total"]
 
 [[fields]]
 name = "key"

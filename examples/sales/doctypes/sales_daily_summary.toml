@@ -5,6 +5,8 @@ name = "sales_daily_summary"
 label = "Sales Daily Summary"
 # The day (`YYYY-MM-DD`, UTC) is the name: one summary per day, enforced by the database.
 naming = { field = "day" }
+title_field = "day"
+list_fields = ["day", "orders", "total"]
 
 [[fields]]
 name = "day"

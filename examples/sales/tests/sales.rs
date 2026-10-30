@@ -70,7 +70,9 @@ fn amounts_and_total_are_computed() {
 }
 
 #[test]
-fn computed_values_overwrite_what_the_client_sent() {
+fn computed_values_overwrite_what_the_document_holds() {
+    // The hook alone: a document that already holds values (a client cannot send them, they are
+    // read_only, but a copy such as an amendment can carry them) gets them recomputed.
     let mut row = item(Value::Int(1), Value::Decimal(dec("5.00")));
     row.insert("amount".to_owned(), Value::Decimal(dec("999.00")));
     let mut doc = order(vec![row]);
@@ -309,12 +311,34 @@ async fn an_order_gets_its_amounts_and_total_and_an_update_recomputes_them() {
     let env = env().await;
     customer(&env.manager).await;
 
-    // The client sends no amounts, and a wrong total: both are computed.
-    let created = env
+    // A client cannot send a total: it is read_only and refused (422), not silently replaced.
+    let refused = env
         .user
         .post(
             ORDERS,
             json!({"customer": "ada@example.com", "items": two_items(), "total": "1.00"}),
+        )
+        .await;
+    assert_eq!(refused.status, 422, "{:?}", refused.body);
+    assert_eq!(refused.error_code(), Some("validation_failed"));
+    // Nor an amount in a row.
+    let mut rows = two_items();
+    rows[0]["amount"] = json!("1.00");
+    let refused = env
+        .user
+        .post(
+            ORDERS,
+            json!({"customer": "ada@example.com", "items": rows}),
+        )
+        .await;
+    assert_eq!(refused.status, 422, "{:?}", refused.body);
+
+    // Without them, the amounts and the total are computed.
+    let created = env
+        .user
+        .post(
+            ORDERS,
+            json!({"customer": "ada@example.com", "items": two_items()}),
         )
         .await;
     assert_eq!(created.status, 201, "{:?}", created.body);

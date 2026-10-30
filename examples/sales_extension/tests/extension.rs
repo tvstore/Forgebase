@@ -130,15 +130,12 @@ async fn env() -> Env {
 #[tokio::test]
 async fn the_extension_hook_runs_after_the_sales_hook() {
     let env = env().await;
-    // 1 x 5.00, but the client claims a `total` of 100.00. The sales hook overwrites it with
-    // the computed 5.00. If the extension hook ran before the sales hook, it would see the
-    // user's 100.00 and accept the order, after which the sales hook would compute 5.00. A
-    // refusal therefore proves the sales hook ran first.
+    // 1 x 5.00 is computed to a total of 5.00 and refused by the extension.
     let small = env
         .user
         .post(
             "/api/v1/resource/sales_order",
-            json!({"customer": "ada@example.com", "total": "100.00",
+            json!({"customer": "ada@example.com",
                    "items": [{"description": "Pen", "qty": 1, "rate": "5.00"}]}),
         )
         .await;
@@ -153,6 +150,24 @@ async fn the_extension_hook_runs_after_the_sales_hook() {
         small.body
     );
 
+    // A client cannot send the `total` (it is read_only): the order is refused before any hook
+    // runs, whatever the value is.
+    let sent = env
+        .user
+        .post(
+            "/api/v1/resource/sales_order",
+            json!({"customer": "ada@example.com", "total": "100.00",
+                   "items": [{"description": "Pen", "qty": 2, "rate": "5.00"}]}),
+        )
+        .await;
+    assert_eq!(sent.status, 422, "{:?}", sent.body);
+    assert_eq!(sent.error_code(), Some("validation_failed"));
+    assert!(
+        sent.body.to_string().contains("field `total` is read-only"),
+        "{:?}",
+        sent.body
+    );
+
     // Even an order without items is refused: its computed total is 0.
     let empty = env
         .user
@@ -163,7 +178,10 @@ async fn the_extension_hook_runs_after_the_sales_hook() {
         .await;
     assert_eq!(empty.status, 422, "{:?}", empty.body);
 
-    // 2 x 5.00 = 10.00 is accepted, and keeps the sales rules (computed amount, submit).
+    // 2 x 5.00 = 10.00 is accepted, and keeps the sales rules (computed amount, submit). This
+    // proves the hook order: the client sent no total, so if the extension hook ran before the
+    // sales hook it would see a total of 0 and refuse every order, this one included. Acceptance
+    // therefore proves the sales hook ran first.
     let fine = env
         .user
         .post(
