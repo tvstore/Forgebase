@@ -1,11 +1,15 @@
 name: CI
 
+# Triggers (cost control, see docs/blueprint/maintenance-policy.md, "CI"): pull requests that are not
+# drafts, a weekly run and a manual run. There is no run on push to main: the PR was green on its
+# head before it was merged (AGENTS.md section 10.3). The weekly run and `workflow_dispatch` on main
+# also warm the Cargo cache that every pull request can read (a cache saved on a PR ref is visible
+# to that PR only; one saved on the default branch is visible to all).
 on:
-  push:
-    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -17,10 +21,71 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless across runs and would only make the cache bigger. Caches count
+  # against GitHub's 10 GB per-repository limit; the least recently used are evicted when it is full.
+  CARGO_INCREMENTAL: 0
 
 jobs:
+  # Which parts of the repository changed (C-4). Draft pull requests run nothing: the first job is
+  # skipped and every job that needs it is skipped with it. A skipped job counts as a success for a
+  # required status check. (Branch protection is not available for this private repository on its
+  # plan, so no check is required by job name today; revisit if that changes.) The classification
+  # is .github/ci/classify-paths.py, unit-tested below. `schedule` and `workflow_dispatch` do not
+  # diff: everything runs.
+  changes:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+      desk: ${{ steps.classify.outputs.desk }}
+      e2e: ${{ steps.classify.outputs.e2e }}
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      all: ${{ steps.classify.outputs.all }}
+    steps:
+      # Full history, so that the merge base of the pull request exists.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Test the classifier
+        run: python3 .github/ci/test_classify_paths.py
+      # `base...head` diffs against the merge base, so commits that main gained later are not
+      # counted. --no-renames lists both the old and the new path of a rename.
+      - name: Classify the changed paths
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/changed.txt"
+          if [ "$EVENT" = pull_request ]; then
+            git -c core.quotepath=false diff --name-only --no-renames "$BASE...$HEAD" > "$RUNNER_TEMP/changed.txt"
+            cat "$RUNNER_TEMP/changed.txt"
+          fi
+          python3 .github/ci/classify-paths.py --event "$EVENT" < "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/outputs.txt"
+          # Fail closed: an empty or malformed result must fail the job, not skip every check.
+          cat "$RUNNER_TEMP/outputs.txt"
+          [ "$(cut -d= -f1 "$RUNNER_TEMP/outputs.txt" | paste -sd,)" = "rust,desk,e2e,docs_only,all" ]
+          [ "$(grep -cE '^[a-z0-9_]+=(true|false)$' "$RUNNER_TEMP/outputs.txt")" = 5 ]
+          cat "$RUNNER_TEMP/outputs.txt" >> "$GITHUB_OUTPUT"
+
+  # Offline check of the relative links and anchors in the Markdown files (about 10 seconds).
+  docs:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 .github/ci/linkcheck.py
   check:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
     # Pinned to 24.04, not ubuntu-latest: the client tools must match the postgres:16 service, and
     # 24.04 ships postgresql-client-16 in its own archive (26.04 does not). Re-evaluate when the
     # PostgreSQL floor or the service version changes, or when 24.04 runners are retired.
@@ -47,6 +112,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Cargo registry and git downloads plus target/ (not the whole of ~/.cargo). The key follows the
+      # toolchain and the lockfile; restore-keys gives a partial hit after a change of either.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-check-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-check-
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -87,7 +163,8 @@ jobs:
   # service container's throwaway credentials; the script never prints them. The databases are
   # created by the script (`site create`).
   sites:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
     # Pinned to 24.04, not ubuntu-latest: the client tools must match the postgres:16 service, and
     # 24.04 ships postgresql-client-16 in its own archive (26.04 does not). Re-evaluate when the
     # PostgreSQL floor or the service version changes, or when 24.04 runners are retired.
@@ -116,6 +193,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Cargo registry and git downloads plus target/ (not the whole of ~/.cargo). The key follows the
+      # toolchain and the lockfile; restore-keys gives a partial hit after a change of either.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-sites-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-sites-
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -139,28 +227,41 @@ jobs:
       - name: Two sites, a backup and a restore
         run: examples/sites/ci.sh
 
-  msrv:
-    if: github.event_name != 'schedule'
+  # The MSRV check and cargo-deny share one job (one checkout, one cache). The cargo-deny binary is
+  # cached by itself (version and toolchain in the key), so `cargo install` runs only on a miss.
+  msrv-deny:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Cargo registry and git downloads plus target/ (not the whole of ~/.cargo). The key follows the
+      # toolchain and the lockfile; restore-keys gives a partial hit after a change of either.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-msrv-deny-msrv1.97-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-deny-msrv1.97-
       - run: rustup toolchain install 1.97 --profile minimal
       - run: cargo +1.97 check --workspace --all-targets --all-features --locked
-
-  deny:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
-      - run: cargo install --locked cargo-deny --version 0.20.2
+      - name: Cache cargo-deny
+        id: cargo-deny
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: ${{ runner.os }}-cargo-deny-0.20.2-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.cargo-deny.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-deny --version 0.20.2
       - run: cargo deny --locked check
 
   # `forgebase new-app` (M5.2): generates an app from the stock binary, outside the checkout, and
@@ -169,7 +270,8 @@ jobs:
   # app. The generated crate depends on this checkout by path; its Cargo.lock is the checkout's.
   # The password below is for a throwaway user of the service container.
   app-template:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -196,6 +298,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Cargo registry and git downloads plus target/ (not the whole of ~/.cargo). The key follows the
+      # toolchain and the lockfile; restore-keys gives a partial hit after a change of either.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-app-template-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-app-template-
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -235,9 +348,11 @@ jobs:
         run: cat "$RUNNER_TEMP/demo/server.log"
 
   # The desk (React + TypeScript, desk/). Uses the Node that ships with the runner (no extra
-  # action). Also runs on the daily schedule, so a new npm advisory is noticed. `npm audit` fails
+  # action). Also runs on the weekly schedule, so a new npm advisory is noticed. `npm audit` fails
   # the job for high and critical advisories (low and moderate are reported only).
   desk:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.desk == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -247,6 +362,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The npm download cache (not node_modules), keyed on the lockfile.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('desk/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
       - name: Check the Node version
         run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
       # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.
@@ -264,7 +385,8 @@ jobs:
   # (no artifact upload: no pinned action for it is in use); on failure the server log is printed.
   # The database URL is built from the service container's credentials and never printed.
   e2e:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -291,12 +413,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Cargo registry and git downloads plus target/ (not the whole of ~/.cargo). The key follows the
+      # toolchain and the lockfile; restore-keys gives a partial hit after a change of either.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-e2e-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-e2e-
       # rust-toolchain.toml selects 1.99.1 with rustfmt and clippy.
       - name: Install pinned toolchain
         run: rustup toolchain install
       # The example `e2e_app` is the stock command plus one app with a query report (M8.4): a report
       # can only come from an app compiled into the binary.
       - run: cargo build --locked -p forgebase --example e2e_app
+      # The npm download cache (not node_modules), keyed on the lockfile.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('desk/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
       - name: Check the Node version
         run: node -e 'const [a, b] = process.versions.node.split(".").map(Number); if (!((a === 20 && b >= 19) || (a === 22 && b >= 12) || a > 22)) { console.error("Node ^20.19.0 or >=22.12.0 is required (Vite 8), found " + process.version); process.exit(1); }'
       # desk/.npmrc sets ignore-scripts=true: no dependency install script runs in CI.
