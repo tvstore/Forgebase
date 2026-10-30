@@ -55,7 +55,7 @@ pub async fn create_database(
 }
 
 /// Why `name` cannot be created as a site database, or `None` when it can.
-fn name_problem(name: &str) -> Option<&'static str> {
+pub(crate) fn name_problem(name: &str) -> Option<&'static str> {
     let valid = !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && name

@@ -84,6 +84,13 @@ impl Site {
         self.database_url_from(|name| std::env::var(name).ok())
     }
 
+    /// The URL for `site backup` and `site restore`, which hand the connection to `pg_dump` and
+    /// `pg_restore` through `PG*` variables (see `crate::backup`). The only use of the URL outside
+    /// this file; same errors as [`Site::context`].
+    pub(crate) fn tool_connection_url(&self) -> Result<String, CliError> {
+        self.database_url()
+    }
+
     /// [`Site::database_url`] with the environment given as a function, for the tests.
     fn database_url_from(&self, env: impl Fn(&str) -> Option<String>) -> Result<String, CliError> {
         match env(&self.database_url_env) {

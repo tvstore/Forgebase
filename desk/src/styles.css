@@ -761,6 +761,8 @@ td input[readonly] {
 .login,
 .splash {
   display: grid;
+  /* One column that may shrink below its content, so a large text size cannot widen the page. */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   align-content: center;
   gap: var(--s-3);
@@ -780,7 +782,9 @@ td input[readonly] {
 
 .login-brand {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   justify-items: center;
+  overflow-wrap: anywhere;
   gap: var(--s-1);
   margin-bottom: var(--s-5);
   text-align: center;
@@ -996,8 +1000,9 @@ th.num button.sort {
 
 .paging {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--s-3);
+  gap: var(--s-2) var(--s-3);
   margin-top: var(--s-4);
   color: var(--muted);
   font-size: var(--fs-sm);

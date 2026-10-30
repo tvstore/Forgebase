@@ -55,8 +55,8 @@ pub enum Command {
     /// Create and revoke API tokens.
     #[command(subcommand)]
     Token(TokenCommand),
-    /// List the sites of the config file and create the database of a site. `--site` is not used
-    /// here: `create` takes the site name as an argument.
+    /// List the sites of the config file, create the database of a site, and back it up and
+    /// restore it. `--site` is not used here: the commands take the site name as an argument.
     #[command(subcommand)]
     Site(SiteCommand),
     /// Create a new app: a Rust crate (library and binary) with a sample DocType, a hook, tests,
@@ -119,8 +119,18 @@ impl Command {
                 | DocCommand::Amend { doctypes, .. }
                 | DocCommand::Delete { doctypes, .. },
             ) => Some(doctypes),
-            Command::Site(SiteCommand::Create { doctypes, .. }) => Some(doctypes),
-            Command::Site(SiteCommand::List)
+            // `--empty` uses no apps and no DocTypes, so it needs no `--doctypes` either.
+            Command::Site(SiteCommand::Create {
+                doctypes,
+                empty: false,
+                ..
+            }) => Some(doctypes),
+            Command::Site(
+                SiteCommand::Create { empty: true, .. }
+                | SiteCommand::Backup { .. }
+                | SiteCommand::Restore { .. }
+                | SiteCommand::List,
+            )
             | Command::User(_)
             | Command::Token(_)
             | Command::Job(_)
@@ -142,6 +152,8 @@ impl Command {
             Command::Token(_) => ["token", ""],
             Command::Site(SiteCommand::List) => ["site", "list"],
             Command::Site(SiteCommand::Create { .. }) => ["site", "create"],
+            Command::Site(SiteCommand::Backup { .. }) => ["site", "backup"],
+            Command::Site(SiteCommand::Restore { .. }) => ["site", "restore"],
             Command::Doc(doc) => [
                 "doc",
                 match doc {
@@ -189,7 +201,7 @@ pub enum SiteCommand {
     /// the database exists already: it never migrates an existing database implicitly (use
     /// `migrate`). The database name is the one in the site's URL; the role of the URL needs the
     /// `CREATEDB` privilege. If the migrate fails the database is kept: fix the problem and run
-    /// `migrate --site NAME`.
+    /// `migrate --site NAME`. With `--empty` it only creates the empty database (for `restore`).
     Create {
         /// The site name.
         name: String,
@@ -197,8 +209,42 @@ pub enum SiteCommand {
         /// user and password as the site's URL).
         #[arg(long, value_name = "NAME", default_value = forgebase_db::DEFAULT_MAINTENANCE_DB)]
         maintenance_db: String,
+        /// Create the database and do not migrate it: it has no tables, which is what `site
+        /// restore` needs. No apps and no `--doctypes` are used.
+        #[arg(long)]
+        empty: bool,
         #[command(flatten)]
         doctypes: DocTypesDir,
+    },
+    /// Write a backup of the site's database to a new file, with `pg_dump` (PostgreSQL client
+    /// tools of the server's major version, on `PATH` or in `FORGEBASE_PG_BIN`; they are not part
+    /// of Forgebase). The file is a custom-format dump of everything in the database, **password
+    /// hashes, session and API token digests included**: it is created with mode 0600; keep it
+    /// safe. The dump is written to `FILE.partial` and published as FILE (a hard link) only when it is complete:
+    /// a failed backup leaves nothing, and an interrupted one (SIGINT, SIGTERM) can leave only
+    /// `FILE.partial`, which can be removed. An existing file is never overwritten (exit 1; there
+    /// is no `--force`). The database URL and password are passed to `pg_dump` in its
+    /// environment, never on its command line.
+    Backup {
+        /// The site name.
+        name: String,
+        /// The file to create. It must not exist.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Restore a backup of `site backup` into the site's database with `pg_restore`, in one
+    /// transaction. `pg_restore` must have the server's major version, and the backup must come
+    /// from a `pg_dump` of the same or an older major version. The database must exist and be
+    /// **empty** (no tables, schemas other than `public`, extensions other than `plpgsql`,
+    /// functions or types: the kinds of objects checked): create it with `site create NAME
+    /// --empty`. Nothing is migrated: run `migrate --site NAME` afterwards if this binary is
+    /// newer than the backup.
+    Restore {
+        /// The site name.
+        name: String,
+        /// The backup file.
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
     },
 }
 

@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*", "examples/*"]
+# examples/sites is a config file and a script, not a crate.
+exclude = ["examples/sites"]
 resolver = "3"
 
 [workspace.package]

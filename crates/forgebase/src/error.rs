@@ -27,6 +27,10 @@ pub enum CliError {
     /// The server could not listen or stopped with an I/O error.
     #[error("server error: {0}")]
     Serve(std::io::Error),
+    /// `site backup` or `site restore` cannot do its work; the message says why. Never contains
+    /// the database URL or the password.
+    #[error("{0}")]
+    Backup(String),
     /// `new-app` cannot create the crate. The message says why.
     #[error("{0}")]
     NewApp(String),

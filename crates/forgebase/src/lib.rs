@@ -91,6 +91,7 @@
 
 mod app;
 mod args;
+mod backup;
 mod builder;
 mod builtin;
 mod compose;

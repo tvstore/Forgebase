@@ -708,6 +708,15 @@ fn worker_per_site() {
         )
     };
 
+    // A stale `extra.mark` schedule row, due now, in A's database (the app is not installed on
+    // A, so `migrate` never made one: this is what a leftover would look like), and the real one
+    // of B made due too, as the control that a due schedule does tick.
+    for db in [&world.a, &world.b] {
+        let sql = "INSERT INTO fb_schedule (name, spec, next_run_at) \
+             VALUES ('extra.mark', 'every 60m', now() - interval '1 hour') \
+             ON CONFLICT (name) DO UPDATE SET next_run_at = now() - interval '1 hour'";
+        WORLD_RUNTIME.with(|runtime| runtime.block_on(db.exec(sql)));
+    }
     let mut worker_a = world
         .command(&["worker", "--site", "a"])
         .spawn()
@@ -728,7 +737,8 @@ fn worker_per_site() {
         Some("0")
     );
     assert!(!log.contains("extra.stamp"), "{log}");
-    // The worker of A has no `extra` schedule either: nothing of `extra` was enqueued.
+    // The worker of A does not tick the stale `extra.mark` row: nothing was enqueued and the
+    // row is untouched.
     assert_eq!(
         scalar(
             &world.a,
@@ -736,6 +746,14 @@ fn worker_per_site() {
         )
         .as_deref(),
         Some("0")
+    );
+    assert_eq!(
+        scalar(
+            &world.a,
+            "SELECT (last_run_at IS NULL)::text FROM fb_schedule WHERE name = 'extra.mark'"
+        )
+        .as_deref(),
+        Some("true")
     );
 
     // B's worker runs it: the job's handler inserts an `extra_item` of B.
@@ -748,6 +766,15 @@ fn worker_per_site() {
         status(&world.b, "extra.stamp").as_deref() == Some("done")
     });
     stop_worker(worker_b);
+    // The control: B's worker did tick its due `extra.mark` schedule.
+    assert_eq!(
+        scalar(
+            &world.b,
+            "SELECT (count(*) >= 1)::text FROM fb_job WHERE name = 'extra.mark'"
+        )
+        .as_deref(),
+        Some("true")
+    );
     assert_eq!(
         scalar(&world.b, "SELECT count(*)::text FROM doc_extra_item").as_deref(),
         Some("1")
@@ -942,13 +969,16 @@ fn site_create() {
     let out = succeeds(&create(&scratch.url, &["--maintenance-db", &maintenance]));
     assert!(
         out.starts_with("created the database of site `fresh`\n")
-            && out.contains("framework migrations: 7 applied")
+            && out.contains(&format!(
+                "framework migrations: {} applied",
+                forgebase_db::MIGRATIONS.len()
+            ))
             && out.contains("doc_item")
             && !out.contains("doc_extra_item"),
         "{out}"
     );
     assert!(scratch.exists());
-    assert_eq!(scratch.migrations(), 7);
+    assert_eq!(scratch.migrations(), forgebase_db::MIGRATIONS.len() as i64);
 
     // A second create is refused, and the database is left alone.
     let output = create(&scratch.url, &[]);
@@ -958,7 +988,7 @@ fn site_create() {
         "error: database for site `fresh` already exists; run `forgebase migrate --site fresh`\n"
     );
     assert!(stdout(&output).is_empty());
-    assert_eq!(scratch.migrations(), 7);
+    assert_eq!(scratch.migrations(), forgebase_db::MIGRATIONS.len() as i64);
 
     // An unusable database name in the URL is refused before anything is created; the message
     // has neither the URL nor the password.
@@ -1060,6 +1090,47 @@ fn follow_ups() {
         !message.contains("s3cret") && !message.contains(dead),
         "{message}"
     );
+
+    // INFO-3 of M7.2: `serve` composes every site's registry before it opens a pool. Site `a`
+    // (all apps) cannot connect either, but site `b` (only `base`) cannot compose the local
+    // DocType that links to `extra_item`: that is the error, and no connection is tried.
+    let dir = std::env::temp_dir().join(format!("fb_site_apps_compose_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let doctypes = dir.join("doctypes");
+    std::fs::create_dir_all(&doctypes).expect("dir");
+    std::fs::write(
+        doctypes.join("local_note.toml"),
+        "name = \"local_note\"\nlabel = \"Local note\"\n[[fields]]\nname = \"item\"\ntype = \"link\"\ntarget = \"extra_item\"\n",
+    )
+    .expect("write");
+    let config = dir.join("forgebase.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[sites]]\nname = \"a\"\nhosts = [\"a.localhost\"]\ndatabase_url_env = \"{A_URL}\"\n\n\
+             [[sites]]\nname = \"b\"\nhosts = [\"b.localhost\"]\ndatabase_url_env = \"{B_URL}\"\napps = [\"base\"]\n"
+        ),
+    )
+    .expect("write");
+    let output = command_with(
+        &config,
+        &["serve", "--doctypes", doctypes.to_str().expect("path")],
+        &[(A_URL, dead), (B_URL, dead)],
+    )
+    .output()
+    .expect("run");
+    let message = fails(&output, 1);
+    assert!(
+        message.starts_with("error: ")
+            && message.contains("site `b`")
+            && message.contains("extra_item"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("connect") && !message.contains("s3cret"),
+        "{message}"
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 
     // `serve` with a site that cannot connect says which one, and listens on nothing.
     let output = run(&["serve"], "");
