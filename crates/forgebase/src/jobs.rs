@@ -290,6 +290,11 @@ impl<'c> JobContext<'c> {
         }
     }
 
+    /// The job's transaction, for the framework's own jobs (they run SQL of `forgebase-db`).
+    pub(crate) fn transaction(&self) -> &Transaction<'c> {
+        &self.tx
+    }
+
     /// The transaction, back to the worker after the handler returned.
     pub(crate) fn into_transaction(self) -> Transaction<'c> {
         self.tx

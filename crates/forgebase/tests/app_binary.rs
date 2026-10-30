@@ -159,7 +159,7 @@ fn drive() {
 
     // A dry run on an empty database lists the app migration, and keeps nothing.
     let out = succeeds(&good.go(&["migrate", "--dry-run"], None));
-    assert!(out.contains("framework migrations: 5 pending"), "{out}");
+    assert!(out.contains("framework migrations: 6 pending"), "{out}");
     assert!(
         out.contains("app migrations: 1 pending\n  crm 0001 seed\n"),
         "{out}"
@@ -383,7 +383,10 @@ fn jobs(good: &Run<'_>, runtime: &tokio::runtime::Runtime, db: &TestDb) {
         text(&out.stderr)
     );
 
-    // The worker runs them, and stops cleanly on SIGTERM.
+    // The worker runs them, and stops cleanly on SIGTERM. The schedules are removed first: a
+    // built-in clean-up job that falls due while this test runs (at the turn of the hour) would
+    // add a job to the counts below.
+    runtime.block_on(db.exec("DELETE FROM fb_schedule"));
     let worker = good.spawn(&["worker", "--concurrency", "2"]);
     let started = std::time::Instant::now();
     loop {

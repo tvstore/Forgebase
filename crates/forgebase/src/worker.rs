@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use forgebase_core::meta::Registry;
 use forgebase_db::jobs::{self, Claimed, Failure, JobConnection, Known};
+use forgebase_db::schedule::{self, Spec};
 use forgebase_db::{DbError, Pool};
 use tokio::sync::{mpsc, watch};
 
@@ -129,6 +130,8 @@ pub(crate) struct Worker {
     pool: Pool,
     registry: Arc<Registry>,
     jobs: BTreeMap<String, JobDef>,
+    /// The schedules of the binary by full job name.
+    schedules: BTreeMap<String, Spec>,
     config: WorkerConfig,
 }
 
@@ -137,14 +140,23 @@ impl Worker {
         pool: Pool,
         registry: Registry,
         jobs: BTreeMap<String, JobDef>,
+        schedules: BTreeMap<String, Spec>,
         config: WorkerConfig,
     ) -> Self {
         Self {
             pool,
             registry: Arc::new(registry),
             jobs,
+            schedules,
             config,
         }
+    }
+
+    /// One scheduler tick: enqueues the jobs of the due schedules, once however many workers
+    /// run ([`schedule::tick`]). `at` replaces the database's `now()` (tests only).
+    pub async fn tick(&self, at: Option<time::OffsetDateTime>) -> Result<usize, DbError> {
+        let mut client = self.pool.get().await?;
+        schedule::tick(&mut **client, &self.registry, &self.schedules, at).await
     }
 
     pub fn job_count(&self) -> usize {
@@ -300,6 +312,12 @@ impl Worker {
     /// One worker slot: claims and runs jobs until `stop` is set; sleeps `poll` when idle.
     async fn run_slot(self: Arc<Self>, worker: String, mut stop: Stop) {
         while !stop.is_set() {
+            // The tick comes before the claim, so a job that is due now is claimed at once.
+            match self.tick(None).await {
+                Ok(0) => {}
+                Ok(n) => log(&format!("scheduled {n} job(s)")),
+                Err(error) => log(&format!("error: {}", crate::error::describe_db(&error))),
+            }
             match self.run_one(&worker, &stop).await {
                 Ok(Some(_)) => continue,
                 Ok(None) => {}
@@ -475,6 +493,7 @@ mod tests {
     use crate::builder::Forgebase;
     use crate::compose::compose;
     use crate::jobs::JobFuture;
+    use crate::schedule::Schedule;
     use crate::testing::TestDb;
 
     const SEEN: &str = "name = \"seen\"\nlabel = \"Seen\"\n[[fields]]\nname = \"job_id\"\ntype = \"data\"\nrequired = true\nunique = true\n";
@@ -512,14 +531,17 @@ mod tests {
         }
     }
 
-    fn lab_binary(lab: &Arc<Lab>) -> Forgebase {
-        let app = App::new("lab")
+    fn lab_binary(lab: &Arc<Lab>, schedule: Option<Schedule>) -> Forgebase {
+        let mut app = App::new("lab")
             .doctypes(const { &[DocTypeFile::new("seen.toml", SEEN)] })
             .job_with(
                 "work",
                 LabJob(Arc::clone(lab)),
                 JobOptions::new().timeout(Duration::from_secs(3)),
             );
+        if let Some(schedule) = schedule {
+            app = app.schedule("work", schedule);
+        }
         Forgebase::new().app(app)
     }
 
@@ -531,9 +553,15 @@ mod tests {
         }
     }
 
-    async fn setup(grace: Duration) -> (TestDb, Arc<Lab>, Arc<Worker>) {
+    /// A worker on a migrated database. No schedule is left in the database unless the test
+    /// asks for one, so a built-in job that falls due while a test runs (at the turn of the
+    /// hour) cannot add a job to its counts.
+    async fn setup_with(
+        grace: Duration,
+        schedule: Option<Schedule>,
+    ) -> (TestDb, Arc<Lab>, Arc<Worker>) {
         let lab = Arc::new(Lab::default());
-        let binary = lab_binary(&lab);
+        let binary = lab_binary(&lab, schedule);
         let db = TestDb::new().await;
         db.migrate(&binary, false).await.expect("migrate");
         let composed = compose(&binary.apps, None).expect("composes");
@@ -541,8 +569,15 @@ mod tests {
             db.pool.clone(),
             composed.registry,
             composed.jobs,
+            composed.schedules,
             config(grace),
         ));
+        (db, lab, worker)
+    }
+
+    async fn setup(grace: Duration) -> (TestDb, Arc<Lab>, Arc<Worker>) {
+        let (db, lab, worker) = setup_with(grace, None).await;
+        db.exec("DELETE FROM fb_schedule").await;
         (db, lab, worker)
     }
 
@@ -678,7 +713,8 @@ mod tests {
     async fn a_timed_out_handler_loses_its_connection_instead_of_returning_it_to_the_pool() {
         let (db, _lab, worker) = setup(Duration::from_secs(5)).await;
         enqueue(&db, "{\"sleep_ms\": 20000}").await;
-        // While the handler sleeps its connection is idle in a transaction (it has begun its transaction).
+        // While the handler sleeps its connection is idle in a transaction (it has begun its
+        // transaction).
         let monitor = wait_handler_sleeping(&db, "w");
         let stop = Stop::never();
         let (outcome, pid) = tokio::join!(worker.run_one("w", &stop), monitor);
@@ -825,6 +861,61 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         // Nobody released it: it is still running, with a lease that will expire.
         assert_eq!(one(&db, "SELECT status FROM fb_job").await, ["running"]);
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_worker_enqueues_a_due_schedule_once_and_runs_it() {
+        let (db, lab, worker) =
+            setup_with(Duration::from_secs(5), Some(Schedule::every_minutes(1))).await;
+        // Only the app's schedule is left, and it is due (set in the past by SQL, so the test
+        // does not wait for a clock).
+        db.exec("DELETE FROM fb_schedule WHERE name <> 'lab.work'")
+            .await;
+        db.exec(
+            "UPDATE fb_schedule SET next_run_at = date_trunc('minute', now()) - interval '3 minutes'",
+        )
+        .await;
+        let due = one(
+            &db,
+            "SELECT to_char(next_run_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM fb_schedule",
+        )
+        .await
+        .remove(0);
+        let (stop, receiver) = signals();
+        let running = tokio::spawn(run_worker(worker, 2, "w", receiver));
+        // The precondition is the job being done, not elapsed time.
+        wait_row(
+            &db,
+            &format!(
+                "SELECT 1 FROM fb_job WHERE name = 'lab.work' AND status = 'done' \
+                 AND payload->>'scheduled_for' = '{due}' AND enqueued_by = 'scheduler'"
+            ),
+        )
+        .await;
+        stop.send(()).expect("open");
+        assert!(running.await.expect("worker"), "no slot panicked");
+        // Two slots ticked, and the due time was enqueued once. (The next tick, a minute
+        // boundary later, may or may not have come in the meantime: it has another due time.)
+        assert_eq!(
+            one(
+                &db,
+                &format!(
+                    "SELECT count(*)::text FROM fb_job WHERE payload->>'scheduled_for' = '{due}'"
+                )
+            )
+            .await,
+            ["1"]
+        );
+        assert!(lab.runs.load(Ordering::SeqCst) >= 1);
+        assert_eq!(
+            one(
+                &db,
+                "SELECT (last_run_at IS NOT NULL)::text FROM fb_schedule"
+            )
+            .await,
+            ["true"]
+        );
         db.cleanup().await;
     }
 }

@@ -8,7 +8,8 @@
 //! tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 //! ```
 //!
-//! What it gives: [`run_jobs`] runs the background jobs that are due, with the worker's own code.
+//! What it gives: [`run_jobs`] runs the background jobs that are due, with the worker's own code,
+//! and [`run_schedules_at`] enqueues the scheduled jobs that are due at a given time.
 //! [`TestDb`], a throwaway PostgreSQL database that can run `migrate` for a
 //! [`Forgebase`] and hands out an [`HttpClient`] that talks to the HTTP API in process (no
 //! socket), and [`assert_doctypes_listed`], a guard for the embedded DocType list.
@@ -345,6 +346,7 @@ pub async fn run_jobs(forgebase: &Forgebase, db: &TestDb) -> JobRun {
         db.pool.clone(),
         composed.registry,
         composed.jobs,
+        composed.schedules,
         WorkerConfig::default(),
     );
     let stop = Stop::never();
@@ -362,6 +364,47 @@ pub async fn run_jobs(forgebase: &Forgebase, db: &TestDb) -> JobRun {
     panic!(
         "run_jobs stopped after {RUN_JOBS_LIMIT} jobs: a job probably enqueues itself again and again"
     );
+}
+
+/// Enqueues the job of every schedule of `forgebase` that is due at `at` (its `next_run_at` is
+/// not after `at`) and returns how many jobs it enqueued. It runs the worker's own tick with
+/// `at` in place of the database's `now()`; `run_jobs` then runs the jobs. After a tick the
+/// schedule's `next_run_at` is the first time after `at`, so the same `at` enqueues nothing
+/// more, and a test moves time forward by passing a later `at`.
+///
+/// `TestDb::migrate` writes the schedules, so migrate first (a database that was not migrated
+/// has no schedule table). The payload of each job is `{"scheduled_for": ...}` with the time
+/// that was due. The built-in clean-up jobs are scheduled like the app's, so a due built-in
+/// job is enqueued too and counted.
+///
+/// ```ignore
+/// db.migrate(&binary, false).await.expect("migrate");
+/// let at = OffsetDateTime::now_utc() + Duration::days(1);
+/// assert!(run_schedules_at(&binary, &db, at).await >= 1);
+/// run_jobs(&binary, &db).await;
+/// ```
+///
+/// # Panics
+///
+/// When the apps do not fit together or on a database error (for example, before `migrate`).
+pub async fn run_schedules_at(
+    forgebase: &Forgebase,
+    db: &TestDb,
+    at: time::OffsetDateTime,
+) -> usize {
+    let composed = compose(&forgebase.apps, None)
+        .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
+    let worker = Worker::new(
+        db.pool.clone(),
+        composed.registry,
+        composed.jobs,
+        composed.schedules,
+        WorkerConfig::default(),
+    );
+    worker
+        .tick(Some(at))
+        .await
+        .unwrap_or_else(|e| panic!("run_schedules_at: {e}"))
 }
 
 async fn drop_database(admin_url: &str, name: &str) {

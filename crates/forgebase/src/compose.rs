@@ -15,9 +15,11 @@ use std::path::Path;
 
 use forgebase_core::ident::validate_doctype_name;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType, Registry};
+use forgebase_db::schedule::{Declared, Spec};
 use forgebase_db::{AppMigration, AppSpec, DbError, MigrateReport, Pool, SyncOptions};
 
 use crate::app::{App, MigrationFile};
+use crate::builtin;
 use crate::doctypes::read_dir;
 use crate::error::bullets;
 use crate::worker::JobDef;
@@ -72,6 +74,8 @@ pub(crate) struct Composed {
     pub registry: Registry,
     /// The jobs of all apps by full name (`<app>.<job>`); the registry has the names.
     pub jobs: BTreeMap<String, JobDef>,
+    /// The schedules of all apps and the built-in ones, by full job name (valid ones only).
+    pub schedules: BTreeMap<String, Spec>,
     /// The registered apps (not `local`) in app order.
     apps: Vec<AppInfo>,
 }
@@ -119,7 +123,12 @@ impl Composed {
                 migrations,
             })
             .collect();
-        forgebase_db::migrate_apps(pool, &self.registry, &specs, options).await
+        let declared: Vec<Declared<'_>> = self
+            .schedules
+            .iter()
+            .map(|(name, spec)| Declared { name, spec })
+            .collect();
+        forgebase_db::migrate_all(pool, &self.registry, &specs, Some(&declared), options).await
     }
 }
 
@@ -186,6 +195,7 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
     }
     // Jobs do not depend on the DocType files, so their problems are reported with the others.
     let jobs = check_jobs(apps, &mut registry, &mut errors);
+    let schedules = check_schedules(apps, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -193,6 +203,7 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
     Ok(Composed {
         registry,
         jobs,
+        schedules,
         apps: apps
             .iter()
             .map(|a| AppInfo {
@@ -210,6 +221,12 @@ pub(crate) fn app_name_problems(name: &str) -> Vec<String> {
     let mut problems = Vec::new();
     if let Err(reason) = validate_doctype_name(name) {
         problems.push(format!("app name {name:?} {reason}"));
+    }
+    if name == builtin::APP {
+        problems.push(format!(
+            "app name `{}` is reserved for the framework's own jobs",
+            builtin::APP
+        ));
     }
     if name == LOCAL_APP {
         problems.push(format!(
@@ -432,6 +449,11 @@ fn check_jobs(
     errors: &mut StartupError,
 ) -> BTreeMap<String, JobDef> {
     let mut jobs = BTreeMap::new();
+    // The framework's own jobs come first: they exist in every binary.
+    for (def, _) in builtin::builtin() {
+        registry.add_job(&def.name);
+        jobs.insert(def.name.clone(), def);
+    }
     for app in apps {
         let mut seen = BTreeSet::new();
         for (name, handler, options) in &app.jobs {
@@ -470,6 +492,46 @@ fn check_jobs(
         }
     }
     jobs
+}
+
+/// Checks the schedules of the apps and adds the built-in ones. A schedule must name a job the
+/// same app registered, at most once, and have valid values. Returns the valid schedules by
+/// full job name.
+fn check_schedules(apps: &[App], errors: &mut StartupError) -> BTreeMap<String, Spec> {
+    let mut schedules = BTreeMap::new();
+    for (def, spec) in builtin::builtin() {
+        schedules.insert(def.name, spec);
+    }
+    for app in apps {
+        let app_name = &app.name;
+        let mut seen = BTreeSet::new();
+        for (job, schedule) in &app.schedules {
+            if !app.jobs.iter().any(|(name, _, _)| name == job) {
+                errors.apps.push(format!(
+                    "app `{app_name}`: schedule for job `{job}`, which `{app_name}` did not register \
+                     (register it with App::job first; an app schedules only its own jobs)"
+                ));
+                continue;
+            }
+            if !seen.insert(job.as_str()) {
+                errors.apps.push(format!(
+                    "app `{app_name}`: job `{job}` has more than one schedule"
+                ));
+                continue;
+            }
+            let problems = schedule.problems();
+            for problem in &problems {
+                errors.apps.push(format!(
+                    "app `{app_name}`: schedule for job `{job}`: {problem}"
+                ));
+            }
+            let full = format!("{app_name}.{job}");
+            if problems.is_empty() {
+                schedules.entry(full).or_insert(schedule.spec);
+            }
+        }
+    }
+    schedules
 }
 
 #[cfg(test)]
