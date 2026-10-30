@@ -28,7 +28,7 @@ Non-goals (from the plan): workflows defined at runtime or changed by another ap
 [workflow]
 
 [[workflow.states]]
-name = "Draft"              # unique in the workflow, 1 to 64 characters; the first state is the initial state
+name = "Draft"              # unique in the workflow, 1 to 64 characters, no leading or trailing whitespace; the first state is the initial state
 docstatus = 0               # 0, 1 or 2; 1 and 2 only on a submittable DocType
 style = "neutral"           # badge tone: neutral (default) | success | warning | danger | info
 
@@ -84,7 +84,7 @@ These choices were made while implementing M8.1 and are reviewed with that chang
 
 **Effective state.** The stored `workflow_state`; a NULL or unknown state has no transitions. The JSON of a document has `"workflow_state"` only when the document has one, so the output of a DocType without a workflow is unchanged. `workflow_state` can be filtered and sorted in list queries.
 
-**HTTP.** `POST /api/v1/resource/{doctype}/{name}/transition` with `{"action", "version"}` returns the document (200). `GET .../transitions` returns `{"state", "transitions": [{"action", "to"}]}`: the transitions from the current state that this caller may take now (role and right, `if_owner` applied; the hooks are not run, so one may still veto); it needs read access (404 otherwise). `GET .../history` returns `{"history": [{"action", "from", "to", "actor", "at"}]}`, oldest first, capped at the newest 500 rows. `GET /api/v1/meta/{doctype}` has `"workflow": null` or `{"states": [{"name", "docstatus", "style"}], "transitions": [{"action", "from", "to"}]}`: **roles and `edit_roles` are not sent**, like the `[[permissions]]` rules; the desk uses `/transitions` for what the caller may do. New error codes, all 409: `workflow_required` (plain submit or cancel), `no_workflow` (a transition, its list or its history on a DocType without a workflow), `unknown_transition`. A missing role or right, and an update refused by `edit_roles`, are 403 `permission_denied`.
+**HTTP.** `POST /api/v1/resource/{doctype}/{name}/transition` with `{"action", "version"}` returns the document (200). `GET .../transitions` returns `{"state", "transitions": [{"action", "to"}]}`: the transitions from the current state that this caller may take now (role and right, `if_owner` applied, and only those whose from-state has the document's docstatus; the hooks are not run, so one may still veto); it needs read access (404 otherwise). `GET .../history` returns `{"history": [{"action", "from", "to", "actor", "at"}]}`, oldest first, capped at the newest 500 rows. `GET /api/v1/meta/{doctype}` has `"workflow": null` or `{"states": [{"name", "docstatus", "style"}], "transitions": [{"action", "from", "to"}]}`: **roles and `edit_roles` are not sent**, like the `[[permissions]]` rules; the desk uses `/transitions` for what the caller may do. New error codes, all 409: `workflow_required` (plain submit or cancel), `no_workflow` (a transition, its list or its history on a DocType without a workflow), `unknown_transition`. A missing role or right, and an update refused by `edit_roles`, are 403 `permission_denied`.
 
 **CLI.** `forgebase doc transition DOCTYPE NAME ACTION --version N [--doctypes DIR] [--actor NAME]` prints the document as stored. Like every `doc` command it runs as the trusted system context: **the roles of the transition are not checked**, and `--actor` is recorded in the log. `doc submit` and `doc cancel` on a workflow DocType fail with exit code 1.
 

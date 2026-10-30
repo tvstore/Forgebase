@@ -1175,7 +1175,8 @@ impl DocType {
 /// workflow.
 pub const WORKFLOW_COLUMN: &str = "workflow_state";
 
-/// A state or action name: not blank, at most [`MAX_NAME_LEN`] characters, no NUL.
+/// A state or action name: not blank, no leading or trailing whitespace, at most
+/// [`MAX_NAME_LEN`] characters, no NUL.
 fn check_workflow_name(kind: &'static str, name: &str, errors: &mut Vec<DefinitionError>) {
     let reason = if name.trim().is_empty() {
         "must not be empty"

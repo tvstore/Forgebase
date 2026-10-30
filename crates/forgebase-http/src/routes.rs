@@ -544,7 +544,8 @@ pub async fn transition(
 }
 
 /// `GET /api/v1/resource/{doctype}/{name}/transitions`: the state of the document and the
-/// transitions from it that the caller may take now (role and right, `if_owner` applied).
+/// transitions from it that the caller may take now (role and right, `if_owner` applied; a
+/// transition whose from-state has another docstatus than the document is left out).
 /// Hooks are not run, so a hook may still refuse one.
 pub async fn transitions(
     State(state): State<AppState>,
