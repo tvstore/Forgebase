@@ -6,48 +6,7 @@
 //! transaction as the document change), another job with [`JobContext::enqueue`], or an operator
 //! with `forgebase job enqueue`. `forgebase worker` runs it.
 //!
-//! # Delivery
-//!
-//! - **At least once.** A job runs in **one database transaction together with its completion**:
-//!   what the handler writes through [`JobContext::documents`] or [`JobContext::enqueue`]
-//!   commits with the completion, or is rolled back and the job is tried again. Effects outside
-//!   the database (an email, an HTTP call) are not covered: a job that crashes after sending may
-//!   send again, so make such effects safe to repeat.
-//! - **Retries.** A handler error is retried, up to [`JobOptions::max_attempts`] attempts (5 by
-//!   default), after a delay that starts at 30 seconds and doubles up to 1 hour; then the job is
-//!   `dead` until an operator runs `forgebase job retry`. [`JobError::permanent`] skips the
-//!   retries. A handler that runs longer than its timeout (5 minutes by default) fails the same
-//!   way, and a handler that panics is a retryable failure (the worker survives).
-//! - **Options live in the binary.** They are not stored on the job row: the worker uses the
-//!   definition in its own binary when it runs and retries a job, so a change takes effect for
-//!   jobs that are already queued.
-//! - **A worker claims only the jobs it knows**, by name. A job of an app that this binary does
-//!   not have stays `queued` for a binary that has it.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use forgebase::{App, JobContext, JobError, JobFuture, JobHandler};
-//!
-//! struct Welcome;
-//!
-//! impl JobHandler for Welcome {
-//!     fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
-//!         Box::pin(async move {
-//!             let customer = ctx.payload()["customer"].as_str().unwrap_or_default().to_owned();
-//!             let found = ctx.documents().get("customer", &customer).await?;
-//!             if found.is_none() {
-//!                 return Err(JobError::permanent("the customer is gone"));
-//!             }
-//!             Ok(())
-//!         })
-//!     }
-//! }
-//!
-//! pub fn app() -> App {
-//!     App::new("crm").job("welcome", Welcome)
-//! }
-//! ```
+//! The rules of delivery are on [`JobHandler`].
 
 use std::fmt;
 use std::future::Future;
@@ -75,9 +34,52 @@ pub type JobFuture<'a> = Pin<Box<dyn Future<Output = Result<(), JobError>> + Sen
 /// }
 /// ```
 ///
-/// The handler may run more than once for one job (at-least-once delivery, see the
-/// [module documentation](self)). It runs inside a database transaction; if it returns an error
+/// The handler may run more than once for one job (at-least-once delivery, see
+/// Delivery below). It runs inside a database transaction; if it returns an error
 /// everything it did through `ctx` is rolled back.
+///
+/// # Delivery
+///
+/// - **At least once.** A job runs in **one database transaction together with its completion**:
+///   what the handler writes through [`JobContext::documents`] or [`JobContext::enqueue`]
+///   commits with the completion, or is rolled back and the job is tried again. Effects outside
+///   the database (an email, an HTTP call) are not covered: a job that crashes after sending may
+///   send again, so make such effects safe to repeat.
+/// - **Retries.** A handler error is retried, up to [`JobOptions::max_attempts`] attempts (5 by
+///   default), after a delay that starts at 30 seconds and doubles up to 1 hour; then the job is
+///   `dead` until an operator runs `forgebase job retry`. [`JobError::permanent`] skips the
+///   retries. A handler that runs longer than its timeout (5 minutes by default) fails the same
+///   way, and a handler that panics is a retryable failure (the worker survives).
+/// - **Options live in the binary.** They are not stored on the job row: the worker uses the
+///   definition in its own binary when it runs and retries a job, so a change takes effect for
+///   jobs that are already queued.
+/// - **A worker claims only the jobs it knows**, by name. A job of an app that this binary does
+///   not have stays `queued` for a binary that has it.
+///
+/// # Example
+///
+/// ```ignore
+/// use forgebase::{App, JobContext, JobError, JobFuture, JobHandler};
+///
+/// struct Welcome;
+///
+/// impl JobHandler for Welcome {
+///     fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+///         Box::pin(async move {
+///             let customer = ctx.payload()["customer"].as_str().unwrap_or_default().to_owned();
+///             let found = ctx.documents().get("customer", &customer).await?;
+///             if found.is_none() {
+///                 return Err(JobError::permanent("the customer is gone"));
+///             }
+///             Ok(())
+///         })
+///     }
+/// }
+///
+/// pub fn app() -> App {
+///     App::new("crm").job("welcome", Welcome)
+/// }
+/// ```
 pub trait JobHandler: Send + Sync {
     /// Runs the job. `Ok(())` completes it; an error is retried or, for
     /// [`JobError::permanent`], ends it.
@@ -150,8 +152,7 @@ impl std::error::Error for JobError {}
 /// to 1 hour, and a 5 minute timeout. Build with [`JobOptions::new`] and the methods below, and
 /// give it to [`App::job_with`](crate::App::job_with); invalid values are a startup error.
 ///
-/// The options are part of the binary, not of the job row (see the [module
-/// documentation](self)).
+/// The options are part of the binary, not of the job row (see Delivery on [`JobHandler`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JobOptions {

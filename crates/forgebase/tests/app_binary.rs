@@ -384,7 +384,7 @@ fn jobs(good: &Run<'_>, runtime: &tokio::runtime::Runtime, db: &TestDb) {
     );
 
     // The worker runs them, and stops cleanly on SIGTERM.
-    let mut worker = good.spawn(&["worker", "--concurrency", "2"]);
+    let worker = good.spawn(&["worker", "--concurrency", "2"]);
     let started = std::time::Instant::now();
     loop {
         let done = count(
