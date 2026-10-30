@@ -1,8 +1,8 @@
 # Owner decisions and thinking
 
 This file records the project owner's decisions, comments and way of thinking. Every agent and contributor
-should read it **before planning**. When a choice is unclear, it is the best guide to what the owner would
-decide. It does not replace the detailed records: each entry links to the ADR or blueprint section that
+should read it **before planning**. It helps shape options and recommendations; it never replaces the owner's
+approval for owner-level decisions ([AGENTS.md §8 and §10.4](../AGENTS.md#8-final-rule)). It does not replace the detailed records: each entry links to the ADR or blueprint section that
 holds the details. If an entry and a linked Accepted record disagree, the linked record wins, and the
 mismatch is reported to the owner.
 
@@ -20,7 +20,8 @@ reports them to the information session ([AGENTS.md, section 10](../AGENTS.md#10
 
 ## 1. How the owner thinks
 
-Distilled from the decisions below. Apply these when the owner is not available, and say that you did.
+Distilled from the decisions below. Use these to choose within an approved plan and to shape recommendations, and say
+that you did. An owner-level decision ([AGENTS.md §10.4](../AGENTS.md#104-deviations-pdca)) still goes to the owner.
 
 1. **Longevity over speed.** A framework that the owner, other people and other agents can maintain for
    years. The owner said, when approving M5: *"pikirkan matang-matang ... framework akan digunakan jangka
@@ -51,7 +52,9 @@ Distilled from the decisions below. Apply these when the owner is not available,
    work. Show working software (screenshots, a runnable quick start), not only reports.
 7. **The UI must suit business users.** It must be simple, clean, elegant, corporate and user friendly:
    *"UI nya simple and clean, lalu UX yg user friendly"*; *"clean, simpel, elegan dan cocok untuk
-   corporate"*. Navy (the logo background) is the brand colour of the UI. Yellow stays only in the logo.
+   corporate"*. From UX.3 on, navy #1B2A5C (the logo background) is the brand colour of the UI and yellow stays only in the logo
+   (owner decision 2026-10-30, below). Until UX.3 is merged, the desk and architecture §11 still use the yellow accent
+   of UX-5.
 8. **Communication: results only.** Use Indonesian with the owner and English in code and docs. In the
    information session, report only finished results (merged pull requests, milestones Done) and decisions
    that are needed. Never send "waiting" or "no new results" messages. The history must read cleanly.
@@ -88,7 +91,7 @@ where its details live.
 
 | Decision | Recorded in |
 |---|---|
-| A new branch and pull request per piece of work (option a). | [milestones](blueprint/milestones.md) |
+| A new branch and pull request per piece of work (option a). | information session (not recorded elsewhere); see [AGENTS.md §5](../AGENTS.md#5-git-and-repository-safety) |
 | MSRV = pinned toolchain minus 2 minor versions (1.97). | [maintenance policy](blueprint/maintenance-policy.md) |
 | Fix the M0 minor findings; add CONTRIBUTING and CHANGELOG to AGENTS.md §6; Frappe verification later. | [AGENTS.md §6](../AGENTS.md#6-documentation-structure) |
 
@@ -99,8 +102,8 @@ where its details live.
 | Three pull requests: M1.1, M1.2 and M1.3. | [milestones](blueprint/milestones.md) |
 | DocType files in **TOML**. | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
 | `time` for dates and times. `rust_decimal` for decimals. | [dependency evaluation](blueprint/dependency-evaluation.md) |
-| PostgreSQL **16** is the minimum. | [ADR 0003](adr/0003-postgresql-only.md) |
-| Integration tests fail clearly without a database and are never skipped. | [maintenance policy](blueprint/maintenance-policy.md) |
+| PostgreSQL **16** is the minimum. | [maintenance policy](blueprint/maintenance-policy.md), [ADR 0003](adr/0003-postgresql-only.md) |
+| Integration tests fail clearly without a database and are never skipped. | [CONTRIBUTING](../CONTRIBUTING.md) |
 | `clap` (derive) for the command line. | [dependency evaluation](blueprint/dependency-evaluation.md) |
 | UUID v7 primary keys, generated in the application. | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
 | tokio-postgres and deadpool were confirmed by the spike. | [ADR 0004](adr/0004-database-access-layer.md) |
@@ -113,7 +116,7 @@ where its details live.
 | Hooks are synchronous and have no database access. | [ADR 0009](adr/0009-lifecycle-pipeline-and-hooks.md) |
 | A save replaces all child rows. | [architecture §4](blueprint/architecture.md) |
 | An amended document is named `<name>-<n>`. | [architecture §6](blueprint/architecture.md) |
-| Naming series are gapless and counted in the same transaction. DocTypes that share a prefix share the counter (option a: *"untuk keputusan saya mengikuti plan anda"*). | [architecture §6](blueprint/architecture.md) |
+| Naming series are gapless and counted in the same transaction. DocTypes that share a prefix share the counter (option a, 2026-10-29: *"untuk keputusan saya mengikuti plan anda"*). | [architecture §6](blueprint/architecture.md) |
 | Optimistic concurrency with `version`. | [architecture §6](blueprint/architecture.md) |
 
 ### M3 Auth, permissions, REST API (2026-10-29, "keputusan 1-12 setuju semua")
@@ -164,20 +167,20 @@ where its details live.
 | Retry defaults. | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md) |
 | Built-in clean-up jobs. | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md) |
 | CLI-only operations. | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md) |
-| ~~Keep `dead` jobs until retried~~ (superseded). | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md) |
-| **Delete `dead` jobs 7 days after they finish**, like `done` jobs: *"hapus juga job dead setelah 7 hari"* (given in the working session). | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md) |
-| ADR 0010 gets a status note about the clean-up job. | [ADR 0010](adr/0010-authentication-and-sessions.md) |
+| ~~P-1: keep `dead` jobs until an operator retries them (the first reading of decision 8)~~ (superseded, row below). | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md#implementation-details-m62) |
+| **Delete `dead` jobs 7 days after they finish**, like `done` jobs: *"hapus juga job dead setelah 7 hari"* (given in the working session; supersedes P-1). | [ADR 0013](adr/0013-jobs-scheduler-and-transactional-outbox.md#implementation-details-m62) |
+| P-2: ADR 0010 gets a status note about the clean-up job (delivered with UX.1). | [ADR 0010](adr/0010-authentication-and-sessions.md) |
 
 ### Milestone UX (2026-10-30)
 
 | Decision | Recorded in |
 |---|---|
-| UX before M7: *"UI nya simple and clean, lalu UX yg user friendly"*. | [milestones](blueprint/milestones.md) |
-| Humanized default field labels. | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
-| `read_only`, `title_field` and `list_fields` in metadata. | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
-| Sidebar grouped by app, plus breadcrumbs. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
-| Still no UI component library. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
-| ~~Yellow accent (UX-5)~~ (superseded by T2). | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
+| UX-1: UX before M7: *"UI nya simple and clean, lalu UX yg user friendly"*. | [milestones](blueprint/milestones.md) |
+| UX-2: a field without `label` gets the humanized name (`order_date` gives "Order Date"). The DocType `label` stays required (M1 decision). | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
+| UX-2: `read_only`, `title_field` and `list_fields` in metadata. | [architecture §3](blueprint/architecture.md#3-metadata-doctype-model-proposed) |
+| UX-3: sidebar grouped by app, plus breadcrumbs. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
+| UX-4: still no UI component library. | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) |
+| ~~UX-5: the Forgebase yellow as the accent~~ (superseded by T2, the UX.3 navy decision of 2026-10-30, below). | [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) (still shows UX-5 until UX.3) |
 
 ### M7 Site management (2026-10-30, "setuju semua")
 
@@ -190,13 +193,17 @@ where its details live.
 | One worker per site. | [ADR 0014](adr/0014-multi-site-database-per-site.md) |
 | Backup and restore with `pg_dump` and `pg_restore`. | [ADR 0014](adr/0014-multi-site-database-per-site.md) |
 
-### UX.3 Tailwind and corporate palette, and M8 Workflow and reports (2026-10-30, "oke setuju semua dengan plan mu")
+### UX.3 Tailwind and corporate palette, and M8 Workflow and reports (2026-10-30, "oke setuju semua dengan plan mu"; information session, not yet recorded in the repository)
+
+These decisions were approved in the information session. Their ADRs and milestone entries are written by the UX.3 and
+M8 pull requests; until then this table is the only record, and the current records (architecture §11, milestones)
+describe the state before these decisions.
 
 | Decision | Recorded in |
 |---|---|
-| **Tailwind CSS v4** as a build-time styling tool. Still no component kits. *"UI pakai tailwind agar tampilan ui clean, simpel, elegan dan cocok untuk corporate"* | ADR 0017 (UX.3) |
-| **Navy #1B2A5C** (the logo background) is the primary UI colour. Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | ADR 0017 (UX.3) |
-| System font stack. | ADR 0017 (UX.3) |
-| Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | ADR 0015 (M8.1) |
-| Saved views: private per user; shared views only by Administrator. Group-by summary. | M8.3 |
-| Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | ADR 0016 (M8.4) |
+| T1: **Tailwind CSS v4** as a build-time styling tool. Still no component kits. *"UI pakai tailwind agar tampilan ui clean, simpel, elegan dan cocok untuk corporate"* | planned: the UX.3 ADR |
+| T2: **Navy #1B2A5C** (the logo background) is the primary UI colour (supersedes UX-5). Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | planned: the UX.3 ADR |
+| T3: system font stack. | planned: the UX.3 ADR |
+| Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | planned: the M8.1 ADR |
+| Saved views: private per user; shared views only by Administrator. Group-by summary. | planned: the M8.3 pull request |
+| Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | planned: the M8.4 ADR |

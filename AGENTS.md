@@ -106,7 +106,7 @@ Do not duplicate content across documents; link instead.
 
 If implementation speed conflicts with long-term maintainability, choose maintainability. If an important decision is unclear, ask a question or present concrete options. Do not guess and then implement.
 
-Every decision or comment the owner gives is recorded in [docs/owner-decisions.md](docs/owner-decisions.md) (rules at the top of that file). Read it before planning: it is the best guide to what the owner would decide.
+Every decision or comment the owner gives is recorded in [docs/owner-decisions.md](docs/owner-decisions.md) (rules at the top of that file). Read it before planning. It informs recommendations; it does not replace asking the owner.
 
 ## 9. Model Selection Policy
 
