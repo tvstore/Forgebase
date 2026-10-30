@@ -201,7 +201,7 @@ M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tail
 (M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The saved views and group-by summary row is recorded in
 [architecture §11](blueprint/architecture.md#11-desk-reports-workflow) and [§7](blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed)
 (M8.3, [#35](https://github.com/agilma/Forgebase/pull/35)). The query reports row is recorded in
-[ADR 0016](adr/0016-query-reports-read-only-execution.md) (M8.4, this pull request). The other M8 rows are still planned:
+[ADR 0016](adr/0016-query-reports-read-only-execution.md) (M8.4, [#37](https://github.com/agilma/Forgebase/pull/37)). The other M8 rows are still planned:
 until their pull requests land, this table is their only record.
 
 | Decision | Recorded in |
