@@ -7,6 +7,7 @@ use std::sync::Arc;
 use forgebase_core::hooks::DocTypeHooks;
 
 use crate::jobs::{JobHandler, JobOptions};
+use crate::schedule::Schedule;
 
 /// A DocType definition file embedded in the binary: its path (for error messages) and its
 /// TOML text. Build the list with [`doctypes!`](crate::doctypes); by hand (in a test, for
@@ -197,7 +198,7 @@ macro_rules! migrations {
 ///   of an app that extends another run after the hooks of the app it extends;
 /// - declare SQL data migrations;
 /// - register background jobs ([`App::job`]), which hooks, other jobs and the command line can
-///   enqueue.
+///   enqueue, and run them on a [`Schedule`] ([`App::schedule`]).
 ///
 /// What it may not do: change the definition of another app's DocType (add fields to it, for
 /// example), run code outside the binary, or reach the database from a hook (a hook may
@@ -211,6 +212,7 @@ pub struct App {
     pub(crate) hooks: Vec<(String, Arc<dyn DocTypeHooks>)>,
     pub(crate) migrations: Vec<MigrationFile>,
     pub(crate) jobs: Vec<(String, Arc<dyn JobHandler>, JobOptions)>,
+    pub(crate) schedules: Vec<(String, Schedule)>,
 }
 
 impl fmt::Debug for App {
@@ -237,6 +239,14 @@ impl fmt::Debug for App {
                     .map(|(name, _, _)| name)
                     .collect::<Vec<_>>(),
             )
+            .field(
+                "schedules",
+                &self
+                    .schedules
+                    .iter()
+                    .map(|(job, schedule)| (job, &schedule.spec))
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -254,6 +264,7 @@ impl App {
             hooks: Vec::new(),
             migrations: Vec::new(),
             jobs: Vec::new(),
+            schedules: Vec::new(),
         }
     }
 
@@ -321,6 +332,22 @@ impl App {
     ) -> Self {
         self.jobs
             .push((name.to_owned(), Arc::new(handler), options));
+        self
+    }
+
+    /// Runs one of this app's jobs on a [`Schedule`]. `job` is the short name given to
+    /// [`App::job`]; the job runs as `<app>.<job>` and gets the payload
+    /// `{"scheduled_for": "<RFC 3339 UTC time of the tick>"}`. `forgebase worker` enqueues it
+    /// at every tick (once, however many workers run) and runs it like any other job, with the
+    /// same retries.
+    ///
+    /// Startup errors: a job this app did not register (a schedule for another app's job is
+    /// refused too), a second schedule for the same job, and an invalid schedule.
+    ///
+    /// The schedules are stored by `forgebase migrate`, so run it after adding, changing or
+    /// removing one; see [`Schedule`] and ADR 0013.
+    pub fn schedule(mut self, job: &str, schedule: Schedule) -> Self {
+        self.schedules.push((job.to_owned(), schedule));
         self
     }
 

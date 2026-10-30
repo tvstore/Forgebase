@@ -537,11 +537,6 @@ async fn worker(
     concurrency: u32,
 ) -> Result<(), CliError> {
     let composed = composed(apps, doctypes)?;
-    if composed.jobs.is_empty() {
-        return Err(CliError::Config(
-            "this binary has no jobs: register them with App::job".to_owned(),
-        ));
-    }
     let size = usize::try_from(concurrency)
         .unwrap_or(usize::MAX)
         .saturating_add(2);
@@ -551,6 +546,7 @@ async fn worker(
         pool,
         composed.registry,
         composed.jobs,
+        composed.schedules,
         WorkerConfig::default(),
     );
     if run_worker(Arc::new(worker), concurrency, &worker_id(), signals).await {

@@ -38,6 +38,7 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool, apps: usize) -> Str
         }
     }
     app_migrations(&mut text, report, dry_run, apps);
+    schedules(&mut text, report, dry_run);
     if !sync.warnings.is_empty() {
         let _ = writeln!(text, "warnings: {}", sync.warnings.len());
         for warning in &sync.warnings {
@@ -48,6 +49,18 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool, apps: usize) -> Str
         text.push_str("dry run: nothing was changed\n");
     }
     text
+}
+
+/// The changes to the schedules, when there are any (nothing is printed when they are up to date).
+fn schedules(text: &mut String, report: &MigrateReport, dry_run: bool) {
+    if report.schedules.is_empty() {
+        return;
+    }
+    let verb = if dry_run { "would change" } else { "changed" };
+    let _ = writeln!(text, "schedules: {verb} {}", report.schedules.len());
+    for line in &report.schedules {
+        let _ = writeln!(text, "  {line}");
+    }
 }
 
 /// The app migrations, in the order they run (or would run).
@@ -97,11 +110,29 @@ mod tests {
             migrations: vec![],
             sync: Some(sync(0, vec![], false)),
             app_migrations: vec![],
+            schedules: vec![],
         };
         assert_eq!(
             migrate_report(&report, false, 0),
             "framework migrations: up to date\nschema sync: up to date\n"
         );
+    }
+
+    #[test]
+    fn schedule_changes_are_listed_only_when_there_are_some() {
+        let mut report = MigrateReport {
+            migrations: vec![],
+            sync: Some(sync(0, vec![], false)),
+            app_migrations: vec![],
+            schedules: vec![],
+        };
+        assert!(!migrate_report(&report, false, 0).contains("schedules"));
+        report.schedules = vec!["add crm.digest (daily 06:30)".to_owned()];
+        assert!(
+            migrate_report(&report, false, 0)
+                .contains("schedules: changed 1\n  add crm.digest (daily 06:30)\n")
+        );
+        assert!(migrate_report(&report, true, 0).contains("schedules: would change 1\n"));
     }
 
     #[test]
@@ -116,11 +147,12 @@ mod tests {
                 false,
             )),
             app_migrations: vec![],
+            schedules: vec![],
         };
         let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 5 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n"
+                "framework migrations: 6 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n"
             ),
             "{text}"
         );
@@ -138,9 +170,10 @@ mod tests {
             migrations: MIGRATIONS.iter().collect(),
             sync: None,
             app_migrations: vec![],
+            schedules: vec![],
         };
         let text = migrate_report(&report, true, 0);
-        assert!(text.contains("5 pending"), "{text}");
+        assert!(text.contains("6 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 
@@ -150,6 +183,7 @@ mod tests {
             migrations: vec![],
             sync: Some(sync(2, vec![], true)),
             app_migrations: vec![],
+            schedules: vec![],
         };
         let text = migrate_report(&report, true, 0);
         assert!(text.contains("would apply 2 step(s)"), "{text}");
@@ -167,6 +201,7 @@ mod tests {
             migrations: vec![],
             sync: Some(sync(0, vec![], false)),
             app_migrations: vec![],
+            schedules: vec![],
         };
         // No apps: nothing is said. Apps without pending migrations: up to date.
         assert!(!migrate_report(&report, false, 0).contains("app migrations"));

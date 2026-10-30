@@ -283,13 +283,14 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 5 pending"), "{text}");
+    assert!(text.contains("framework migrations: 6 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
             && text.contains("0003 auth")
             && text.contains("0004 apps")
-            && text.contains("0005 jobs"),
+            && text.contains("0005 jobs")
+            && text.contains("0006 schedules"),
         "{text}"
     );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
@@ -324,7 +325,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 5 applied"), "{text}");
+    assert!(text.contains("framework migrations: 6 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -1762,20 +1763,55 @@ fn serve_serves_the_desk_only_when_configured() {
 }
 
 #[test]
-fn the_worker_of_a_binary_without_jobs_says_so_and_job_commands_need_the_database() {
+fn the_worker_of_a_binary_without_app_jobs_runs_the_built_in_jobs_and_stops_on_sigterm() {
+    use std::io::{BufRead, BufReader};
+
     let db = TestDb::new();
-    // The stock binary has no apps, so no jobs: the worker refuses to start (no database work).
-    let output = db.forgebase(&["worker", "--doctypes", DOCTYPES]);
-    assert_eq!(code(&output), Some(1));
-    assert!(
-        stderr(&output).starts_with("error: this binary has no jobs"),
-        "{}",
-        stderr(&output)
+    // The stock binary has no apps, but the framework's own clean-up jobs: the worker starts.
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    assert_eq!(
+        db.scalar("SELECT string_agg(name || ' ' || spec, ', ' ORDER BY name) FROM fb_schedule")
+            .as_deref(),
+        Some(
+            "forgebase.purge_jobs daily 03:00, forgebase.purge_login_failures every 60m, forgebase.purge_sessions every 60m"
+        )
     );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+        .args(["worker", "--doctypes", DOCTYPES])
+        .env("FORGEBASE_DATABASE_URL", &db.url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the worker");
+    // Wait for the real precondition: the worker says it started.
+    let mut lines = BufReader::new(child.stderr.take().expect("stderr"));
+    let mut log = String::new();
+    loop {
+        let mut line = String::new();
+        let read = lines.read_line(&mut line).expect("read the worker log");
+        log.push_str(&line);
+        assert!(read > 0, "the worker ended before it started: {log}");
+        if line.contains("started ") {
+            break;
+        }
+    }
+    assert!(log.contains("3 job type(s)"), "{log}");
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(killed.success());
+    let status = child.wait().expect("worker exit");
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut lines, &mut rest).expect("read the rest of the log");
+    assert_eq!(status.code(), Some(0), "{log}{rest}");
+    assert!(rest.contains("stopped"), "{rest}");
     // A job name is checked against the binary's jobs: here there are none.
     let output = db.forgebase(&["job", "enqueue", "crm.welcome"]);
     assert_eq!(code(&output), Some(1));
-    // (the database has no framework tables yet, so that is the error shown first)
+    // (an app's job name is unknown to this binary)
     assert!(
         stderr(&output).starts_with("error: "),
         "{}",

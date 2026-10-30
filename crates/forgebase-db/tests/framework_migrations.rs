@@ -23,6 +23,7 @@ async fn migrates_empty_database_and_is_idempotent() {
             vec!["3".to_owned(), "auth".into(), "64".into()],
             vec!["4".to_owned(), "apps".into(), "64".into()],
             vec!["5".to_owned(), "jobs".into(), "64".into()],
+            vec!["6".to_owned(), "schedules".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -38,7 +39,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["5".to_owned()]]
+        vec![vec!["6".to_owned()]]
     );
 }
 
@@ -89,7 +90,7 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![2, 3, 4, 5]
+        vec![2, 3, 4, 5, 6]
     );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY version")
@@ -99,7 +100,8 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
             vec!["2".into()],
             vec!["3".into()],
             vec!["4".into()],
-            vec!["5".into()]
+            vec!["5".into()],
+            vec!["6".into()]
         ]
     );
     assert_eq!(
@@ -116,7 +118,7 @@ async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![3, 4, 5]
+        vec![3, 4, 5, 6]
     );
     assert_eq!(applied[0].name, "auth");
     for table in [
@@ -127,6 +129,7 @@ async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
         "fb_login_failure",
         "fb_app",
         "fb_app_migration",
+        "fb_schedule",
     ] {
         assert_eq!(
             db.rows(&format!("SELECT count(*)::text FROM {table}"))

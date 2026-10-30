@@ -276,6 +276,25 @@ pub async fn release(
     Ok(changed == 1)
 }
 
+/// How long a finished (`done`) job is kept before [`purge_done`] deletes it, in seconds
+/// (7 days).
+pub const DONE_RETENTION_SECS: f64 = 7.0 * 24.0 * 3600.0;
+
+/// Deletes up to `limit` jobs that are `done` and finished more than [`DONE_RETENTION_SECS`]
+/// ago, and returns how many it deleted. **Dead jobs are kept**: they need an operator
+/// (`forgebase job retry`). Queued and running jobs are never touched.
+pub async fn purge_done(client: &impl GenericClient, limit: i64) -> Result<u64, DbError> {
+    Ok(client
+        .execute(
+            "DELETE FROM fb_job WHERE id IN ( \
+               SELECT id FROM fb_job \
+               WHERE status = 'done' AND finished_at < now() - make_interval(secs => $1::float8) \
+               LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            &[&DONE_RETENTION_SECS, &limit],
+        )
+        .await?)
+}
+
 /// Which jobs [`list`] returns.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JobFilter<'a> {

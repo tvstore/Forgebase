@@ -1,6 +1,6 @@
 # 0012 App model and public API boundary
 
-- Status: Accepted. Public surface extended by M6.1 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
+- Status: Accepted. Public surface extended by M6.1 and M6.2 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
 - Date: 2026-10-29
 
 ## Context
@@ -47,6 +47,19 @@ Nothing else is public. The stock `forgebase` binary is `Forgebase::new().run()`
 | `HookContext::enqueue(name, payload)`, `HookContext::with_jobs(&EnqueuedJobs)`, `EnqueuedJobs` (`new`, `take`; `#[non_exhaustive]`), `EnqueuedJob` (`name`, `payload`; `#[non_exhaustive]`) | A hook asks for a job, written with the document change (the outbox). `with_jobs` lets an app's unit test see what a hook enqueued. `HookContext` stays `Copy`. |
 | `serde_json` (the crate), `Changes`, `DocStatus` | The payload type, re-exported so an app uses the same version as the framework; `Changes` and `DocStatus` are what `Documents` takes and returns (`Changes` was already the argument of `update`). |
 | `testing::run_jobs(&Forgebase, &TestDb) -> JobRun` (`done`, `retried`, `dead`; `#[non_exhaustive]`) | Runs the jobs that are due with the worker's own code. |
+
+### Public surface update (M6.2)
+
+[ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md) (M6.2) adds these items to the crate root of `forgebase`. Nothing else becomes public.
+
+| Item | Purpose |
+|---|---|
+| `Schedule` (`every_minutes`, `daily_at`, `weekly_on`; opaque, `#[non_exhaustive]`, `Debug`, `Clone`, `PartialEq`) | When a job runs: every N minutes (epoch aligned), daily or weekly, UTC only. Invalid values are startup errors. |
+| `Weekday` (`time::Weekday`, re-exported) | The day of `Schedule::weekly_on`; the same `time` version as `Date` and `OffsetDateTime`. |
+| `App::schedule(job, Schedule)` | Runs one of the app's own jobs on a schedule. A job the app did not register, a second schedule for a job and an invalid schedule are startup errors. |
+| `testing::run_schedules_at(&Forgebase, &TestDb, OffsetDateTime) -> usize` | Enqueues the schedules that are due at the given time with the worker's own tick; `run_jobs` then runs them. |
+
+The app name `forgebase` is reserved for the framework's own jobs (a startup error for an app).
 
 ## Implementation details (M5.1)
 
