@@ -7,10 +7,13 @@ import {
   deleteDocument,
   getDocument,
   getDocumentWithTitles,
+  getHistory,
+  getTransitions,
   transitionDocument,
   updateDocument,
+  workflowTransition,
 } from '../api';
-import type { Transition } from '../api';
+import type { AvailableAction, Transition } from '../api';
 import { docStatusLabel, docStatusOf, fieldReadOnly, hasEditableField, hasEditableRequired, headerActions } from '../access';
 import type { DocContext, LifecycleAction } from '../access';
 import { conflictMessage, isStaleCode, mapDetails } from '../errors';
@@ -22,9 +25,12 @@ import { formHref, listHref, navigate, setNavigationBlocker } from '../router';
 import { rowTitle } from '../listing';
 import { initials } from '../people';
 import { saveShortcut } from '../shortcut';
-import { statusBadge } from '../status';
+import { stateBadge } from '../status';
 import { exactTime, relativeTime } from '../time';
 import type { DocTypeMeta, DocumentRow, FieldMeta } from '../types';
+import { actionLayout } from '../workflow';
+import { ActivityCard } from './ActivityCard';
+import type { HistoryState } from './ActivityCard';
 import { Badge } from './Badge';
 import { Dialog } from './Dialog';
 import { FieldControl } from './FieldControl';
@@ -49,6 +55,7 @@ type Asking =
   | { kind: 'cancel' }
   | { kind: 'amend' }
   | { kind: 'reload' }
+  | { kind: 'workflow'; action: AvailableAction }
   | { kind: 'leave'; next: string }
   | null;
 
@@ -57,6 +64,12 @@ interface Failure {
   message: string;
   details: string[];
 }
+
+/** The workflow actions this caller may take now; kept while a refresh runs, so the buttons do not flicker. */
+type Available =
+  | { status: 'loading' }
+  | { status: 'ready'; state: string | null; actions: AvailableAction[] }
+  | { status: 'error' };
 
 const TRANSITION_VERB: Record<Transition, string> = {
   submit: 'submitted',
@@ -101,12 +114,19 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
   // Counts the attempts that failed, so the focus moves each time, also to the same field.
   const [attempt, setAttempt] = useState(0);
 
+  // The workflow (M8.2): what the caller may do now, and the log. Both are fetched again whenever
+  // the document's version changes (open, save, action, reload) and after a refused action.
+  const [available, setAvailable] = useState<Available>({ status: 'loading' });
+  const [history, setHistory] = useState<HistoryState>({ status: 'loading' });
+  const [refresh, setRefresh] = useState(0);
+
   const idBase = useId();
   const alertRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
   const isNew = doc === null;
+  const hasWorkflow = (meta.workflow ?? null) !== null;
   const ctx: DocContext = {
     isNew,
     docStatus: docStatusOf(doc?.docstatus),
@@ -114,6 +134,7 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
     owner: typeof doc?.owner === 'string' ? doc.owner : null,
     username,
     submittable: meta.submittable,
+    workflow: hasWorkflow,
   };
   const readOnlyOf = (field: FieldMeta): boolean => fieldReadOnly(ctx, meta, field);
   const changed = useMemo(() => changedFields(meta, saved, state), [meta, saved, state]);
@@ -122,6 +143,37 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
   const header = headerActions(ctx, dirty, canSave);
   const name = typeof doc?.name === 'string' ? doc.name : null;
   const version = typeof doc?.version === 'number' ? doc.version : 0;
+
+  useEffect(() => {
+    if (!hasWorkflow || name === null) return;
+    let cancelled = false;
+    getTransitions(meta.name, name).then(
+      (answer) => {
+        if (!cancelled) setAvailable({ status: 'ready', state: answer.state, actions: answer.transitions });
+      },
+      (e: unknown) => {
+        if (cancelled) return;
+        if (e instanceof ApiError && e.status === 404) {
+          // The document is gone (deleted or no longer readable): no actions, the same message as a failed save.
+          setAvailable({ status: 'ready', state: null, actions: [] });
+          setFailure({ message: e.message, details: [] });
+        } else {
+          setAvailable({ status: 'error' });
+        }
+      },
+    );
+    getHistory(meta.name, name).then(
+      (entries) => {
+        if (!cancelled) setHistory({ status: 'ready', entries });
+      },
+      () => {
+        if (!cancelled) setHistory({ status: 'error' });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [hasWorkflow, meta.name, name, version, refresh]);
 
   // The form heading takes the focus when the page opens, so a screen reader announces where the
   // user arrived (the page is replaced without a page load).
@@ -267,17 +319,44 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
     });
   };
 
+  /** True (and says so) when there are unsaved changes: an action that saves nothing must not run over them. */
+  const needSave = (): boolean => {
+    if (!dirty) return false;
+    setErrors({});
+    setFailure({ message: 'You have unsaved changes. Save them first.', details: [] });
+    setAttempt((n) => n + 1);
+    return true;
+  };
+
   /** Submit goes ahead; Cancel, Amend and Delete ask first. With unsaved changes all ask to save first. */
   const lifecycle = (action: LifecycleAction) => {
-    if (busy || name === null) return;
-    if (dirty) {
-      setErrors({});
-      setFailure({ message: 'You have unsaved changes. Save them first.', details: [] });
-      setAttempt((n) => n + 1);
-      return;
-    }
+    if (busy || name === null || needSave()) return;
     if (action === 'submit') transition('submit');
     else setAsking({ kind: action });
+  };
+
+  /** A workflow action always asks first; with unsaved changes it asks to save first (its button is disabled then). */
+  const askAction = (action: AvailableAction) => {
+    if (busy || name === null || needSave()) return;
+    setAsking({ kind: 'workflow', action });
+  };
+
+  const takeAction = (action: AvailableAction) => {
+    if (busy || name === null) return;
+    setAsking(null);
+    void run('moved', async () => {
+      try {
+        const result = await workflowTransition(meta.name, name, action.action, version);
+        toast(`${action.action}: ${action.to}`);
+        adopt(result);
+        // The button that was used is gone: put the focus on the heading, which names the document.
+        headingRef.current?.focus();
+      } catch (e) {
+        // The actions may have changed (another user moved the document, a role was removed).
+        setRefresh((n) => n + 1);
+        throw e;
+      }
+    });
   };
 
   const confirmDelete = () => {
@@ -344,7 +423,27 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
     if (recentName) recordRecent({ doctype: meta.name, name: recentName, title: recentTitle || recentName });
   }, [meta.name, recentName, recentTitle]);
 
-  const badge = statusBadge(doc?.docstatus);
+  const badge = stateBadge(meta, doc ?? {});
+  const layout = actionLayout(available.status === 'ready' ? available.actions : [], dirty);
+  const saveFirstId = `${idBase}-save-first`;
+  const fromState = (available.status === 'ready' ? available.state : null) ?? String(doc?.workflow_state ?? '');
+  const movingName = shown !== null && shown.title !== '' ? shown.title : docName;
+
+  /** A workflow action as a header button; while there are unsaved changes it is disabled and secondary. */
+  const actionButton = (action: AvailableAction, primary: boolean) => (
+    <button
+      key={action.action}
+      type="button"
+      className={primary && !layout.blocked ? 'btn btn-primary' : 'btn'}
+      aria-disabled={busy || layout.blocked || undefined}
+      aria-describedby={layout.blocked ? saveFirstId : undefined}
+      title={layout.blocked ? 'Save first' : undefined}
+      onClick={() => askAction(action)}
+    >
+      {action.action}
+    </button>
+  );
+  const moreCount = layout.more.length + header.more.length;
   const detailsId = `${idBase}-details`;
   const columnFields = meta.fields.filter((f) => f.type !== 'table');
   const tableFields = meta.fields.filter((f) => f.type === 'table');
@@ -364,7 +463,7 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
           }
           meta={
             <>
-              {meta.submittable && !isNew ? (
+              {(meta.submittable || hasWorkflow) && !isNew ? (
                 <Badge tone={badge.tone} className="status-badge">
                   {badge.label}
                 </Badge>
@@ -394,8 +493,27 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
                   Submit
                 </button>
               ) : null}
-              {header.more.length > 0 ? (
+              {layout.primary ? actionButton(layout.primary, true) : null}
+              {layout.secondary ? actionButton(layout.secondary, false) : null}
+              {layout.blocked && layout.primary ? (
+                <span id={saveFirstId} className="visually-hidden">
+                  Save your changes first.
+                </span>
+              ) : null}
+              {moreCount > 0 ? (
                 <MenuButton label="More" ariaLabel="More actions">
+                  {layout.more.map((action) => (
+                    <button
+                      key={action.action}
+                      type="button"
+                      className="menu-item"
+                      aria-disabled={busy || layout.blocked || undefined}
+                      title={layout.blocked ? 'Save first' : undefined}
+                      onClick={() => askAction(action)}
+                    >
+                      {action.action}
+                    </button>
+                  ))}
                   {header.more.map((action) => (
                     <button
                       key={action}
@@ -412,6 +530,15 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
             </>
           }
         />
+
+        {hasWorkflow && !isNew && available.status === 'error' ? (
+          <p className="hint workflow-error">
+            Cannot load the available actions.{' '}
+            <button type="button" className="btn btn-small" onClick={() => setRefresh((n) => n + 1)}>
+              Retry
+            </button>
+          </p>
+        ) : null}
 
         {failure ? (
           <div role="alert" tabIndex={-1} ref={alertRef} className="alert">
@@ -468,6 +595,17 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
             onCancel={() => setAsking(null)}
           >
             A new draft is created from this cancelled document.
+          </Dialog>
+        ) : null}
+        {asking?.kind === 'workflow' ? (
+          <Dialog
+            title={asking.action.action}
+            confirmLabel="Confirm"
+            cancelLabel="Back"
+            onConfirm={() => takeAction(asking.action)}
+            onCancel={() => setAsking(null)}
+          >
+            Move {movingName} from {fromState} to {asking.action.to}?
           </Dialog>
         ) : null}
         {asking?.kind === 'reload' ? (
@@ -603,7 +741,14 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
               </>
             )}
           </div>
-          {doc ? <DocumentInfo meta={meta} doc={doc} now={now} /> : null}
+          {doc ? (
+            <aside className="doc-side" aria-label="Document information">
+              <DocumentInfo meta={meta} doc={doc} now={now} />
+              {hasWorkflow ? (
+                <ActivityCard history={history} now={now} onRetry={() => setRefresh((n) => n + 1)} />
+              ) : null}
+            </aside>
+          ) : null}
         </div>
       </form>
     </div>
@@ -613,7 +758,7 @@ export function DocumentForm({ meta, initial, initialTitles, username }: Props) 
 /**
  * The info panel: who made the document and when, who changed it last and when, the version and,
  * for a submittable DocType, its status and what it amends. Times are relative, with the exact
- * local time on hover. The workflow history will be added here (M8.2).
+ * local time on hover. The workflow history is the Activity card under it (ActivityCard.tsx).
  */
 function DocumentInfo({ meta, doc, now }: { meta: DocTypeMeta; doc: DocumentRow; now: Date }) {
   const text = (value: unknown): string => (typeof value === 'string' ? value : '');
@@ -627,7 +772,7 @@ function DocumentInfo({ meta, doc, now }: { meta: DocTypeMeta; doc: DocumentRow;
       </time>
     );
   return (
-    <aside className="doc-side" aria-label="Document information">
+    <>
       <section className="card info" aria-labelledby="info-heading">
         <h2 id="info-heading">Document</h2>
         <dl>
@@ -670,6 +815,6 @@ function DocumentInfo({ meta, doc, now }: { meta: DocTypeMeta; doc: DocumentRow;
           ) : null}
         </dl>
       </section>
-    </aside>
+    </>
   );
 }

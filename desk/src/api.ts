@@ -264,3 +264,47 @@ export function transitionDocument(
     body: { version },
   });
 }
+
+/** An action of the workflow that the caller may take on a document now (`GET .../transitions`). */
+export interface AvailableAction {
+  action: string;
+  to: string;
+}
+
+export interface AvailableActions {
+  /** The document's workflow state, or null when it has none. */
+  state: string | null;
+  transitions: AvailableAction[];
+}
+
+/** The workflow actions this caller may take now (role and right applied; a hook may still veto). */
+export function getTransitions(doctype: string, name: string): Promise<AvailableActions> {
+  return request<AvailableActions>('GET', `${documentPath(doctype, name)}/transitions`);
+}
+
+/** Takes a workflow action; the answer is the stored document in its new state. */
+export function workflowTransition(
+  doctype: string,
+  name: string,
+  action: string,
+  version: number,
+): Promise<DocumentRow> {
+  return request<DocumentRow>('POST', `${documentPath(doctype, name)}/transition`, {
+    body: { action, version },
+  });
+}
+
+/** One committed transition of the log. */
+export interface HistoryEntry {
+  action: string;
+  from: string;
+  to: string;
+  actor: string;
+  at: string;
+}
+
+/** The transitions of a document, oldest first, at most the newest 500. */
+export async function getHistory(doctype: string, name: string): Promise<HistoryEntry[]> {
+  const answer = await request<{ history?: HistoryEntry[] }>('GET', `${documentPath(doctype, name)}/history`);
+  return answer?.history ?? [];
+}

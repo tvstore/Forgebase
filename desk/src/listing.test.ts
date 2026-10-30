@@ -7,7 +7,9 @@ import {
   formatDate,
   formatDateTime,
   groupDigits,
+  hasStatus,
   isNumericColumn,
+  isStatusKey,
   listColumns,
   listStateParams,
   nextSort,
@@ -18,7 +20,7 @@ import {
   sortText,
   withSearch,
 } from './listing';
-import type { DocTypeMeta, FieldMeta, FieldType } from './types';
+import type { DocTypeMeta, FieldMeta, FieldType, WorkflowMeta } from './types';
 
 const field = (name: string, type: FieldType, extra: Partial<FieldMeta> = {}): FieldMeta => ({
   name,
@@ -263,5 +265,43 @@ describe('number and date helpers', () => {
     expect(formatDate('yesterday')).toBe('yesterday');
     expect(formatDateTime('2026-12-31T23:59:59Z')).toBe('31 Dec 2026, 23:59 UTC');
     expect(formatDateTime('2026-12-31 23:59')).toBe('2026-12-31 23:59');
+  });
+});
+
+describe('a DocType with a workflow', () => {
+  const workflow: WorkflowMeta = {
+    states: [
+      { name: 'Draft', docstatus: 0, style: 'neutral' },
+      { name: 'Approved', docstatus: 1, style: 'success' },
+    ],
+    transitions: [],
+  };
+
+  it('has a Status column that sorts by the state, also when it is not submittable', () => {
+    const own = listColumns(meta([field('a', 'data')], false, { workflow }));
+    expect(own.find((c) => c.label === 'Status')?.key).toBe('workflow_state');
+    expect(listColumns(meta([field('a', 'data')], true, { workflow })).filter((c) => c.label === 'Status')).toHaveLength(1);
+    // Without a workflow the column is unchanged: the document status, only when submittable.
+    expect(listColumns(meta([field('a', 'data')], true)).find((c) => c.label === 'Status')?.key).toBe('docstatus');
+    expect(listColumns(meta([field('a', 'data')])).find((c) => c.label === 'Status')).toBeUndefined();
+  });
+
+  it('knows which keys are the status column', () => {
+    expect(isStatusKey('workflow_state')).toBe(true);
+    expect(isStatusKey('docstatus')).toBe(true);
+    expect(isStatusKey('name')).toBe(false);
+    expect(hasStatus(meta([], false, { workflow }))).toBe(true);
+    expect(hasStatus(meta([], false, { workflow: null }))).toBe(false);
+  });
+
+  it('offers the state as a Select with the names of the states', () => {
+    const fields = filterFields(meta([field('a', 'data')], true, { workflow }));
+    expect(fields.find((f) => f.name === 'workflow_state')).toEqual({
+      name: 'workflow_state',
+      label: 'Status',
+      type: 'select',
+      options: ['Draft', 'Approved'],
+    });
+    expect(filterFields(meta([field('a', 'data')], true)).some((f) => f.name === 'workflow_state')).toBe(false);
   });
 });

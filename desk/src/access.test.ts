@@ -222,3 +222,26 @@ describe('header actions (the main action and the More menu)', () => {
     expect(headerActions(clerk, false, false)).toEqual({ save: null, submit: null, more: [] });
   });
 });
+
+describe('a DocType with a workflow', () => {
+  const full = rights({ read: 'all', write: 'all', create: 'all', delete: 'all', submit: 'all', cancel: 'all', amend: 'all' });
+
+  it('never lists the plain Submit and Cancel, and keeps Amend and Delete', () => {
+    expect(lifecycleActions(ctx({ docStatus: 0, rights: full, workflow: true }))).toEqual(['delete']);
+    expect(lifecycleActions(ctx({ docStatus: 1, rights: full, workflow: true }))).toEqual([]);
+    expect(lifecycleActions(ctx({ docStatus: 2, rights: full, workflow: true }))).toEqual(['amend', 'delete']);
+  });
+
+  it('has no Submit button in the header; Save follows the same rule as before', () => {
+    expect(headerActions(ctx({ rights: full, workflow: true }), false, true)).toEqual({
+      save: 'secondary',
+      submit: null,
+      more: ['delete'],
+    });
+    expect(headerActions(ctx({ rights: full, workflow: true }), true, true).save).toBe('primary');
+  });
+
+  it('changes nothing for a DocType without one', () => {
+    expect(lifecycleActions(ctx({ docStatus: 0, rights: full, workflow: false }))).toEqual(['submit', 'delete']);
+  });
+});

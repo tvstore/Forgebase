@@ -15,10 +15,11 @@ import {
   NAME_KEY,
   OWNER_KEY,
   PAGE_SIZE,
-  STATUS_KEY,
   filterFields,
   formatCell,
+  hasStatus,
   isNumericColumn,
+  isStatusKey,
   listColumns,
   listStateParams,
   nextSort,
@@ -30,7 +31,7 @@ import {
   withSearch,
 } from '../listing';
 import { initials } from '../people';
-import { statusBadge } from '../status';
+import { stateBadge } from '../status';
 import { exactTime, relativeTime } from '../time';
 import type { ListState } from '../listing';
 import { formHref, listHref, navigate, newHref } from '../router';
@@ -296,7 +297,7 @@ export function List({ doctype, params }: Props) {
                         key={column.key}
                         scope="col"
                         className={
-                          column.key === STATUS_KEY ? 'col-status' : isNumericColumn(column) ? 'num' : undefined
+                          isStatusKey(column.key) ? 'col-status' : isNumericColumn(column) ? 'num' : undefined
                         }
                         aria-sort={sorted ? (state.sort.desc ? 'descending' : 'ascending') : undefined}
                       >
@@ -332,15 +333,15 @@ export function List({ doctype, params }: Props) {
                           <th key={NAME_KEY} scope="row">
                             <a href={href}>{title}</a>
                             {title !== name ? <span className="muted-name">{name}</span> : null}
-                            {meta.submittable ? (
-                              <Badge tone={statusBadge(row[STATUS_KEY]).tone} className="status-inline">
-                                {statusBadge(row[STATUS_KEY]).label}
+                            {hasStatus(meta) ? (
+                              <Badge tone={stateBadge(meta, row).tone} className="status-inline">
+                                {stateBadge(meta, row).label}
                               </Badge>
                             ) : null}
                           </th>
-                        ) : column.key === STATUS_KEY ? (
-                          <td key={STATUS_KEY} className="col-status">
-                            <Badge tone={statusBadge(row[STATUS_KEY]).tone}>{statusBadge(row[STATUS_KEY]).label}</Badge>
+                        ) : isStatusKey(column.key) ? (
+                          <td key={column.key} className="col-status">
+                            <Badge tone={stateBadge(meta, row).tone}>{stateBadge(meta, row).label}</Badge>
                           </td>
                         ) : column.key === OWNER_KEY ? (
                           <td key={OWNER_KEY}>

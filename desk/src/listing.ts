@@ -37,8 +37,16 @@ export const isNumericColumn = (column: Column): boolean => isNumeric(column.typ
 
 /** The column that holds the link to the document (its title, with the name muted beside it). */
 export const NAME_KEY = 'name';
-/** The status badge column of a submittable DocType. */
+/** The status badge column of a submittable DocType (a DocType with a workflow shows its state instead). */
 export const STATUS_KEY = 'docstatus';
+/** The status badge column of a DocType with a workflow: the state (M8.2). It sorts and filters by state. */
+export const WORKFLOW_KEY = 'workflow_state';
+
+/** True for the key of the status badge column, whichever kind it is. */
+export const isStatusKey = (key: string): boolean => key === STATUS_KEY || key === WORKFLOW_KEY;
+
+/** Whether the list has a status column: a submittable DocType, or one with a workflow. */
+export const hasStatus = (meta: DocTypeMeta): boolean => meta.submittable || (meta.workflow ?? null) !== null;
 /** The owner column: initials in a circle and the user name. */
 export const OWNER_KEY = 'owner';
 /** The column of the last change: a relative time with the exact time on hover. */
@@ -69,7 +77,9 @@ export function listColumns(meta: DocTypeMeta): Column[] {
       ? { key: NAME_KEY, label: 'Name', type: 'data' as const }
       : { key: NAME_KEY, label: titleField.label, type: 'data' as const, sub: 'Name' },
     ...(meta.list_fields === null ? fields.slice(0, MAX_FIELD_COLUMNS) : fields),
-    ...(meta.submittable ? [{ key: STATUS_KEY, label: 'Status', type: 'data' as const }] : []),
+    ...(hasStatus(meta)
+      ? [{ key: meta.workflow ? WORKFLOW_KEY : STATUS_KEY, label: 'Status', type: 'data' as const }]
+      : []),
     { key: OWNER_KEY, label: 'Owner', type: 'data' },
     { key: MODIFIED_KEY, label: 'Modified', type: 'datetime' },
   ];
@@ -135,6 +145,17 @@ export function filterFields(meta: DocTypeMeta): FilterField[] {
     { name: 'modified_at', label: 'Modified', type: 'datetime' },
     ...(meta.submittable
       ? [{ name: 'docstatus', label: 'Document status (0 draft, 1 submitted, 2 cancelled)', type: 'int' as const }]
+      : []),
+    // A workflow's state is filtered by its name, chosen from the states of the workflow.
+    ...(meta.workflow
+      ? [
+          {
+            name: WORKFLOW_KEY,
+            label: 'Status',
+            type: 'select' as const,
+            options: meta.workflow.states.map((state) => state.name),
+          },
+        ]
       : []),
   ];
   const own: FilterField[] = meta.fields
