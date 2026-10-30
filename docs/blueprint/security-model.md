@@ -94,13 +94,15 @@ Routes, statuses and the error envelope: [architecture, section 7](architecture.
 
 ## Multi-site isolation (M7.1, Accepted, ADR 0014)
 
-Decision record: [ADR 0014](../adr/0014-multi-site-database-per-site.md). Design and decisions: [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014). Security properties:
+Decision record: [ADR 0014](../adr/0014-multi-site-database-per-site.md). Design and decisions: [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014). Security properties (M7.1, and M7.2 where marked):
 
 - **Separate databases.** Each site has its own database and pool; there are no cross-site queries and no global pool or URL. Every database command resolves one site first (`--site`, required when the config file has several) and uses only that site's pool. A row-level tenant column was rejected because one permission bug would leak data.
 - **Sessions and tokens are per site.** They live in the site's own database, so a session cookie or API token of site A is refused (`401`) on site B, even for a user with the same name (tested). The session cookie is host-scoped (no `Domain` attribute).
 - **The `Host` header chooses the site, and nothing else does.** `X-Forwarded-Host` and `Forwarded` are never read: the reverse proxy must pass the original `Host`. A missing, repeated or malformed `Host` is `400 invalid_host`; with a config file a well-formed host that no site owns is `404 not_found`, without a config file a host outside the allow-list is `400` (DNS-rebinding protection, unchanged). The check runs before routing and authentication.
 - **The config file holds no secrets.** The database URL of a site is read from the environment variable the file names; the value is never printed (an unset variable is an error that names the site and the variable). The file is found only by `--config` / `FORGEBASE_CONFIG`, never by searching the current directory, and unknown keys are refused, so a typo cannot silently drop a setting.
-- **Known limit (M7.1).** The registry (the apps) is shared by all sites; per-site app subsets come in M7.2. A worker serves one site per process.
+- **Absolute-form targets.** A request target with a host (`GET http://host/path`) must name the same host as the `Host` header (case and port ignored), else `400 invalid_host`: the site is chosen by `Host` alone, and a disagreeing target is never answered for the other host.
+- **Apps per site (M7.2).** Each site has its own registry, built from the apps its `apps` list installs. A DocType, job or schedule of an app that is not installed on a site is unknown there on every path (command line, HTTP, worker). Removing an app from a site keeps its tables and data; nothing is dropped. A worker serves one site per process, so it claims only that site's jobs, and only those whose names its site's registry knows.
+- **Creating a site (`site create`) needs privileges.** `CREATE DATABASE` needs the `CREATEDB` privilege (or a superuser) for the role of the site's URL, and a connection to a maintenance database (`postgres` by default, `--maintenance-db` to change). Give `CREATEDB` only to the role that creates sites, for example by creating the database with a separate admin role (an administrator can create the empty database and run `migrate --site`), and keep the role that `serve` and `worker` use without it. The command refuses an existing database, never migrates it implicitly, and never prints the URL: an error names the site, not the URL (a test checks it).
 
 ## Secrets
 

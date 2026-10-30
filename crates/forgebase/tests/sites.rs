@@ -517,6 +517,14 @@ fn commands_touch_only_the_database_of_their_site() {
     );
 }
 
+/// Reads a child's standard output to its end in the background, so a line it prints can never
+/// block it or meet a closed pipe.
+fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+    });
+}
+
 /// A running `forgebase serve`, killed when dropped so a failing test leaves no process behind.
 struct Server {
     child: Child,
@@ -556,6 +564,8 @@ impl Server {
                 line.trim().to_owned()
             })
             .collect();
+        // Anything printed later is read too, until the server stops.
+        drain(reader);
         Server {
             child,
             address,
@@ -747,6 +757,7 @@ fn a_worker_claims_only_from_the_database_of_its_site() {
         .command(&["worker", "--site", "a", "--doctypes", DOCTYPES])
         .spawn()
         .expect("start the worker");
+    drain(child.stdout.take().expect("stdout"));
     // Poll the real condition: A's job is done.
     let started = Instant::now();
     while status(&pair.a, &ids[0]).as_deref() != Some("done") {

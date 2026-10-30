@@ -1492,6 +1492,14 @@ fn token_create_prints_the_secret_once_and_revoke_works() {
 
 // ---- serve ---------------------------------------------------------------------------------
 
+/// Reads a child's standard output to its end in the background, so a line it prints can never
+/// block it or meet a closed pipe.
+fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+    });
+}
+
 /// A running `forgebase serve`, killed when dropped so a failing test leaves no process behind.
 struct Server {
     child: std::process::Child,
@@ -1514,11 +1522,9 @@ impl Server {
         }
         let mut child = command.spawn().expect("start forgebase serve");
         let mut line = String::new();
-        std::io::BufRead::read_line(
-            &mut std::io::BufReader::new(child.stdout.as_mut().expect("stdout")),
-            &mut line,
-        )
-        .expect("read the listening line");
+        let mut reader = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+        std::io::BufRead::read_line(&mut reader, &mut line).expect("read the listening line");
+        drain(reader);
         let address = line
             .trim()
             .strip_prefix("listening on http://")
@@ -1711,6 +1717,63 @@ fn serve_dev_mode_and_configuration() {
 }
 
 #[test]
+fn serve_keeps_running_when_its_standard_output_is_closed() {
+    use std::io::{Read, Write};
+
+    let db = TestDb::new();
+    let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    // A free port, so the address is known without reading the "listening on" line.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("address")
+        .port();
+    let address = format!("127.0.0.1:{port}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_forgebase"))
+        .args(["serve", "--doctypes", DOCTYPES])
+        .env("FORGEBASE_DATABASE_URL", &db.url)
+        .env("FORGEBASE_LISTEN", &address)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start forgebase serve");
+    // Close the read end at once: the server's first write to standard output fails. (`null()`
+    // would not do: writes to it succeed.)
+    drop(child.stdout.take());
+    // Wait until the server listens, then ask once: a server that stopped over the failed write
+    // resets the connection or never listens.
+    let started = std::time::Instant::now();
+    let mut stream = loop {
+        match std::net::TcpStream::connect(&address) {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(30),
+                    "the server never listened: {error}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    stream
+        .write_all(
+            format!("GET /api/v1/resource/customer HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("send");
+    let mut reply = String::new();
+    let read = stream.read_to_string(&mut reply);
+    let alive = child.try_wait().expect("wait").is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+    read.unwrap_or_else(|e| panic!("the server did not answer: {e}"));
+    assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+    assert!(alive, "the server exited");
+}
+
+#[test]
 fn serve_serves_the_desk_only_when_configured() {
     let db = TestDb::new();
     let out = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
@@ -1786,6 +1849,7 @@ fn the_worker_of_a_binary_without_app_jobs_runs_the_built_in_jobs_and_stops_on_s
         .stderr(Stdio::piped())
         .spawn()
         .expect("start the worker");
+    drain(child.stdout.take().expect("stdout"));
     // Wait for the real precondition: the worker says it started.
     let mut lines = BufReader::new(child.stderr.take().expect("stderr"));
     let mut log = String::new();

@@ -56,6 +56,15 @@ pub enum CliError {
     /// A user, role or token error. Never contains a password or a secret.
     #[error("{0}")]
     Auth(#[from] AuthError),
+    /// A database error while opening a site (connecting, creating its database); names the site.
+    /// Never contains the database URL.
+    #[error("site `{site}`: {}", describe_db(.source))]
+    Site {
+        /// The site name.
+        site: String,
+        /// What went wrong (boxed: a `DbError` is large).
+        source: Box<DbError>,
+    },
     /// A database or validation error.
     #[error("{}", describe_db(.0))]
     Db(#[from] DbError),

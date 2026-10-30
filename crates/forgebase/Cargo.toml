@@ -50,3 +50,9 @@ forgebase = { path = ".", features = ["testing"] }
 [[test]]
 name = "app_binary"
 harness = false
+
+# Apps per site (M7.2): a binary with two apps and a config file whose sites install different
+# apps, end to end. Its own `main`, like `app_binary`.
+[[test]]
+name = "site_apps"
+harness = false

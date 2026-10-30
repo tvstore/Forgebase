@@ -31,7 +31,10 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Apply framework migrations, sync the DocType schema (additive changes only) and apply the
-    /// SQL data migrations of the apps compiled into the binary.
+    /// SQL data migrations of the apps installed on the site (all the binary's apps unless the
+    /// site lists `apps`). The apps recorded in the database but not installed are reported as a
+    /// warning; their tables and data are kept. The schedules of apps that are not installed are
+    /// deleted.
     Migrate {
         #[command(flatten)]
         doctypes: DocTypesDir,
@@ -52,6 +55,10 @@ pub enum Command {
     /// Create and revoke API tokens.
     #[command(subcommand)]
     Token(TokenCommand),
+    /// List the sites of the config file and create the database of a site. `--site` is not used
+    /// here: `create` takes the site name as an argument.
+    #[command(subcommand)]
+    Site(SiteCommand),
     /// Create a new app: a Rust crate (library and binary) with a sample DocType, a hook, tests,
     /// a README and an AGENTS.md, in `<DIR>/<NAME>`. It builds and passes its tests as created. Needs
     /// no database. Never overwrites: an existing target directory is an error.
@@ -67,8 +74,8 @@ pub enum Command {
         #[arg(long, value_name = "DIR", default_value = ".")]
         dir: PathBuf,
     },
-    /// Run background jobs until Ctrl-C or SIGTERM. It claims only the jobs of the apps compiled
-    /// into the binary, runs each in a database transaction with its completion, retries a
+    /// Run background jobs until Ctrl-C or SIGTERM. It claims only the jobs of the apps installed
+    /// on the site (and the built-in ones), runs each in a database transaction with its completion, retries a
     /// failure with a growing delay and marks a job `dead` when the attempts are used up. The
     /// first signal stops claiming and lets running jobs finish for 30 seconds (then they are
     /// given back, not counted as an attempt); a second signal exits at once. It does not run
@@ -112,7 +119,12 @@ impl Command {
                 | DocCommand::Amend { doctypes, .. }
                 | DocCommand::Delete { doctypes, .. },
             ) => Some(doctypes),
-            Command::User(_) | Command::Token(_) | Command::Job(_) | Command::NewApp { .. } => None,
+            Command::Site(SiteCommand::Create { doctypes, .. }) => Some(doctypes),
+            Command::Site(SiteCommand::List)
+            | Command::User(_)
+            | Command::Token(_)
+            | Command::Job(_)
+            | Command::NewApp { .. } => None,
         }
     }
 }
@@ -128,6 +140,8 @@ impl Command {
             Command::NewApp { .. } => ["new-app", ""],
             Command::User(_) => ["user", ""],
             Command::Token(_) => ["token", ""],
+            Command::Site(SiteCommand::List) => ["site", "list"],
+            Command::Site(SiteCommand::Create { .. }) => ["site", "create"],
             Command::Doc(doc) => [
                 "doc",
                 match doc {
@@ -162,6 +176,30 @@ impl Command {
                 "the following required arguments were not provided:\n  --doctypes <DIR>",
             )
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SiteCommand {
+    /// Print each site as a table: its name, hosts, apps (`all` when the config file lists none)
+    /// and the name of the environment variable that holds its database URL (never the URL).
+    /// Needs no database. Without a config file it shows the implicit site `default`.
+    List,
+    /// Create the database of a site, then migrate it as `migrate --site NAME` does. The site
+    /// must be in the config file (or be `default` without one). Refuses, with exit code 1, when
+    /// the database exists already: it never migrates an existing database implicitly (use
+    /// `migrate`). The database name is the one in the site's URL; the role of the URL needs the
+    /// `CREATEDB` privilege. If the migrate fails the database is kept: fix the problem and run
+    /// `migrate --site NAME`.
+    Create {
+        /// The site name.
+        name: String,
+        /// The database to connect to for `CREATE DATABASE` (on the same server, with the same
+        /// user and password as the site's URL).
+        #[arg(long, value_name = "NAME", default_value = forgebase_db::DEFAULT_MAINTENANCE_DB)]
+        maintenance_db: String,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -395,7 +433,8 @@ pub struct VersionArg {
 #[derive(Debug, Args)]
 pub struct DocTypesDir {
     /// Directory with one DocType `*.toml` file per DocType (not searched recursively). It
-    /// becomes the app `local`, which depends on every app compiled into the binary. Required
+    /// becomes the app `local`, which depends on the apps installed on the site (every app of
+    /// the binary unless the site lists `apps`) and is part of every site's registry. Required
     /// when the binary has no apps (the stock `forgebase` binary); a binary with apps does not
     /// need it.
     #[arg(long, value_name = "DIR")]

@@ -50,6 +50,15 @@ impl StartupError {
     fn is_empty(&self) -> bool {
         self.apps.is_empty() && self.files.is_empty()
     }
+
+    /// Every problem prefixed with the site it was found for (a problem that only the apps of
+    /// one site have, for example a `--doctypes` file that links to an app the site lacks).
+    pub(crate) fn for_site(mut self, site: &str) -> Self {
+        for problem in self.apps.iter_mut().chain(self.files.iter_mut()) {
+            *problem = format!("site `{site}`: {problem}");
+        }
+        self
+    }
 }
 
 impl fmt::Display for StartupError {
@@ -87,9 +96,14 @@ struct AppInfo {
 }
 
 impl Composed {
-    /// How many apps the binary has (the `--doctypes` directory is not counted).
+    /// How many apps were composed (the `--doctypes` directory is not counted).
     pub fn app_count(&self) -> usize {
         self.apps.len()
+    }
+
+    /// True when the app `name` is one of the composed apps (not `local`).
+    pub fn has_app(&self, name: &str) -> bool {
+        self.apps.iter().any(|a| a.name == name)
     }
 
     /// Framework migrations, schema sync, the app migrations in app order, then the sync of the

@@ -1,5 +1,6 @@
 //! Executes the commands.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, Read, Write};
 use std::time::Duration;
 
@@ -15,12 +16,13 @@ use forgebase_http::{AppConfig, AppState, Sites};
 
 use crate::app::App;
 use crate::args::{
-    ActorArg, Cli, Command, DocCommand, DocTypesDir, TokenCommand, UserCommand, VersionArg,
+    ActorArg, Cli, Command, DocCommand, DocTypesDir, SiteCommand, TokenCommand, UserCommand,
+    VersionArg,
 };
 use crate::compose::{Composed, compose};
 use crate::config::{Config, Site, SiteContext, host_problem};
 use crate::error::CliError;
-use crate::job_cmd::job;
+use crate::job_cmd::{job, read_payload};
 use crate::new_app::new_app;
 use crate::report::migrate_report;
 use crate::worker::{Worker, WorkerConfig, run_worker, worker_id};
@@ -57,10 +59,11 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
         let created = new_app(name, forgebase_path, dir)?;
         return write_stdout(&crate::new_app::report(&created));
     }
-    let config = load_config(config)?;
+    let config = load_config(config, apps)?;
     let site = site.as_deref();
     match command {
         Command::Serve { doctypes } => return serve(&config, site, &doctypes, apps).await,
+        Command::Site(command) => return site_command(&config, site, command, apps).await,
         Command::NewApp { .. } => unreachable!("handled above"),
         _ => {}
     }
@@ -71,28 +74,27 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             dry_run,
             lock_timeout_ms,
         } => {
-            let composed = composed(apps, &doctypes)?;
-            let ctx = site
-                .context(Arc::new(composed.registry.clone()), None)
-                .await?;
+            let composed = site_composed(site, apps, &doctypes)?;
             let options = SyncOptions {
                 dry_run,
                 lock_timeout: Duration::from_millis(lock_timeout_ms),
             };
-            let report = composed.migrate(&ctx.pool, &options).await?;
-            write_stdout(&migrate_report(&report, dry_run, composed.app_count()))
+            write_stdout(&migrate_site(site, &composed, &options).await?)
         }
         Command::Doc(command) => {
-            let (registry, operation) = prepare(command, apps)?;
+            let (registry, operation) = prepare(command, site, apps)?;
             let ctx = site.context(Arc::new(registry), None).await?;
             execute(&ctx, operation).await
         }
         Command::User(command) => {
-            let ctx = site.context(startup_registry(apps)?, None).await?;
-            user(&ctx, command).await
+            let registry = site_registry(site, apps)?;
+            // Standard input is read before the database is opened.
+            let password = read_user_password(&command)?;
+            let ctx = site.context(registry, None).await?;
+            user(&ctx, command, &password).await
         }
         Command::Token(command) => {
-            let ctx = site.context(startup_registry(apps)?, None).await?;
+            let ctx = site.context(site_registry(site, apps)?, None).await?;
             token(&ctx, command).await
         }
         Command::Worker {
@@ -100,31 +102,167 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             concurrency,
         } => worker(site, &doctypes, apps, concurrency).await,
         Command::Job(command) => {
-            let ctx = site.context(startup_registry(apps)?, None).await?;
-            job(&ctx, command).await
+            let registry = site_registry(site, apps)?;
+            // The payload (standard input too) is read and checked before the database is opened.
+            let payload = read_payload(&command)?;
+            let ctx = site.context(registry, None).await?;
+            job(&ctx, command, payload).await
         }
-        Command::Serve { .. } | Command::NewApp { .. } => unreachable!("handled above"),
+        Command::Serve { .. } | Command::Site(_) | Command::NewApp { .. } => {
+            unreachable!("handled above")
+        }
     }
+}
+
+/// Migrates `site` with its composed apps and returns the report. The apps recorded in the
+/// database that are not installed on the site get one warning line each on standard error: their
+/// tables and data are kept (there is no uninstall).
+async fn migrate_site(
+    site: &Site,
+    composed: &Composed,
+    options: &SyncOptions,
+) -> Result<String, CliError> {
+    let ctx = site
+        .context(Arc::new(composed.registry.clone()), None)
+        .await?;
+    let report = composed.migrate(&ctx.pool, options).await?;
+    let client = ctx.pool.get().await.map_err(DbError::from)?;
+    for name in forgebase_db::recorded_apps(&client).await? {
+        if !composed.has_app(&name) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: site `{}`: app `{name}` is recorded in the database but not installed; \
+                 its tables and data are kept",
+                ctx.site.name
+            );
+        }
+    }
+    Ok(migrate_report(
+        &report,
+        options.dry_run,
+        composed.app_count(),
+    ))
+}
+
+/// Runs a `site` command. They take the site as an argument, so `--site` is refused.
+async fn site_command(
+    config: &Config,
+    site: Option<&str>,
+    command: SiteCommand,
+    apps: &[App],
+) -> Result<(), CliError> {
+    if site.is_some() {
+        return Err(CliError::Usage(
+            "`site` commands do not use --site; `site create` takes the site name as an argument"
+                .to_owned(),
+        ));
+    }
+    match command {
+        SiteCommand::List => write_stdout(&site_list(config)),
+        SiteCommand::Create {
+            name,
+            maintenance_db,
+            doctypes,
+        } => {
+            let site = config.find(&name)?;
+            // Everything that can be checked without a database is checked before the database
+            // is created.
+            let composed = site_composed(site, apps, &doctypes)?;
+            if !site.create_database(Some(&maintenance_db)).await? {
+                return Err(CliError::Config(format!(
+                    "database for site `{name}` already exists; run `forgebase migrate --site {name}`"
+                )));
+            }
+            write_stdout(&format!("created the database of site `{name}`\n"))?;
+            let report = migrate_site(site, &composed, &SyncOptions::default())
+                .await
+                .map_err(|error| {
+                    CliError::Config(format!(
+                        "the database of site `{name}` was created, but migrate failed: {error}\n\
+                         the database is kept; fix the problem and run `forgebase migrate --site {name}`"
+                    ))
+                })?;
+            write_stdout(&report)
+        }
+    }
+}
+
+/// The table `site list` prints: name, hosts, apps and the name of the URL variable, in the
+/// layout of the other list outputs.
+fn site_list(config: &Config) -> String {
+    let header = ["SITE", "HOSTS", "APPS", "DATABASE_URL_ENV"];
+    let rows: Vec<[String; 4]> = config
+        .sites()
+        .iter()
+        .map(|site| {
+            let hosts = if config.is_configured() {
+                site.hosts.join(", ")
+            } else {
+                // The implicit site answers to FORGEBASE_ALLOWED_HOSTS (see `serve`).
+                env_or("FORGEBASE_ALLOWED_HOSTS", "localhost,127.0.0.1")
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let apps = match &site.apps {
+                None => "all".to_owned(),
+                Some(list) if list.is_empty() => "(none)".to_owned(),
+                Some(list) => list.join(", "),
+            };
+            [
+                site.name.clone(),
+                hosts,
+                apps,
+                site.database_url_var().to_owned(),
+            ]
+        })
+        .collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|i| {
+            rows.iter()
+                .map(|row| row[i].chars().count())
+                .chain([header[i].len()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut text = String::new();
+    let mut line = |cells: &[&str]| {
+        let mut out = String::new();
+        for (i, cell) in cells.iter().enumerate() {
+            let _ = write!(out, "{cell:<width$}  ", width = widths[i]);
+        }
+        text.push_str(out.trim_end());
+        text.push('\n');
+    };
+    line(&header);
+    for row in &rows {
+        line(&row.each_ref().map(String::as_str));
+    }
+    text
 }
 
 /// The config file named by `--config` or `FORGEBASE_CONFIG` (the option wins), else the
 /// implicit single site. The current directory is never searched.
-fn load_config(option: Option<std::path::PathBuf>) -> Result<Config, CliError> {
+fn load_config(option: Option<std::path::PathBuf>, apps: &[App]) -> Result<Config, CliError> {
     let path = option.or_else(|| {
         std::env::var_os(CONFIG_VAR)
             .filter(|v| !v.is_empty())
             .map(Into::into)
     });
     match path {
-        Some(path) => Config::load(&path),
+        Some(path) => Config::load(&path, apps),
         None => Ok(Config::implicit()),
     }
 }
 
-/// Checks that the apps fit together (every command does) and returns their registry, for the
-/// commands that need no DocType directory.
-fn startup_registry(apps: &[App]) -> Result<Arc<Registry>, CliError> {
-    Ok(Arc::new(compose(apps, None)?.registry))
+/// Checks that the apps fit together (every command does) and returns the registry of the apps
+/// installed on `site`, for the commands that need no DocType directory.
+fn site_registry(site: &Site, apps: &[App]) -> Result<Arc<Registry>, CliError> {
+    let none = DocTypesDir { doctypes: None };
+    Ok(Arc::new(site_composed(site, apps, &none)?.registry))
 }
 
 /// A document operation with its input already read and checked, so that nothing touches the
@@ -206,9 +344,13 @@ fn target(command: &DocCommand) -> (&DocTypesDir, &str) {
 
 /// Checks a `doc` command and reads its input. Returns the registry it was checked against and
 /// the operation.
-fn prepare(command: DocCommand, apps: &[App]) -> Result<(Registry, Operation), CliError> {
+fn prepare(
+    command: DocCommand,
+    site: &Site,
+    apps: &[App],
+) -> Result<(Registry, Operation), CliError> {
     let (dir, doctype) = target(&command);
-    let (registry, found) = find_doctype(apps, dir, doctype)?;
+    let (registry, found) = find_doctype(site, apps, dir, doctype)?;
     let doctype = found.name.clone();
     let operation = match command {
         DocCommand::Insert { data, actor, .. } => Operation::Insert {
@@ -400,16 +542,20 @@ async fn execute(site: &SiteContext, operation: Operation) -> Result<(), CliErro
     print_document(&stored)
 }
 
-/// Runs a `user` command. The password (if any) is read from standard input before the database
-/// is touched, and never printed.
-async fn user(site: &SiteContext, command: UserCommand) -> Result<(), CliError> {
-    let password = match &command {
-        UserCommand::Create { .. } | UserCommand::SetPassword { .. } => Some(read_password()?),
-        _ => None,
-    };
+/// The password of a `user` command that takes one, read from standard input (empty for the
+/// others). Called before the site's pool is opened, so a bad input never touches the database.
+fn read_user_password(command: &UserCommand) -> Result<String, CliError> {
+    match command {
+        UserCommand::Create { .. } | UserCommand::SetPassword { .. } => read_password(),
+        _ => Ok(String::new()),
+    }
+}
+
+/// Runs a `user` command with the `password` already read from standard input; it is never
+/// printed.
+async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Result<(), CliError> {
     let mut client = site.pool.get().await.map_err(DbError::from)?;
     let client = &mut **client;
-    let password = password.as_deref().unwrap_or_default();
     let text = match command {
         UserCommand::Create { username, roles } => {
             let roles: Vec<&str> = roles.iter().map(String::as_str).collect();
@@ -464,7 +610,6 @@ async fn serve(
     doctypes: &DocTypesDir,
     apps: &[App],
 ) -> Result<(), CliError> {
-    let registry = Arc::new(composed(apps, doctypes)?.registry);
     let sites = config.serve_set(site)?;
     let listen = env_or("FORGEBASE_LISTEN", "127.0.0.1:8000");
     let insecure = std::env::var("FORGEBASE_DEV_INSECURE_COOKIES").is_ok_and(|v| v == "1");
@@ -493,7 +638,9 @@ async fn serve(
         }
         routing = Sites::configured();
         for site in sites {
-            let ctx = site.context(registry.clone(), None).await?;
+            // Each site gets the registry of its own apps.
+            let registry = Arc::new(site_composed(site, apps, doctypes)?.registry);
+            let ctx = site.context(registry, None).await?;
             let state = AppState::new(ctx.pool, ctx.registry, app_config(site.hosts.clone()));
             routing = routing.site(&site.hosts, state).map_err(CliError::Config)?;
             lines.push(format!("site {}: {}\n", site.name, site.hosts.join(", ")));
@@ -504,6 +651,7 @@ async fn serve(
         let [site] = sites.as_slice() else {
             unreachable!("the implicit config has one site");
         };
+        let registry = Arc::new(site_composed(site, apps, doctypes)?.registry);
         let ctx = site.context(registry, None).await?;
         routing = Sites::implicit(AppState::new(
             ctx.pool,
@@ -516,15 +664,16 @@ async fn serve(
         .map_err(|e| CliError::Config(format!("cannot listen on {listen}: {e}")))?;
     let address = listener.local_addr().map_err(CliError::Serve)?;
     let signals = stop_signals().map_err(CliError::Serve)?;
-    write_stdout(&format!("listening on http://{address}\n"))?;
+    // The server's own announcements: a closed standard output must not stop a running server.
+    announce(&format!("listening on http://{address}\n"));
     for line in lines {
-        write_stdout(&line)?;
+        announce(&line);
     }
     if let Some(dir) = &desk_dir {
-        write_stdout(&format!(
+        announce(&format!(
             "serving the desk from {} at /desk/\n",
             dir.display()
-        ))?;
+        ));
     }
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = forgebase_http::serve(listener, routing, async {
@@ -535,7 +684,9 @@ async fn serve(
         .map_err(CliError::Serve)
 }
 
-/// Runs `worker`: the jobs of the apps until Ctrl-C or SIGTERM (see `crate::worker`).
+/// Runs `worker`: the jobs of the apps installed on the site until Ctrl-C or SIGTERM (see
+/// `crate::worker`). One worker process serves one site, and the scheduler runs in it, so only
+/// the schedules of the site's apps tick.
 ///
 /// The pool has `concurrency + 2` connections: each running job holds one for its transaction,
 /// and a claim or the record of a failure needs one briefly while the handlers hold theirs.
@@ -545,7 +696,7 @@ async fn worker(
     apps: &[App],
     concurrency: u32,
 ) -> Result<(), CliError> {
-    let composed = composed(apps, doctypes)?;
+    let composed = site_composed(site, apps, doctypes)?;
     let size = usize::try_from(concurrency)
         .unwrap_or(usize::MAX)
         .saturating_add(2);
@@ -716,18 +867,28 @@ fn read_password() -> Result<String, CliError> {
     Ok(line)
 }
 
-/// The apps of the binary plus the `--doctypes` directory, composed into one registry.
-fn composed(apps: &[App], dir: &DocTypesDir) -> Result<Composed, CliError> {
-    Ok(compose(apps, dir.doctypes.as_deref())?)
+/// The apps installed on `site` plus the `--doctypes` directory (the app `local`, which depends
+/// on those apps), composed into the registry and the jobs of that site. It reuses
+/// [`compose`]: first on all the apps of the binary, so a problem in the binary or the directory
+/// is reported once, as for every command; then, when the site installs only some of the apps,
+/// on those.
+fn site_composed(site: &Site, apps: &[App], dir: &DocTypesDir) -> Result<Composed, CliError> {
+    let local = dir.doctypes.as_deref();
+    let all = compose(apps, local)?;
+    if site.apps.is_none() {
+        return Ok(all);
+    }
+    Ok(compose(&site.installed(apps), local).map_err(|e| e.for_site(&site.name))?)
 }
 
-/// The registry of the apps and the directory, and the DocType called `name` in it.
+/// The registry of the site's apps and the directory, and the DocType called `name` in it.
 fn find_doctype(
+    site: &Site,
     apps: &[App],
     dir: &DocTypesDir,
     name: &str,
 ) -> Result<(Registry, DocType), CliError> {
-    let registry = composed(apps, dir)?.registry;
+    let registry = site_composed(site, apps, dir)?.registry;
     match registry.get(name) {
         Some(doctype) => {
             let doctype = doctype.clone();
@@ -766,6 +927,12 @@ fn print_document(stored: &StoredDocument) -> Result<(), CliError> {
     let text =
         serde_json::to_string_pretty(&json).map_err(forgebase_http::json::JsonError::Serialize)?;
     write_stdout(&format!("{text}\n"))
+}
+
+/// Writes a line of a long-running command (`serve`) to standard output and ignores a failure,
+/// so that a closed pipe never takes the server down.
+fn announce(text: &str) {
+    let _ = write_stdout(text);
 }
 
 /// Writes to standard output without panicking on a closed pipe.

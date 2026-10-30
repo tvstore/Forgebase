@@ -92,6 +92,14 @@ fn main() -> ExitCode {
     }
 }
 
+/// Reads a child's standard output to its end in the background, so a line it prints can never
+/// block it or meet a closed pipe.
+fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+    });
+}
+
 struct Run<'a> {
     mode: &'a str,
     url: &'a str,
@@ -387,7 +395,8 @@ fn jobs(good: &Run<'_>, runtime: &tokio::runtime::Runtime, db: &TestDb) {
     // built-in clean-up job that falls due while this test runs (at the turn of the hour) would
     // add a job to the counts below.
     runtime.block_on(db.exec("DELETE FROM fb_schedule"));
-    let worker = good.spawn(&["worker", "--concurrency", "2"]);
+    let mut worker = good.spawn(&["worker", "--concurrency", "2"]);
+    drain(worker.stdout.take().expect("stdout"));
     let started = std::time::Instant::now();
     loop {
         let done = count(
