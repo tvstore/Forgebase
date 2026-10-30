@@ -159,7 +159,7 @@ fn drive() {
 
     // A dry run on an empty database lists the app migration, and keeps nothing.
     let out = succeeds(&good.go(&["migrate", "--dry-run"], None));
-    assert!(out.contains("framework migrations: 6 pending"), "{out}");
+    assert!(out.contains("framework migrations: 7 pending"), "{out}");
     assert!(
         out.contains("app migrations: 1 pending\n  crm 0001 seed\n"),
         "{out}"

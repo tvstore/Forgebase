@@ -41,7 +41,7 @@
 //! - [`schedule`]: the scheduler (M6.2, ADR 0013): schedule times ([`schedule::Spec`]), the
 //!   `fb_schedule` table of migration 0006, its sync at `migrate` and the tick that enqueues due
 //!   jobs exactly once however many workers run. Also here: the SQL of the built-in clean-up jobs
-//!   ([`jobs::purge_done`], [`auth::purge_sessions`], [`auth::purge_login_failures`]).
+//!   ([`jobs::purge_finished`], [`auth::purge_sessions`], [`auth::purge_login_failures`]).
 //! - [`auth`]: users, roles, Argon2id password hashing, server-side sessions with CSRF tokens, API
 //!   tokens and login lockout (M3.1, ADR 0010), on the tables of migration 0003. No HTTP or
 //!   cookies here (they are in `forgebase-http`); [`auth::AuthUser::caller`] gives the [`Caller`] for the document functions.

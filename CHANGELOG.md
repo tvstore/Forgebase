@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **The built-in `forgebase.purge_jobs` also deletes `dead` jobs, 7 days after they finished** (owner decision 2026-10-30; see [ADR 0013](docs/adr/0013-jobs-scheduler-and-transactional-outbox.md#implementation-details-m62)). Until now only `done` jobs were purged. `forgebase_db::jobs::purge_done` is renamed `purge_finished` (`status IN ('done','dead')`, same bounded batches). A dead job retried with `forgebase job retry` is `queued` with no finish time and is not purged; queued and running jobs are never touched. **Migration 0007** replaces the partial index `fb_job_done_idx` of migration 0006 (not edited) with `fb_job_finished_idx` on `finished_at` for `done` and `dead` jobs. The framework migration count in the tests, `migrate` output and the dry run is 7. No new dependency.
+
 ### Added
 
 - **M6.3: the example apps use jobs and the scheduler, and the guide covers them** (no file under `crates/` changed; no new dependency). `examples/sales`: the DocTypes `sales_order_log` and `sales_daily_summary`; `OrderRules` enqueues `sales.log_order_event` from `before_submit` and `before_cancel` (the outbox); the job writes the log row idempotently; `sales.daily_summary` runs on `Schedule::daily_at(2, 0)` and summarizes the submitted orders of the day before. `examples/sales_extension`: the `FollowUp` hook and the job `sales_extension.plan_follow_up_visit`, which plans a `customer_visit` a week after the order date (new optional unique field `customer_visit.source_order`, an additive change). Tests with `EnqueuedJobs`, `run_jobs` and `run_schedules_at`. [First-app guide](docs/guide/first-app.md#7-background-jobs-and-schedules): section 7, "Background jobs and schedules". The desk smoke test now matches the "Sales Order" link exactly, because the new DocType "Sales Order Log" also contains the name. M6 is Done.

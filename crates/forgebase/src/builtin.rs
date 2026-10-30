@@ -5,7 +5,7 @@
 //!
 //! | Job | Deletes | Schedule |
 //! |---|---|---|
-//! | `forgebase.purge_jobs` | `done` jobs finished more than 7 days ago (dead jobs are kept) | daily 03:00 UTC |
+//! | `forgebase.purge_jobs` | `done` and `dead` jobs finished more than 7 days ago | daily 03:00 UTC |
 //! | `forgebase.purge_login_failures` | login failure rows that no longer count or lock | every 60 minutes |
 //! | `forgebase.purge_sessions` | sessions that are past their expiry or idle limit | every 60 minutes |
 
@@ -43,7 +43,7 @@ impl JobHandler for Purge {
             for _ in 0..MAX_BATCHES {
                 let tx = ctx.transaction();
                 let deleted = match self.0 {
-                    Kind::Jobs => jobs::purge_done(tx, BATCH).await,
+                    Kind::Jobs => jobs::purge_finished(tx, BATCH).await,
                     Kind::LoginFailures => auth::purge_login_failures(tx, BATCH).await,
                     Kind::Sessions => auth::purge_sessions(tx, BATCH).await,
                 }

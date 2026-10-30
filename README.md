@@ -332,7 +332,7 @@ App::new("crm")
 
 `Schedule::every_minutes(n)` (1 to 1440) ticks at the times where the minutes since the Unix epoch are divisible by `n`: every 15 gives :00, :15, :30 and :45. Run `forgebase migrate` after you add, change or remove a schedule (it stores the schedules the binary declares and **deletes the others**), and keep `forgebase worker` running: it enqueues each tick once, however many workers run, with the payload `{"scheduled_for": "<the tick, RFC 3339 UTC>"}` (use it for idempotency). Ticks missed while no worker ran are not caught up: one job runs, then the next future time. In tests, `forgebase::testing::run_schedules_at(&binary, &db, at)` enqueues what is due at `at`, and `run_jobs` runs it.
 
-The framework schedules its own clean-up in every binary (app name `forgebase`, reserved): finished jobs after 7 days (dead jobs are kept; daily at 03:00 UTC), stale login-failure rows and expired sessions (every 60 minutes). They need a running worker.
+The framework schedules its own clean-up in every binary (app name `forgebase`, reserved): finished jobs, done or dead, 7 days after they finished (daily at 03:00 UTC), stale login-failure rows and expired sessions (every 60 minutes). They need a running worker.
 
 ## License
 
