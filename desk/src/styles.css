@@ -1189,7 +1189,8 @@
     scroll-behavior: auto !important;
   }
 
-  /* Its own rule: a browser without ::backdrop would drop a whole selector list holding it. */
+  /* Kept as its own rule in source: a browser without ::backdrop would drop a whole selector list
+     holding it. The minifier may merge it back where the browser targets support ::backdrop. */
   *::backdrop {
     animation-duration: 0s !important;
     animation-delay: 0s !important;

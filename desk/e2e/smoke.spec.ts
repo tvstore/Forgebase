@@ -353,6 +353,8 @@ test('the recent documents of one user are not shown to the next user of the tab
   expect(await page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument)).toBe(true);
   await page.keyboard.press('Control+k');
   await expect(bar).toBeVisible();
+  // Wait for /api/v1/meta: without DocTypes the Recent group is filtered out anyway.
+  await expect(bar.getByRole('option', { name: 'Go to Sales Order', exact: true })).toBeVisible();
   await expect(bar.getByRole('group', { name: 'Recent' })).toHaveCount(0);
   await expect(bar.getByText(name)).toHaveCount(0);
 });
