@@ -37,6 +37,9 @@ pub enum CliError {
         /// The known names, comma separated (or `none`).
         known: String,
     },
+    /// A job command cannot be done; the message says why.
+    #[error("{0}")]
+    Job(String),
     /// The `--data` JSON cannot be used.
     #[error("{0}")]
     Json(#[from] JsonError),
@@ -55,7 +58,7 @@ pub enum CliError {
 }
 
 /// Multi-item database errors get one line per item.
-fn describe_db(error: &DbError) -> String {
+pub(crate) fn describe_db(error: &DbError) -> String {
     match error {
         DbError::Validation(errors) => {
             let lines: Vec<String> = errors.iter().map(ToString::to_string).collect();

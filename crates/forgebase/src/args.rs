@@ -55,6 +55,23 @@ pub enum Command {
         #[arg(long, value_name = "DIR", default_value = ".")]
         dir: PathBuf,
     },
+    /// Run background jobs until Ctrl-C or SIGTERM. It claims only the jobs of the apps compiled
+    /// into the binary, runs each in a database transaction with its completion, retries a
+    /// failure with a growing delay and marks a job `dead` when the attempts are used up. The
+    /// first signal stops claiming and lets running jobs finish for 30 seconds (then they are
+    /// given back, not counted as an attempt); a second signal exits at once. It does not run
+    /// migrations: run `migrate` first.
+    Worker {
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        /// How many jobs run at the same time, 1 to 64.
+        #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
+        concurrency: u32,
+    },
+    /// Inspect and operate the job queue. There is no HTTP or desk interface for jobs: the
+    /// command line is the interface.
+    #[command(subcommand)]
+    Job(JobCommand),
     /// Serve the HTTP API (`/api/v1`) until Ctrl-C or SIGTERM (running requests get 10 seconds; a second signal exits at once). It does not run migrations: run `migrate`
     /// first. Environment: `FORGEBASE_LISTEN` (default `127.0.0.1:8000`),
     /// `FORGEBASE_ALLOWED_HOSTS` (comma separated host names without ports, default `localhost,127.0.0.1`) and
@@ -70,7 +87,9 @@ impl Command {
     /// The `--doctypes` option of the command, for commands that have it.
     pub fn doctypes(&self) -> Option<&DocTypesDir> {
         match self {
-            Command::Migrate { doctypes, .. } | Command::Serve { doctypes } => Some(doctypes),
+            Command::Migrate { doctypes, .. }
+            | Command::Serve { doctypes }
+            | Command::Worker { doctypes, .. } => Some(doctypes),
             Command::Doc(
                 DocCommand::Insert { doctypes, .. }
                 | DocCommand::Get { doctypes, .. }
@@ -81,7 +100,7 @@ impl Command {
                 | DocCommand::Amend { doctypes, .. }
                 | DocCommand::Delete { doctypes, .. },
             ) => Some(doctypes),
-            Command::User(_) | Command::Token(_) | Command::NewApp { .. } => None,
+            Command::User(_) | Command::Token(_) | Command::Job(_) | Command::NewApp { .. } => None,
         }
     }
 }
@@ -92,6 +111,8 @@ impl Command {
         match self {
             Command::Migrate { .. } => ["migrate", ""],
             Command::Serve { .. } => ["serve", ""],
+            Command::Worker { .. } => ["worker", ""],
+            Command::Job(_) => ["job", ""],
             Command::NewApp { .. } => ["new-app", ""],
             Command::User(_) => ["user", ""],
             Command::Token(_) => ["token", ""],
@@ -129,6 +150,46 @@ impl Command {
                 "the following required arguments were not provided:\n  --doctypes <DIR>",
             )
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JobCommand {
+    /// Print the newest jobs as a table: id, name, status, attempts, run_at and the start of the
+    /// last error.
+    List {
+        /// Only jobs with this status.
+        #[arg(long, value_name = "STATUS", value_parser = ["queued", "running", "done", "dead"])]
+        status: Option<String>,
+        /// Only jobs with this full name (`<app>.<job>`).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// How many jobs, 1 to 1000.
+        #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        limit: u32,
+    },
+    /// Print every field of a job as JSON, the payload included.
+    Show {
+        /// The job id.
+        id: String,
+    },
+    /// Queue a dead job again: attempts back to 0, due now, error cleared. Any other status is
+    /// an error.
+    Retry {
+        /// The job id.
+        id: String,
+    },
+    /// Enqueue a job by its full name (`<app>.<job>`), which the binary must know. The job is
+    /// recorded as enqueued by `--actor`. The payload is stored in clear text: never put a
+    /// secret in it.
+    Enqueue {
+        /// The full job name.
+        name: String,
+        /// The payload, any JSON (at most 64 KiB), or `-` to read it from standard input.
+        #[arg(long, value_name = "JSON|-", default_value = "{}")]
+        payload: String,
+        #[command(flatten)]
+        actor: ActorArg,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -19,8 +19,10 @@ use crate::args::{
 };
 use crate::compose::{Composed, compose};
 use crate::error::CliError;
+use crate::job_cmd::job;
 use crate::new_app::new_app;
 use crate::report::migrate_report;
+use crate::worker::{Worker, WorkerConfig, run_worker, worker_id};
 use forgebase_http::json::{
     Input, document_to_json, documents_to_json, parse_filters, parse_input, parse_sort,
 };
@@ -71,6 +73,14 @@ pub async fn run(command: Command, apps: &[App]) -> Result<(), CliError> {
             token(&url, command).await
         }
         Command::Serve { doctypes } => serve(&url, &doctypes, apps).await,
+        Command::Worker {
+            doctypes,
+            concurrency,
+        } => worker(&url, &doctypes, apps, concurrency).await,
+        Command::Job(command) => {
+            let composed = compose(apps, None)?;
+            job(&url, &composed.registry, command).await
+        }
         Command::NewApp { .. } => unreachable!("handled above"),
     }
 }
@@ -516,6 +526,42 @@ async fn serve(url: &str, doctypes: &DocTypesDir, apps: &[App]) -> Result<(), Cl
         .map_err(CliError::Serve)
 }
 
+/// Runs `worker`: the jobs of the apps until Ctrl-C or SIGTERM (see `crate::worker`).
+///
+/// The pool has `concurrency + 2` connections: each running job holds one for its transaction,
+/// and a claim or the record of a failure needs one briefly while the handlers hold theirs.
+async fn worker(
+    url: &str,
+    doctypes: &DocTypesDir,
+    apps: &[App],
+    concurrency: u32,
+) -> Result<(), CliError> {
+    let composed = composed(apps, doctypes)?;
+    if composed.jobs.is_empty() {
+        return Err(CliError::Config(
+            "this binary has no jobs: register them with App::job".to_owned(),
+        ));
+    }
+    let size = usize::try_from(concurrency)
+        .unwrap_or(usize::MAX)
+        .saturating_add(2);
+    let pool = forgebase_db::connect_sized(url, Some(size)).await?;
+    let signals = stop_signals().map_err(CliError::Serve)?;
+    let worker = Worker::new(
+        pool,
+        composed.registry,
+        composed.jobs,
+        WorkerConfig::default(),
+    );
+    if run_worker(Arc::new(worker), concurrency, &worker_id(), signals).await {
+        Ok(())
+    } else {
+        Err(CliError::Config(
+            "a worker slot panicked (see the log above)".to_owned(),
+        ))
+    }
+}
+
 /// The directory of the built desk from `FORGEBASE_DESK_DIR` (typically `desk/dist`), or `None`
 /// when it is unset or blank (no desk is served). It must be a directory that has an
 /// `index.html`, so a wrong path fails at startup instead of giving 404s later.
@@ -711,7 +757,7 @@ fn find_doctype(
 }
 
 /// The JSON text of `--data`: the argument itself, or standard input for `-`.
-fn read_data(arg: &str) -> Result<String, CliError> {
+pub(crate) fn read_data(arg: &str) -> Result<String, CliError> {
     if arg != "-" {
         return Ok(arg.to_owned());
     }
@@ -731,7 +777,7 @@ fn print_document(stored: &StoredDocument) -> Result<(), CliError> {
 }
 
 /// Writes to standard output without panicking on a closed pipe.
-fn write_stdout(text: &str) -> Result<(), CliError> {
+pub(crate) fn write_stdout(text: &str) -> Result<(), CliError> {
     let mut out = std::io::stdout().lock();
     out.write_all(text.as_bytes())
         .and_then(|()| out.flush())

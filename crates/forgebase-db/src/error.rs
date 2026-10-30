@@ -276,6 +276,13 @@ pub enum DbError {
         /// The document that amends it.
         amended_by: String,
     },
+    /// A job cannot be enqueued, or a job command is wrong: the job name is not one of the
+    /// binary's jobs, the payload is too large or has a NUL character, an id is not a UUID. For
+    /// a hook that enqueues it fails the whole operation, and nothing is written. It is a
+    /// mistake of the app (or the operator), not of the caller of an API, so the HTTP API
+    /// reports it as an internal error.
+    #[error("job: {0}")]
+    Job(String),
     /// A lifecycle hook ([`forgebase_core::hooks::DocTypeHooks`]) rejected the operation. The
     /// whole operation was rolled back: nothing was persisted.
     #[error("{hook} hook of DocType `{doctype}` rejected the operation: {message}")]

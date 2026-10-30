@@ -16,7 +16,7 @@ Forgebase is a Rust framework for building business applications, inspired by th
 
 ## Status
 
-**M0 Foundations, M1 Metadata and storage, M2 Relationships and lifecycle, M3 Auth, permissions and REST API and M4 Minimal Desk are done** (M4.1: the metadata API, the `desk/` React app with login, home and list view, served by `forgebase serve`; M4.2: the form view with Submit, Cancel, Amend and Delete, and one Playwright smoke test in CI) (M1.1: DocType metadata model and document validation in `forgebase-core`; M1.2: PostgreSQL pool, framework migrations and additive schema sync in `forgebase-db`; M1.3: document insert/get/update/delete in `forgebase-db` and the `forgebase` command-line tool). M2 was delivered in four PRs: M2.1 adds Link fields (foreign keys) and optimistic concurrency (`update` and `delete` need the expected version); M2.2 adds child tables (Table fields: rows saved with their parent in one transaction); M2.3 adds the lifecycle pipeline and hooks (`DocTypeHooks`, registered by the app; see ADR 0009); M2.4 adds docstatus (`submittable` DocTypes with `submit`, `cancel` and `amend`) and naming series (counters gapless per prefix). M3 was delivered in three PRs: M3.1 adds users, roles, Argon2id passwords, server-side sessions, API tokens and login lockout (`forgebase_db::auth`, ADR 0010) and the `forgebase user` and `forgebase token` commands; M3.2 adds role permissions (`[[permissions]]` in the DocType file, enforced in every document operation, deny by default; ADR 0011) and the list query (`forgebase_db::list`, `forgebase doc list`); M3.3 adds the HTTP API (`forgebase serve`: `/api/v1/resource`, login and logout, cookie sessions with CSRF protection, API tokens, `Host` validation, no CORS). M5 (app model and developer experience) is in progress: **M5.1** adds the app model (the entry crate is now called `forgebase`, a library and the `forgebase` binary; apps are plain Rust crates built from `forgebase::App` and listed in order in the binary's `main`; embedded DocTypes, hooks across apps, SQL data migrations per app, `forgebase::testing`; ADR 0012); **M5.2** adds `forgebase new-app` (generates an app crate that builds and passes its own tests, checked by the CI job `app-template`) and the [first-app guide](docs/guide/first-app.md); example apps follow in M5.3. The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
+**M0 Foundations, M1 Metadata and storage, M2 Relationships and lifecycle, M3 Auth, permissions and REST API and M4 Minimal Desk are done** (M4.1: the metadata API, the `desk/` React app with login, home and list view, served by `forgebase serve`; M4.2: the form view with Submit, Cancel, Amend and Delete, and one Playwright smoke test in CI) (M1.1: DocType metadata model and document validation in `forgebase-core`; M1.2: PostgreSQL pool, framework migrations and additive schema sync in `forgebase-db`; M1.3: document insert/get/update/delete in `forgebase-db` and the `forgebase` command-line tool). M2 was delivered in four PRs: M2.1 adds Link fields (foreign keys) and optimistic concurrency (`update` and `delete` need the expected version); M2.2 adds child tables (Table fields: rows saved with their parent in one transaction); M2.3 adds the lifecycle pipeline and hooks (`DocTypeHooks`, registered by the app; see ADR 0009); M2.4 adds docstatus (`submittable` DocTypes with `submit`, `cancel` and `amend`) and naming series (counters gapless per prefix). M3 was delivered in three PRs: M3.1 adds users, roles, Argon2id passwords, server-side sessions, API tokens and login lockout (`forgebase_db::auth`, ADR 0010) and the `forgebase user` and `forgebase token` commands; M3.2 adds role permissions (`[[permissions]]` in the DocType file, enforced in every document operation, deny by default; ADR 0011) and the list query (`forgebase_db::list`, `forgebase doc list`); M3.3 adds the HTTP API (`forgebase serve`: `/api/v1/resource`, login and logout, cookie sessions with CSRF protection, API tokens, `Host` validation, no CORS). M5 (app model and developer experience) is in progress: **M5.1** adds the app model (the entry crate is now called `forgebase`, a library and the `forgebase` binary; apps are plain Rust crates built from `forgebase::App` and listed in order in the binary's `main`; embedded DocTypes, hooks across apps, SQL data migrations per app, `forgebase::testing`; ADR 0012); **M5.2** adds `forgebase new-app` (generates an app crate that builds and passes its own tests, checked by the CI job `app-template`) and the [first-app guide](docs/guide/first-app.md); example apps follow in M5.3. M6 (jobs and scheduler) is in progress: **M6.1** adds background jobs (a Postgres queue, `forgebase worker`, `forgebase job`, the transactional outbox for hooks; ADR 0013); the scheduler, the built-in clean-up jobs and the example apps follow in M6.2 and M6.3. The workspace has four crates, CI and a toolchain pin. The documents below record research, proposed architecture and open decisions. ADRs 0002-0006 (workspace layout, PostgreSQL only, database access direction, HTTP stack, extension model) are Accepted; most other decisions are **Proposed**, not final. Each document marks its status.
 
 The repository is currently **private**. It is intended to be open source under the MIT license; it is not open source yet.
 
@@ -278,6 +278,43 @@ cd ~/apps/crm && FORGEBASE_TEST_DATABASE_URL=postgres://forgebase:forgebase@loca
 ```
 
 The step-by-step guide (run it, extend another app, upgrade with migrations, common errors) is [docs/guide/first-app.md](docs/guide/first-app.md).
+
+### Background jobs
+
+An app registers a job with `App::job`; a hook, another job or the command line enqueues it, and `forgebase worker` runs it. A job runs in **one database transaction together with its completion**; a failure is retried (5 attempts, 30 s doubling up to 1 h, 5 min timeout) and then the job is `dead`. Delivery is at-least-once, so effects outside the database must be safe to repeat. A hook's `ctx.enqueue(..)` is written in the same transaction as the document change (the transactional outbox), so the job exists if and only if the change is committed. Never put a secret in a payload: it is stored in clear text. Design: [ADR 0013](docs/adr/0013-jobs-scheduler-and-transactional-outbox.md).
+
+```rust
+use forgebase::{App, JobContext, JobFuture, JobHandler};
+
+struct Welcome;
+
+impl JobHandler for Welcome {
+    fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+        Box::pin(async move {
+            let name = ctx.payload()["customer"].as_str().unwrap_or_default().to_owned();
+            // The system context, as `job:crm.welcome`, inside this job's transaction.
+            let _customer = ctx.documents().get("customer", &name).await?;
+            Ok(())
+        })
+    }
+}
+
+pub fn app() -> App {
+    App::new("crm").job("welcome", Welcome) // the job is `crm.welcome`
+}
+// in a hook: ctx.enqueue("crm.welcome", forgebase::serde_json::json!({"customer": doc_name}))?;
+```
+
+```sh
+forgebase migrate                                   # creates the job table (migration 0005)
+forgebase worker --concurrency 4                    # runs jobs until Ctrl-C or SIGTERM
+forgebase job enqueue crm.welcome --payload '{"customer":"c-1"}'   # or --payload - for stdin
+forgebase job list --status dead                    # id, name, status, attempts, run_at, last error
+forgebase job show <id>                             # every field as JSON, the payload included
+forgebase job retry <id>                            # a dead job goes back to the queue
+```
+
+The first signal stops the worker from claiming and lets running jobs finish for 30 seconds (then they are given back, without counting an attempt); a second signal exits at once, and another worker recovers what was running when its lease expires. In an app's tests, `forgebase::testing::run_jobs(&binary, &db)` runs the jobs that are due.
 
 ## License
 

@@ -18,6 +18,7 @@ bytes.workspace = true
 deadpool-postgres.workspace = true
 getrandom.workspace = true
 rust_decimal = { workspace = true, features = ["db-tokio-postgres"] }
+serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["rt"] }

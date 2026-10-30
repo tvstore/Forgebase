@@ -171,6 +171,9 @@ impl From<DbError> for ApiError {
                 Self::new(S::UNPROCESSABLE_ENTITY, "not_submittable", text)
             }
             DbError::Hook { .. } => Self::new(S::UNPROCESSABLE_ENTITY, "hook_rejected", text),
+            // A job that a hook enqueued has an unknown name or a payload that is too large: a
+            // mistake of the app, not of the caller. Logged, and answered like any internal error.
+            DbError::Job(_) => Self::internal(&text),
             // Postgres, Pool, Decode, LockTimeout and everything else: the caller cannot help.
             other => Self::internal(&other),
         }

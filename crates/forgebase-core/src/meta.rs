@@ -812,6 +812,9 @@ pub struct Registry {
     /// [`Registry::add_owned`]).
     owners: BTreeMap<String, String>,
     hooks: BTreeMap<String, Vec<Arc<dyn DocTypeHooks>>>,
+    /// The full names (`<app>.<job>`) of the background jobs the binary knows. Names only: the
+    /// registry knows nothing about handlers.
+    jobs: BTreeSet<String>,
 }
 
 impl fmt::Debug for Registry {
@@ -826,6 +829,7 @@ impl fmt::Debug for Registry {
         f.debug_struct("Registry")
             .field("doctypes", &self.doctypes)
             .field("hooks", &hook_counts)
+            .field("jobs", &self.jobs)
             .finish()
     }
 }
@@ -834,6 +838,22 @@ impl Registry {
     /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records a background job name (`<app>.<job>`) as known, so that enqueueing it is
+    /// accepted. Returns `false` when the name was already known. The name is not checked here.
+    pub fn add_job(&mut self, name: &str) -> bool {
+        self.jobs.insert(name.to_owned())
+    }
+
+    /// Whether a job with this full name is known.
+    pub fn has_job(&self, name: &str) -> bool {
+        self.jobs.contains(name)
+    }
+
+    /// The known job names, in name order.
+    pub fn job_names(&self) -> impl Iterator<Item = &str> {
+        self.jobs.iter().map(String::as_str)
     }
 
     /// Validates and adds a DocType. Fails with every definition problem found
