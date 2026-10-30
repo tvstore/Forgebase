@@ -635,7 +635,7 @@ async fn the_meta_has_the_workflow_without_any_role() {
     ] {
         assert!(!reply.text.contains(role), "{role} in {}", reply.text);
     }
-    // A DocType without a workflow has `"workflow": null`, and nothing else is new.
+    // A DocType without a workflow has `"workflow": null`, and nothing else is new (UX.4 added `icon`).
     let reply = w.env.send(get("/api/v1/meta/bill").token(&w.admin)).await;
     assert_eq!(reply.data()["workflow"], Json::Null);
     let mut keys: Vec<_> = reply
@@ -651,6 +651,7 @@ async fn the_meta_has_the_workflow_without_any_role() {
         [
             "app",
             "fields",
+            "icon",
             "label",
             "list_fields",
             "name",

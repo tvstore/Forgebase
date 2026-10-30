@@ -15,6 +15,11 @@ export default defineConfig({
     assetsInlineLimit: 0,
     cssCodeSplit: false,
   },
+  experimental: {
+    // The font in the stylesheet is referenced relative to the stylesheet (both are in assets/),
+    // not by an absolute path: the CSS then has no reference to where the desk is mounted.
+    renderBuiltUrl: (_filename, { hostType }) => (hostType === 'css' ? { relative: true } : undefined),
+  },
   server: {
     proxy: { '/api': 'http://localhost:8000' },
   },

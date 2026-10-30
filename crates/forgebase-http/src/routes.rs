@@ -127,6 +127,38 @@ fn version_param(query: &BTreeMap<String, String>) -> Result<i64, ApiError> {
         .ok_or_else(|| ApiError::invalid_query("`version` must be an integer"))
 }
 
+/// The `link_titles` parameter (UX.4): absent is `false`, `1` is `true`, anything else is
+/// `invalid_query`.
+fn link_titles_flag(query: &BTreeMap<String, String>) -> Result<bool, ApiError> {
+    match query.get("link_titles").map(String::as_str) {
+        None => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(ApiError::invalid_query("`link_titles` must be 1")),
+    }
+}
+
+/// The response of a read: `{"data": value}`, plus a sibling `link_titles` key when asked for.
+/// Without the parameter the output is exactly what it was before UX.4.
+/// It uses the connection the handler already holds: a second `state.client()` here would wait
+/// for a pool slot while this request keeps its own, and with every slot held by such a request
+/// the pool (which has no wait timeout) would never free one.
+async fn with_link_titles(
+    client: &forgebase_db::Client,
+    state: &AppState,
+    caller: &Caller,
+    doctype: &str,
+    documents: &[forgebase_db::StoredDocument],
+    value: Json,
+) -> Reply {
+    let titles =
+        forgebase_db::link_titles(client, state.registry(), caller, doctype, documents).await?;
+    Ok((
+        StatusCode::OK,
+        AxumJson(json!({ "data": value, "link_titles": titles })),
+    )
+        .into_response())
+}
+
 /// The query parameters as a map, `invalid_query` for a parameter that is not in `allowed` or
 /// that is repeated (`?limit=1&limit=500` must not depend on which one a parser keeps).
 fn params(
@@ -248,7 +280,8 @@ pub async fn session(
 // Resources
 // ---------------------------------------------------------------------------------------------
 
-/// `GET /api/v1/resource/{doctype}` with `filters`, `sort`, `limit` and `offset`.
+/// `GET /api/v1/resource/{doctype}` with `filters`, `sort`, `limit` and `offset`, and
+/// `link_titles=1` to add the titles of the linked documents the caller may read (UX.4).
 pub async fn list(
     State(state): State<AppState>,
     authenticated: Authenticated,
@@ -263,7 +296,11 @@ pub async fn list(
         &[Right::Read],
         Right::Read,
     )?;
-    let query = params(query, &["filters", "sort", "limit", "offset"])?;
+    let query = params(
+        query,
+        &["filters", "sort", "limit", "offset", "link_titles"],
+    )?;
+    let titles = link_titles_flag(&query)?;
     let list_query = ListQuery {
         filters: match query.get("filters") {
             Some(text) => parse_filters(doctype, text).map_err(query_error)?,
@@ -299,7 +336,19 @@ pub async fn list(
         &list_query,
     )
     .await?;
-    Ok(data(StatusCode::OK, documents_to_json(&documents)?))
+    let value = documents_to_json(&documents)?;
+    if titles {
+        return with_link_titles(
+            &client,
+            &state,
+            &authenticated.caller(),
+            &doctype.name,
+            &documents,
+            value,
+        )
+        .await;
+    }
+    Ok(data(StatusCode::OK, value))
 }
 
 /// `POST /api/v1/resource/{doctype}`: the body is the document.
@@ -337,7 +386,7 @@ pub async fn create(
     Ok(data(StatusCode::CREATED, document_to_json(&stored)?))
 }
 
-/// `GET /api/v1/resource/{doctype}/{name}`.
+/// `GET /api/v1/resource/{doctype}/{name}`, with `link_titles=1` as for the list.
 pub async fn read(
     State(state): State<AppState>,
     authenticated: Authenticated,
@@ -346,7 +395,7 @@ pub async fn read(
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
     let doctype = doctype(&state, &doctype_name)?;
-    params(query, &[])?;
+    let titles = link_titles_flag(&params(query, &["link_titles"])?)?;
     let mut client = state.client().await?;
     let stored = forgebase_db::get(
         &mut **client,
@@ -362,7 +411,19 @@ pub async fn read(
             name: name.clone(),
         })
     })?;
-    Ok(data(StatusCode::OK, document_to_json(&stored)?))
+    let value = document_to_json(&stored)?;
+    if titles {
+        return with_link_titles(
+            &client,
+            &state,
+            &authenticated.caller(),
+            &doctype.name,
+            std::slice::from_ref(&stored),
+            value,
+        )
+        .await;
+    }
+    Ok(data(StatusCode::OK, value))
 }
 
 /// `PATCH /api/v1/resource/{doctype}/{name}`: body `{"version": N, "data": {changes}}`.

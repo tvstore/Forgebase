@@ -1,3 +1,4 @@
+import { DocTypeIcon, HouseIcon } from '../icons';
 import { groupByApp } from '../nav';
 import { homeHref, listHref } from '../router';
 import type { Route } from '../router';
@@ -12,7 +13,7 @@ interface Props {
   onNavigate: () => void;
 }
 
-/** The DocTypes the user can read, grouped by app. The current one is marked. */
+/** The DocTypes the user can read, grouped by app, each with its icon. The current one is marked. */
 export function Sidebar({ id, open, doctypes, route, onNavigate }: Props) {
   const current = route.name === 'list' || route.name === 'new' || route.name === 'form' ? route.doctype : null;
   return (
@@ -27,7 +28,8 @@ export function Sidebar({ id, open, doctypes, route, onNavigate }: Props) {
       <ul className="side-list">
         <li>
           <a className="side-link" href={homeHref()} aria-current={route.name === 'home' ? 'page' : undefined}>
-            Home
+            <HouseIcon className="icon" />
+            <span>Home</span>
           </a>
         </li>
       </ul>
@@ -42,7 +44,8 @@ export function Sidebar({ id, open, doctypes, route, onNavigate }: Props) {
                   href={listHref(d.name)}
                   aria-current={d.name === current ? (route.name === 'list' ? 'page' : 'true') : undefined}
                 >
-                  {d.label}
+                  <DocTypeIcon name={d.icon} className="icon" />
+                  <span>{d.label}</span>
                 </a>
               </li>
             ))}

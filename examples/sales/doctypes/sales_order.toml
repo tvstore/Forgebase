@@ -11,6 +11,7 @@ label = "Sales Order"
 submittable = true
 naming = { series = "SO-.YYYY.-.#####" }
 title_field = "customer"
+icon = "shopping-cart"
 list_fields = ["customer", "order_date", "total"]
 
 [[fields]]

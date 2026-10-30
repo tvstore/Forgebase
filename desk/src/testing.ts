@@ -28,6 +28,7 @@ export const meta = (fields: FieldMeta[], extra: Partial<DocTypeMeta> = {}): Doc
   name: 'order',
   label: 'Order',
   app: null,
+  icon: null,
   naming: 'random',
   submittable: false,
   title_field: null,

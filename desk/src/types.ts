@@ -17,6 +17,8 @@ export interface DocTypeSummary {
   label: string;
   /** The app that owns the DocType, or null when none is recorded. */
   app: string | null;
+  /** The icon the DocType names (one of the list in doctype_icons.txt), or null for the default. */
+  icon: string | null;
   submittable: boolean;
   rights: Rights;
 }
@@ -55,6 +57,7 @@ export interface DocTypeMeta {
   name: string;
   label: string;
   app: string | null;
+  icon: string | null;
   naming: string;
   submittable: boolean;
   /** The field that names a document for a person, or null. */

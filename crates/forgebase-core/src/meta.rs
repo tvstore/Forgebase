@@ -25,6 +25,18 @@ pub const TITLE_FIELD_KINDS: [&str; 7] = [
     "data", "int", "decimal", "date", "datetime", "select", "link",
 ];
 
+/// The icon names a DocType's `icon` may have, one per line in `doctype_icons.txt`. The desk
+/// has a test that checks the same file against its icon set, so the two cannot drift apart.
+const DOCTYPE_ICON_LIST: &str = include_str!("doctype_icons.txt");
+
+/// The icon names a DocType's `icon` may have (UX.4).
+pub fn doctype_icons() -> impl Iterator<Item = &'static str> {
+    DOCTYPE_ICON_LIST
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+}
+
 /// The default label of a name: split on `_`, capitalise the first letter of each part, join
 /// with a space. `order_date` gives `Order Date`.
 pub fn humanize(name: &str) -> String {
@@ -76,6 +88,10 @@ pub struct DocType {
     /// desk's own default. Existing fields, no Table or Text field, no duplicates, at most
     /// [`MAX_LIST_FIELDS`]; not allowed on a child DocType. Metadata for the desk only.
     pub list_fields: Option<Vec<String>>,
+    /// The icon the desk shows for the DocType (`icon`, UX.4): a name from the list in
+    /// `doctype_icons.txt` ([`doctype_icons`]), or `None` for the desk's default. Not allowed on
+    /// a child DocType. Metadata for the desk only.
+    pub icon: Option<String>,
     /// The states a document moves through and the transitions between them (`[workflow]`,
     /// M8.1, ADR 0015), or `None`. Defined by the app in the DocType file. On a DocType with a
     /// workflow, plain submit and cancel are refused and the state changes only through
@@ -385,11 +401,19 @@ pub enum DefinitionError {
         /// The field.
         field: String,
     },
-    /// `title_field` or `list_fields` on a child DocType.
+    /// `title_field`, `list_fields` or `icon` on a child DocType.
     #[error("a child doctype cannot have `{key}`")]
     ChildWithDeskKey {
-        /// `title_field` or `list_fields`.
+        /// `title_field`, `list_fields` or `icon`.
         key: &'static str,
+    },
+    /// `icon` is not one of the allowed names.
+    #[error("icon `{icon}` is not an allowed icon (allowed: {allowed})")]
+    UnknownIcon {
+        /// The named icon.
+        icon: String,
+        /// The allowed names, comma separated.
+        allowed: String,
     },
     /// `title_field` names a field the DocType does not have.
     #[error("title_field `{field}` is not a field of the doctype")]
@@ -925,7 +949,7 @@ impl DocType {
         errors
     }
 
-    /// `title_field` and `list_fields`. A name in `failed` is a field that could not be converted;
+    /// `title_field`, `list_fields` and `icon`. A name in `failed` is a field that could not be converted;
     /// its real problem is already reported, so it is not reported again as missing.
     fn check_desk_keys(&self, failed: &[String], errors: &mut Vec<DefinitionError>) {
         if self.is_child {
@@ -935,7 +959,18 @@ impl DocType {
             if self.list_fields.is_some() {
                 errors.push(DefinitionError::ChildWithDeskKey { key: "list_fields" });
             }
+            if self.icon.is_some() {
+                errors.push(DefinitionError::ChildWithDeskKey { key: "icon" });
+            }
             return;
+        }
+        if let Some(icon) = &self.icon
+            && !doctype_icons().any(|allowed| allowed == icon)
+        {
+            errors.push(DefinitionError::UnknownIcon {
+                icon: icon.clone(),
+                allowed: doctype_icons().collect::<Vec<_>>().join(", "),
+            });
         }
         if let Some(name) = &self.title_field
             && !failed.contains(name)
@@ -1572,6 +1607,7 @@ mod tests {
             permissions: vec![],
             title_field: None,
             list_fields: None,
+            icon: None,
             workflow: None,
         }
     }

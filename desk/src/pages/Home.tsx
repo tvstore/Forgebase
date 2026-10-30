@@ -1,6 +1,8 @@
 import type { DocTypes } from '../App';
 import { EmptyState } from '../components/EmptyState';
+import { PageHeader } from '../components/PageHeader';
 import { Skeleton } from '../components/Skeleton';
+import { DocTypeIcon, PlusIcon } from '../icons';
 import { groupByApp } from '../nav';
 import { listHref, newHref } from '../router';
 
@@ -8,12 +10,10 @@ import { listHref, newHref } from '../router';
 export function Home({ doctypes }: { doctypes: DocTypes }) {
   return (
     <div className="page">
-      <header className="page-head">
-        <div>
-          <h1>Home</h1>
-          <p className="subtitle">Choose a document type to work with.</p>
-        </div>
-      </header>
+      <PageHeader
+        title={<h1>Home</h1>}
+        meta={<p className="subtitle">Choose a document type to work with.</p>}
+      />
       {doctypes.status === 'loading' ? (
         <div className="card-grid" aria-busy="true">
           <div className="card">
@@ -45,11 +45,15 @@ export function Home({ doctypes }: { doctypes: DocTypes }) {
                   {group.doctypes.map((d) => (
                     <li key={d.name}>
                       <a className="doctype-link" href={listHref(d.name)}>
-                        {d.label}
+                        <span className="doctype-icon">
+                          <DocTypeIcon name={d.icon} />
+                        </span>
+                        <span>{d.label}</span>
                       </a>
                       {d.rights.create !== 'none' ? (
                         <a className="btn btn-small" href={newHref(d.name)} aria-label={`New ${d.label}`}>
-                          <span aria-hidden="true">+ </span>New
+                          <PlusIcon size={14} />
+                          New
                         </a>
                       ) : null}
                     </li>

@@ -8,6 +8,7 @@ import { Form } from './pages/Form';
 import { Home } from './pages/Home';
 import { List } from './pages/List';
 import { Login } from './pages/Login';
+import { clearRecent } from './recent';
 import { homeHref, loginHref, navigate, parseHash, useHash } from './router';
 import type { Route } from './router';
 import type { DocTypeSummary, SessionInfo } from './types';
@@ -28,7 +29,10 @@ export function App() {
 
   useEffect(() => {
     // Any 401 on a later request means the session ended: back to the login page.
-    setUnauthenticatedHandler(() => setAuth({ status: 'out' }));
+    setUnauthenticatedHandler(() => {
+      clearRecent();
+      setAuth({ status: 'out' });
+    });
     let cancelled = false;
     // On start (and after a reload) ask the server who we are; this also gives the page a
     // fresh CSRF token, which is kept in memory only.
@@ -38,7 +42,10 @@ export function App() {
       },
       (e: unknown) => {
         if (cancelled) return;
-        if (e instanceof ApiError && e.status === 401) setAuth({ status: 'out' });
+        if (e instanceof ApiError && e.status === 401) {
+          clearRecent();
+          setAuth({ status: 'out' });
+        }
         else setAuth({ status: 'error', message: 'Cannot reach the server. Reload to try again.' });
       },
     );
@@ -83,10 +90,11 @@ export function App() {
   };
 
   const onLogout = () => {
-    logout().then(
-      () => setAuth({ status: 'out' }),
-      () => setAuth({ status: 'out' }),
-    );
+    const out = () => {
+      clearRecent();
+      setAuth({ status: 'out' });
+    };
+    logout().then(out, out);
   };
 
   if (auth.status === 'loading') {

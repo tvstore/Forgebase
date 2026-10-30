@@ -1,14 +1,16 @@
-import { LinkInput } from './LinkInput';
 import type { FormValue } from '../fields';
+import type { LinkTitles } from '../linkTitles';
 import type { FieldMeta } from '../types';
+import { LinkInput } from './LinkInput';
 
 interface Props {
   id: string;
   field: FieldMeta;
   value: FormValue;
   onChange: (value: FormValue) => void;
-  readOnly: boolean;
   invalid: boolean;
+  /** The titles of the documents the form links to (shown under a Link field). */
+  titles?: LinkTitles;
   /** The id of the element with the error message, when there is one. */
   describedBy?: string;
   /** Names the control when no `<label for>` does (a cell of a table: the column and the row). */
@@ -16,12 +18,12 @@ interface Props {
 }
 
 /**
- * The native control of a field (never a Table field, see TableGrid). Required is marked with
- * `aria-required`, not the `required` attribute: the form has `noValidate`, the server decides
- * and its message is shown on the field. A read-only control stays focusable where the platform
- * allows (`readOnly`); a checkbox and a select can only be `disabled`.
+ * The native control of an editable field (never a Table field, see TableGrid). Required is
+ * marked with `aria-required`, not the `required` attribute: the form has `noValidate`, the
+ * server decides and its message is shown on the field. A read-only or locked field is not a
+ * control at all: it is shown as plain text (ReadOnlyField, ReadOnlyCell).
  */
-export function FieldControl({ id, field, value, onChange, readOnly, invalid, describedBy, ariaLabel }: Props) {
+export function FieldControl({ id, field, value, onChange, invalid, titles, describedBy, ariaLabel }: Props) {
   const common = {
     id,
     'aria-required': field.required || undefined,
@@ -30,13 +32,11 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
     'aria-label': ariaLabel,
   };
   const text = typeof value === 'string' ? value : '';
-  // A value that is not there (computed by the server, not yet known) shows a dash, not a hole.
-  const dash = readOnly ? '\u2014' : undefined;
 
   switch (field.type) {
     case 'text':
       return (
-        <textarea {...common} rows={4} placeholder={dash} value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
+        <textarea {...common} rows={4} value={text} onChange={(e) => onChange(e.target.value)} />
       );
     case 'check':
       return (
@@ -44,13 +44,12 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
           {...common}
           type="checkbox"
           checked={value === true}
-          disabled={readOnly}
           onChange={(e) => onChange(e.target.checked)}
         />
       );
     case 'select':
       return (
-        <select {...common} value={text} disabled={readOnly} onChange={(e) => onChange(e.target.value)}>
+        <select {...common} value={text} onChange={(e) => onChange(e.target.value)}>
           {field.required && text !== '' ? null : <option value="" />}
           {(field.options ?? []).map((option) => (
             <option key={option} value={option}>
@@ -66,7 +65,7 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
           target={field.target ?? ''}
           value={text}
           onChange={onChange}
-          readOnly={readOnly}
+          titles={titles}
           required={field.required}
           invalid={invalid}
           describedBy={describedBy}
@@ -79,9 +78,7 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
           {...common}
           type="number"
           step="1"
-          placeholder={dash}
           value={text}
-          readOnly={readOnly}
           // A number control reports "" for text it cannot read (for example "e"): keep a marker
           // so the save refuses it on the field instead of treating it as empty.
           onChange={(e) => onChange(e.target.validity.badInput ? 'not a number' : e.target.value)}
@@ -90,14 +87,14 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
     case 'decimal':
       // Text, not a number control: the value is sent as a string (no float rounding).
       return (
-        <input {...common} type="text" inputMode="decimal" placeholder={dash} value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
+        <input {...common} type="text" inputMode="decimal" value={text} onChange={(e) => onChange(e.target.value)} />
       );
     case 'date':
-      return <input {...common} type="date" value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />;
+      return <input {...common} type="date" value={text} onChange={(e) => onChange(e.target.value)} />;
     case 'datetime':
       // Local time of the browser; converted to and from UTC in fields.ts. step=1: whole seconds.
       return (
-        <input {...common} type="datetime-local" step="1" value={text} readOnly={readOnly} onChange={(e) => onChange(e.target.value)} />
+        <input {...common} type="datetime-local" step="1" value={text} onChange={(e) => onChange(e.target.value)} />
       );
     case 'table':
       return null;
@@ -107,9 +104,7 @@ export function FieldControl({ id, field, value, onChange, readOnly, invalid, de
           {...common}
           type="text"
           maxLength={field.max_length}
-          placeholder={dash}
           value={text}
-          readOnly={readOnly}
           onChange={(e) => onChange(e.target.value)}
         />
       );

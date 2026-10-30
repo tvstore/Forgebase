@@ -27,6 +27,7 @@ struct RawDocType {
     permissions: Vec<RawPermission>,
     title_field: Option<String>,
     list_fields: Option<Vec<String>>,
+    icon: Option<String>,
     workflow: Option<RawWorkflow>,
 }
 
@@ -249,6 +250,7 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         permissions: raw.permissions.into_iter().map(Into::into).collect(),
         title_field: raw.title_field,
         list_fields: raw.list_fields,
+        icon: raw.icon,
         workflow: raw.workflow.map(|w| convert_workflow(w, &mut errors)),
     };
     errors.extend(doctype.check(&failed));
@@ -727,6 +729,39 @@ scale = 2
             text.push_str(&format!("[[fields]]\nname = \"{name}\"\ntype = \"int\"\n"));
         }
         assert_eq!(from_toml_str(&text).unwrap().list_fields.unwrap().len(), 8);
+    }
+
+    #[test]
+    fn icon_is_optional_and_checked_against_the_list() {
+        let base = "name = \"t\"\nlabel = \"T\"\n";
+        assert_eq!(from_toml_str(base).unwrap().icon, None);
+        let d = from_toml_str(&format!("{base}icon = \"file-text\"\n")).unwrap();
+        assert_eq!(d.icon.as_deref(), Some("file-text"));
+        let errors = invalid(&format!("{base}icon = \"rocket\"\n"));
+        assert_eq!(errors.len(), 1);
+        let message = errors[0].to_string();
+        assert!(message.contains("`rocket`"), "{message}");
+        // The message lists the allowed names.
+        assert!(message.contains("file-text, users, user"), "{message}");
+        // Every name in the list is accepted, and the list has no duplicates.
+        let names: Vec<&str> = crate::meta::doctype_icons().collect();
+        assert!(names.len() >= 16);
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len());
+        for name in names {
+            assert!(from_toml_str(&format!("{base}icon = \"{name}\"\n")).is_ok());
+        }
+    }
+
+    #[test]
+    fn icon_is_refused_on_a_child() {
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\nicon = \"box\"\n";
+        assert_eq!(
+            invalid(child),
+            vec![DefinitionError::ChildWithDeskKey { key: "icon" }]
+        );
     }
 
     #[test]

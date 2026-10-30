@@ -634,6 +634,8 @@ impl Env {
 /// A database created for one test, dropped (with `FORCE`) when the value is dropped.
 pub struct TestDb {
     pub pool: Pool,
+    /// The URL of this test database, for a second pool of another size.
+    pub url: String,
     admin_url: String,
     name: String,
 }
@@ -660,9 +662,8 @@ impl TestDb {
             .await
             .expect("create test database");
         admin.close();
-        let pool = connect(&with_database(&admin_url, &name))
-            .await
-            .expect("connect to test database");
+        let url = with_database(&admin_url, &name);
+        let pool = connect(&url).await.expect("connect to test database");
         {
             let mut client = pool.get().await.expect("connection");
             migrate_framework(&mut client, false)
@@ -671,6 +672,7 @@ impl TestDb {
         }
         Self {
             pool,
+            url,
             admin_url,
             name,
         }

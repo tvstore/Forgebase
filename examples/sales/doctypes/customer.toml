@@ -6,6 +6,7 @@ label = "Customer"
 naming = { field = "email" }
 # How the desk names a customer and which columns its list shows after `name` (UX.1).
 title_field = "full_name"
+icon = "users"
 list_fields = ["full_name", "customer_group", "tier"]
 
 [[fields]]

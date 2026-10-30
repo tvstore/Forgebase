@@ -1,6 +1,9 @@
 import { useEffect, useRef } from 'react';
 
 import { FieldControl } from './FieldControl';
+import { ReadOnlyCell } from './ReadOnlyValue';
+import { PlusIcon } from '../icons';
+import type { LinkTitles } from '../linkTitles';
 import { errorKey, blankRow } from '../fields';
 import type { Errors, FormRow, FormValue } from '../fields';
 import { focusAfterRemove } from '../filters';
@@ -14,6 +17,8 @@ interface Props {
   onChange: (rows: FormRow[]) => void;
   readOnly: boolean;
   errors: Errors;
+  /** The titles of the documents the rows link to. */
+  titles: LinkTitles;
   /** The prefix of the element ids (unique per form). */
   idBase: string;
 }
@@ -22,12 +27,13 @@ interface Props {
 type Focus = { kind: 'cell'; row: number } | { kind: 'remove'; row: number } | { kind: 'add' };
 
 /**
- * The rows of a Table field as a native `<table>`: one row per child row (the order is the
- * display order), the child fields as the same native controls, "Add row" and a "Remove row N"
- * button per row. Every control is named by its column and row; a problem of a cell is linked
- * with `aria-describedby`. Child tables cannot nest, so no cell is a table.
+ * The rows of a Table field as a native `<table>` inside its card: one row per child row (the
+ * order is the display order), the editable child fields as the same native controls, a read-only
+ * or locked value as plain text (numbers on the right), "Add row" and a "Remove row N" button per
+ * row. Every control is named by its column and row; a problem of a cell is linked with
+ * `aria-describedby`. Child tables cannot nest, so no cell is a table.
  */
-export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: Props) {
+export function TableGrid({ field, rows, onChange, readOnly, errors, titles, idBase }: Props) {
   const columns = field.fields ?? [];
   const wrap = useRef<HTMLDivElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
@@ -56,7 +62,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
   const errorId = `${idBase}-error`;
 
   return (
-    <div>
+    <>
       {rows.length > 0 ? (
         <div className="table-wrap" ref={wrap}>
           <table className="grid-table">
@@ -85,6 +91,18 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                     const key = errorKey(field.name, index + 1, c.name);
                     const message = errors[key];
                     const cellId = `${idBase}-${row.key}-${c.name}`;
+                    if (readOnly || c.read_only) {
+                      return (
+                        <ReadOnlyCell
+                          key={c.name}
+                          id={cellId}
+                          field={c}
+                          value={row.values[c.name] ?? ''}
+                          titles={titles}
+                          message={message}
+                        />
+                      );
+                    }
                     return (
                       <td key={c.name} className={isNumeric(c.type) ? 'num' : undefined}>
                         <FieldControl
@@ -92,7 +110,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                           field={c}
                           value={row.values[c.name] ?? ''}
                           onChange={(value) => setCell(index, c.name, value)}
-                          readOnly={readOnly || c.read_only}
+                          titles={titles}
                           invalid={message !== undefined}
                           describedBy={message ? `${cellId}-error` : undefined}
                           ariaLabel={`${c.label}, row ${index + 1}`}
@@ -127,27 +145,30 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
           </table>
         </div>
       ) : (
-        <p className="hint">{readOnly ? 'No rows.' : 'No rows yet.'}</p>
+        <p className="hint table-empty">{readOnly ? 'No rows.' : 'No rows yet.'}</p>
       )}
       {tableError ? (
-        <p id={errorId} className="field-error">
+        <p id={errorId} className="field-error table-empty">
           {tableError}
         </p>
       ) : null}
       {readOnly ? null : (
-        <button
-          type="button"
-          ref={addButton}
-          className="btn btn-small"
-          aria-describedby={tableError ? errorId : undefined}
-          onClick={() => {
-            onChange([...rows, blankRow(columns)]);
-            pending.current = { kind: 'cell', row: rows.length };
-          }}
-        >
-          <span aria-hidden="true">+ </span>Add row
-        </button>
+        <div className="table-foot">
+          <button
+            type="button"
+            ref={addButton}
+            className="btn btn-small"
+            aria-describedby={tableError ? errorId : undefined}
+            onClick={() => {
+              onChange([...rows, blankRow(columns)]);
+              pending.current = { kind: 'cell', row: rows.length };
+            }}
+          >
+            <PlusIcon size={14} />
+            Add row
+          </button>
+        </div>
       )}
-    </div>
+    </>
   );
 }

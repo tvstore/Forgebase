@@ -8,6 +8,7 @@ label = "Sales Order Log"
 # same moment, the unique key refuses the second insert and the job looks again and finds the row, so it succeeds.
 naming = { field = "key" }
 title_field = "key"
+icon = "clipboard-list"
 list_fields = ["key", "sales_order", "event", "total"]
 
 [[fields]]

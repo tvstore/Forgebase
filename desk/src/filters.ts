@@ -149,3 +149,50 @@ export function focusAfterRemove(removed: number, count: number): FocusTarget {
   if (remaining <= 0) return { kind: 'add' };
   return { kind: 'row', index: Math.min(removed, remaining - 1) };
 }
+
+const OP_WORDS: Record<Op, string> = {
+  '=': 'is',
+  '!=': 'is not',
+  '<': '<',
+  '<=': '<=',
+  '>': '>',
+  '>=': '>=',
+  in: 'in',
+  like: 'matches',
+  'is null': 'is empty',
+  'is not null': 'is not empty',
+};
+
+/** One active filter as a chip: its text ("Status is Draft") and its place in the filter list. */
+export interface Chip {
+  index: number;
+  label: string;
+}
+
+/** The chip text of a filter row, in the user's words: `Tier is gold`, `Points >= 10`, `Notes is empty`. */
+export function chipLabel(row: FilterRow, fields: FilterField[]): string {
+  const field = fields.find((f) => f.name === row.field);
+  const name = field?.label ?? row.field;
+  const word = OP_WORDS[row.op];
+  if (NO_VALUE_OPS.includes(row.op)) return `${name} ${word}`;
+  const value = field?.type === 'check' ? (row.value === 'true' ? 'Yes' : 'No') : row.value;
+  return `${name} ${word} ${value}`;
+}
+
+/** The chips for the `filters` text of the address, one per filter, in order. */
+export function filterChips(filters: string | null, fields: FilterField[]): Chip[] {
+  return parseFilters(filters).map((row, index) => ({ index, label: chipLabel(row, fields) }));
+}
+
+/**
+ * The `filters` text without filter number `index` (null when none is left): what a click on the
+ * chip's x applies. Text that is not a list of filters is returned unchanged.
+ */
+export function withoutFilter(filters: string | null, index: number, fields: FilterField[]): string | null {
+  const rows = parseFilters(filters);
+  if (index < 0 || index >= rows.length) return filters;
+  const rest = rows.filter((_, i) => i !== index);
+  if (rest.length === 0) return null;
+  const built = buildFilters(rest, fields);
+  return built.ok ? JSON.stringify(built.filters) : filters;
+}

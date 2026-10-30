@@ -1,13 +1,19 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 
-import { ApiError, getDocTypeMeta, listDocuments } from '../api';
+import { ApiError, getDocTypeMeta, listDocumentsWithTitles } from '../api';
 import { Badge } from '../components/Badge';
 import { EmptyState } from '../components/EmptyState';
 import { FilterBar } from '../components/FilterBar';
+import { PageHeader } from '../components/PageHeader';
 import { Skeleton } from '../components/Skeleton';
-import { parseFilters } from '../filters';
+import { filterChips, parseFilters, withoutFilter } from '../filters';
+import { FunnelIcon, PlusIcon, SearchIcon, XIcon } from '../icons';
+import { NO_TITLES } from '../linkTitles';
+import type { LinkTitles } from '../linkTitles';
 import {
+  MODIFIED_KEY,
   NAME_KEY,
+  OWNER_KEY,
   PAGE_SIZE,
   STATUS_KEY,
   filterFields,
@@ -19,10 +25,13 @@ import {
   parseListState,
   rowTitle,
   searchField,
+  showingText,
   sortText,
   withSearch,
 } from '../listing';
+import { initials } from '../people';
 import { statusBadge } from '../status';
+import { exactTime, relativeTime } from '../time';
 import type { ListState } from '../listing';
 import { formHref, listHref, navigate, newHref } from '../router';
 import type { DocTypeMeta, DocumentRow } from '../types';
@@ -42,6 +51,10 @@ type RowsState = {
   key: string;
   offset: number;
   rows?: DocumentRow[];
+  /** The titles of the documents the rows link to (only those the user may read). */
+  titles?: LinkTitles;
+  /** When the answer arrived: the clock of the relative "Modified" times. */
+  at?: Date;
   error?: string;
 };
 
@@ -87,14 +100,14 @@ export function List({ doctype, params }: Props) {
     if (!meta) return;
     let cancelled = false;
     // One more row than a page, to know whether there is a next page.
-    listDocuments(doctype, {
+    listDocumentsWithTitles(doctype, {
       filters: requestFilters,
       sort,
       limit: PAGE_SIZE + 1,
       offset,
     }).then(
-      (rows) => {
-        if (!cancelled) setRowsState({ doctype, key, offset, rows });
+      ({ rows, titles }) => {
+        if (!cancelled) setRowsState({ doctype, key, offset, rows, titles, at: new Date() });
       },
       (e: unknown) => {
         if (cancelled) return;
@@ -130,13 +143,13 @@ export function List({ doctype, params }: Props) {
   }, [typed, state, doctype]);
 
   const [filtersOpen, setFiltersOpen] = useState(filtersText !== null);
-  const filterCount = parseFilters(filtersText).length;
+  const chips = useMemo(() => filterChips(filtersText, fields), [filtersText, fields]);
   const filtersId = useId();
 
   if (metaState?.doctype === doctype && metaState.error) {
     return (
       <div className="page">
-        <h1>Cannot open this list</h1>
+        <PageHeader title={<h1>Cannot open this list</h1>} />
         <p role="alert" className="alert">
           {metaState.error}
         </p>
@@ -146,7 +159,7 @@ export function List({ doctype, params }: Props) {
   if (!meta) {
     return (
       <div className="page" aria-busy="true">
-        <h1>Loading...</h1>
+        <PageHeader title={<h1>Loading...</h1>} />
         <Skeleton lines={5} />
       </div>
     );
@@ -162,188 +175,236 @@ export function List({ doctype, params }: Props) {
   const mayCreate = meta.rights.create !== 'none';
   const empty = !!answer?.rows && shown.length === 0 && shownOffset === 0 && !answer.error;
 
+  const titles = answer?.titles ?? NO_TITLES;
+  const now = answer?.at ?? new Date(0);
+
   return (
     <div className="page">
-      <header className="page-head">
-        <h1>{meta.label}</h1>
-        {mayCreate ? (
-          <a className="btn btn-primary" href={newHref(doctype)}>
-            <span aria-hidden="true">+ </span>New
-          </a>
+      <PageHeader
+        title={<h1>{meta.label}</h1>}
+        actions={
+          mayCreate ? (
+            <a className="btn btn-primary" href={newHref(doctype)}>
+              <PlusIcon size={16} />
+              New
+            </a>
+          ) : null
+        }
+      />
+
+      <div className="list-card">
+        <div className="toolbar">
+          <div className="search-wrap">
+            <SearchIcon size={16} className="icon" />
+            <input
+              type="search"
+              className="search"
+              aria-label={`Search ${meta.label} by ${search.label}`}
+              placeholder={`Search by ${search.label.toLowerCase()}`}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+            />
+          </div>
+          {chips.length > 0 ? (
+            <ul className="chips" aria-label="Active filters">
+              {chips.map((chip) => (
+                <li key={`${chip.index}-${chip.label}`} className="chip">
+                  <span>{chip.label}</span>
+                  <button
+                    type="button"
+                    aria-label={`Remove filter: ${chip.label}`}
+                    onClick={() => go({ ...state, filters: withoutFilter(filtersText, chip.index, fields), offset: 0 })}
+                  >
+                    <XIcon size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <button
+            type="button"
+            className="pill"
+            aria-expanded={filtersOpen}
+            aria-controls={filtersId}
+            onClick={() => setFiltersOpen((o) => !o)}
+          >
+            {chips.length > 0 ? <FunnelIcon size={14} /> : <PlusIcon size={14} />}
+            Filter
+          </button>
+          <span className="list-count" role="status" aria-live="polite">
+            {answer?.rows ? showingText(shownOffset, shown.length) : ''}
+          </span>
+        </div>
+        {filtersOpen ? (
+          <div id={filtersId}>
+            <FilterBar
+              initialKey={filtersText ?? ''}
+              fields={fields}
+              initial={parseFilters(filtersText)}
+              onApply={(next) => go({ ...state, filters: next, offset: 0 })}
+            />
+          </div>
         ) : null}
-      </header>
 
-      <div className="toolbar">
-        <input
-          type="search"
-          className="search"
-          aria-label={`Search ${meta.label} by ${search.label}`}
-          placeholder={`Search by ${search.label.toLowerCase()}`}
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-        />
-        <button
-          type="button"
-          className="btn"
-          aria-expanded={filtersOpen}
-          aria-controls={filtersId}
-          onClick={() => setFiltersOpen((o) => !o)}
-        >
-          Filters{filterCount > 0 ? ` (${filterCount})` : ''}
-        </button>
-      </div>
-      {filtersOpen ? (
-        <div id={filtersId}>
-          <FilterBar
-            initialKey={filtersText ?? ''}
-            fields={fields}
-            initial={parseFilters(filtersText)}
-            onApply={(next) => go({ ...state, filters: next, offset: 0 })}
-          />
-        </div>
-      ) : null}
+        {!loading && answer?.error ? (
+          <p role="alert" className="alert">
+            {answer.error}
+          </p>
+        ) : null}
 
-      {!loading && answer?.error ? (
-        <p role="alert" className="alert">
-          {answer.error}
-        </p>
-      ) : null}
-
-      {!answer ? (
-        <div className="card" aria-busy="true">
-          <Skeleton lines={6} />
-        </div>
-      ) : empty ? (
-        filtered ? (
-          <EmptyState
-            title="No documents match"
-            action={
-              <button type="button" className="btn" onClick={() => go({ ...state, q: '', filters: null, offset: 0 })}>
-                Clear search and filters
-              </button>
-            }
-          >
-            Try a different search, or remove a filter.
-          </EmptyState>
+        {!answer ? (
+          <div className="skeleton-pad" aria-busy="true">
+            <Skeleton lines={6} />
+          </div>
+        ) : empty ? (
+          filtered ? (
+            <EmptyState
+              title="No documents match"
+              action={
+                <button type="button" className="btn" onClick={() => go({ ...state, q: '', filters: null, offset: 0 })}>
+                  Clear search and filters
+                </button>
+              }
+            >
+              Try a different search, or remove a filter.
+            </EmptyState>
+          ) : (
+            <EmptyState
+              title={`No ${meta.label} yet`}
+              action={
+                mayCreate ? (
+                  <a className="btn btn-primary" href={newHref(doctype)}>
+                    <PlusIcon size={16} />
+                    New {meta.label}
+                  </a>
+                ) : undefined
+              }
+            >
+              {mayCreate ? 'Create the first one to get started.' : 'There is nothing here to show you.'}
+            </EmptyState>
+          )
         ) : (
-          <EmptyState
-            title={`No ${meta.label} yet`}
-            action={
-              mayCreate ? (
-                <a className="btn btn-primary" href={newHref(doctype)}>
-                  <span aria-hidden="true">+ </span>New {meta.label}
-                </a>
-              ) : undefined
-            }
-          >
-            {mayCreate ? 'Create the first one to get started.' : 'There is nothing here to show you.'}
-          </EmptyState>
-        )
-      ) : (
-        <div className={loading ? 'table-wrap is-loading' : 'table-wrap'} aria-busy={loading}>
-          <table className="list-table">
-            <caption className="visually-hidden">{meta.label} documents</caption>
-            <thead>
-              <tr>
-                {columns.map((column) => {
-                  const sorted = state.sort.field === column.key;
-                  return (
-                    <th
-                      key={column.key}
-                      scope="col"
-                      className={
-                        column.key === STATUS_KEY ? 'col-status' : isNumericColumn(column) ? 'num' : undefined
-                      }
-                      aria-sort={sorted ? (state.sort.desc ? 'descending' : 'ascending') : undefined}
-                    >
-                      <button
-                        type="button"
-                        className="sort"
-                        onClick={() => go({ ...state, sort: nextSort(state.sort, column.key), offset: 0 })}
+          <div className={loading ? 'table-wrap is-loading' : 'table-wrap'} aria-busy={loading}>
+            <table className="list-table">
+              <caption className="visually-hidden">{meta.label} documents</caption>
+              <thead>
+                <tr>
+                  {columns.map((column) => {
+                    const sorted = state.sort.field === column.key;
+                    return (
+                      <th
+                        key={column.key}
+                        scope="col"
+                        className={
+                          column.key === STATUS_KEY ? 'col-status' : isNumericColumn(column) ? 'num' : undefined
+                        }
+                        aria-sort={sorted ? (state.sort.desc ? 'descending' : 'ascending') : undefined}
                       >
-                        {column.label}
-                        {column.sub ? <span className="sort-sub">{column.sub}</span> : null}
-                        {sorted ? <span aria-hidden="true">{state.sort.desc ? ' ▼' : ' ▲'}</span> : null}
-                      </button>
-                    </th>
+                        <button
+                          type="button"
+                          className="sort"
+                          onClick={() => go({ ...state, sort: nextSort(state.sort, column.key), offset: 0 })}
+                        >
+                          {column.label}
+                          {column.sub ? <span className="sort-sub">{column.sub}</span> : null}
+                          {sorted ? <span aria-hidden="true">{state.sort.desc ? ' \u25BC' : ' \u25B2'}</span> : null}
+                        </button>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((row, index) => {
+                  const { title, name } = rowTitle(row, meta, titles);
+                  const href = formHref(doctype, name);
+                  return (
+                    <tr
+                      key={name || index}
+                      className="row-link"
+                      onClick={(event) => {
+                        // A convenience for the mouse: the link in the first cell is the real control.
+                        if (!(event.target instanceof Element && event.target.closest('a, button'))) navigate(href);
+                      }}
+                    >
+                      {columns.map((column) =>
+                        column.key === NAME_KEY ? (
+                          <th key={NAME_KEY} scope="row">
+                            <a href={href}>{title}</a>
+                            {title !== name ? <span className="muted-name">{name}</span> : null}
+                            {meta.submittable ? (
+                              <Badge tone={statusBadge(row[STATUS_KEY]).tone} className="status-inline">
+                                {statusBadge(row[STATUS_KEY]).label}
+                              </Badge>
+                            ) : null}
+                          </th>
+                        ) : column.key === STATUS_KEY ? (
+                          <td key={STATUS_KEY} className="col-status">
+                            <Badge tone={statusBadge(row[STATUS_KEY]).tone}>{statusBadge(row[STATUS_KEY]).label}</Badge>
+                          </td>
+                        ) : column.key === OWNER_KEY ? (
+                          <td key={OWNER_KEY}>
+                            {typeof row[OWNER_KEY] === 'string' && row[OWNER_KEY] !== '' ? (
+                              <span className="person">
+                                <span className="avatar-sm" aria-hidden="true">
+                                  {initials(row[OWNER_KEY])}
+                                </span>
+                                <span>{row[OWNER_KEY]}</span>
+                              </span>
+                            ) : null}
+                          </td>
+                        ) : column.key === MODIFIED_KEY ? (
+                          <td key={MODIFIED_KEY} className="muted">
+                            {typeof row[MODIFIED_KEY] === 'string' ? (
+                              <time dateTime={row[MODIFIED_KEY]} title={exactTime(row[MODIFIED_KEY])}>
+                                {relativeTime(row[MODIFIED_KEY], now)}
+                              </time>
+                            ) : null}
+                          </td>
+                        ) : (
+                          <td key={column.key} className={isNumericColumn(column) ? 'num' : undefined}>
+                            {formatCell(row[column.key], column.type, column.target, titles)}
+                          </td>
+                        ),
+                      )}
+                    </tr>
                   );
                 })}
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((row, index) => {
-                const { title, name } = rowTitle(row, meta);
-                const href = formHref(doctype, name);
-                return (
-                  <tr
-                    key={name || index}
-                    className="row-link"
-                    onClick={(event) => {
-                      // A convenience for the mouse: the link in the first cell is the real control.
-                      if (!(event.target instanceof Element && event.target.closest('a, button'))) navigate(href);
-                    }}
-                  >
-                    {columns.map((column) =>
-                      column.key === NAME_KEY ? (
-                        <th key={NAME_KEY} scope="row">
-                          <a href={href}>{title}</a>
-                          {title !== name ? <span className="muted-name">{name}</span> : null}
-                          {meta.submittable ? (
-                            <Badge tone={statusBadge(row[STATUS_KEY]).tone} className="status-inline">
-                              {statusBadge(row[STATUS_KEY]).label}
-                            </Badge>
-                          ) : null}
-                        </th>
-                      ) : column.key === STATUS_KEY ? (
-                        <td key={STATUS_KEY} className="col-status">
-                          <Badge tone={statusBadge(row[STATUS_KEY]).tone}>{statusBadge(row[STATUS_KEY]).label}</Badge>
-                        </td>
-                      ) : (
-                        <td key={column.key} className={isNumericColumn(column) ? 'num' : undefined}>
-                          {formatCell(row[column.key], column.type)}
-                        </td>
-                      ),
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <p className="visually-hidden" role="status" aria-live="polite">
-        {loading ? 'Loading...' : ''}
-      </p>
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="visually-hidden" role="status" aria-live="polite">
+          {loading ? 'Loading...' : ''}
+        </p>
 
-      <nav className="paging" aria-label="Pages">
-        {/* aria-disabled, not disabled: the button that was just used may become unavailable
-            (the first or last page) and must keep the keyboard focus. */}
-        {/* Not while a request is running: `hasNext` and the rows still belong to the previous
-            request, so a click then could go past the last page. */}
-        <button
-          type="button"
-          className="btn btn-small"
-          aria-disabled={offset === 0 || loading}
-          onClick={() => {
-            if (offset > 0 && !loading) go({ ...state, offset: Math.max(0, offset - PAGE_SIZE) });
-          }}
-        >
-          Previous
-        </button>
-        <span className="paging-text">
-          {shown.length === 0 ? 'No rows' : `Rows ${shownOffset + 1}–${shownOffset + shown.length}`}
-        </span>
-        <button
-          type="button"
-          className="btn btn-small"
-          aria-disabled={!hasNext || loading}
-          onClick={() => {
-            if (hasNext && !loading) go({ ...state, offset: offset + PAGE_SIZE });
-          }}
-        >
-          Next
-        </button>
-      </nav>
+        <nav className="paging" aria-label="Pages">
+          {/* aria-disabled, not disabled: the button that was just used may become unavailable
+              (the first or last page) and must keep the keyboard focus. */}
+          {/* Not while a request is running: `hasNext` and the rows still belong to the previous
+              request, so a click then could go past the last page. */}
+          <button
+            type="button"
+            className="btn btn-small"
+            aria-disabled={offset === 0 || loading}
+            onClick={() => {
+              if (offset > 0 && !loading) go({ ...state, offset: Math.max(0, offset - PAGE_SIZE) });
+            }}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            className="btn btn-small"
+            aria-disabled={!hasNext || loading}
+            onClick={() => {
+              if (hasNext && !loading) go({ ...state, offset: offset + PAGE_SIZE });
+            }}
+          >
+            Next
+          </button>
+        </nav>
+      </div>
     </div>
   );
 }

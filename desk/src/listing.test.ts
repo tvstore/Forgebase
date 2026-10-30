@@ -14,6 +14,7 @@ import {
   parseListState,
   rowTitle,
   searchField,
+  showingText,
   sortText,
   withSearch,
 } from './listing';
@@ -34,6 +35,7 @@ const meta = (fields: FieldMeta[], submittable = false, extra: Partial<DocTypeMe
   name: 'thing',
   label: 'Thing',
   app: null,
+  icon: null,
   naming: 'random',
   submittable,
   title_field: null,
@@ -46,7 +48,7 @@ const meta = (fields: FieldMeta[], submittable = false, extra: Partial<DocTypeMe
 });
 
 describe('listColumns', () => {
-  it('is name, at most five fields without Table and Text, then modified_at', () => {
+  it('is name, at most five fields without Table and Text, then the owner and modified_at', () => {
     const columns = listColumns(
       meta([
         field('a', 'data'),
@@ -60,13 +62,13 @@ describe('listColumns', () => {
         field('g', 'decimal'),
       ]),
     );
-    expect(columns.map((c) => c.key)).toEqual(['name', 'a', 'b', 'c', 'd', 'e', 'modified_at']);
+    expect(columns.map((c) => c.key)).toEqual(['name', 'a', 'b', 'c', 'd', 'e', 'owner', 'modified_at']);
     expect(columns[1]?.label).toBe('A');
     expect(columns.at(-1)).toMatchObject({ key: 'modified_at', type: 'datetime' });
   });
 
   it('works for a DocType with no fields', () => {
-    expect(listColumns(meta([])).map((c) => c.key)).toEqual(['name', 'modified_at']);
+    expect(listColumns(meta([])).map((c) => c.key)).toEqual(['name', 'owner', 'modified_at']);
   });
 
   it('uses list_fields in their order, skips unknown, Table and the title field, and adds the status', () => {
@@ -74,7 +76,7 @@ describe('listColumns', () => {
     const columns = listColumns(
       meta(fields, true, { title_field: 'a', list_fields: ['notes', 'a', 'gone', 'lines', 'b'] }),
     );
-    expect(columns.map((c) => c.key)).toEqual(['name', 'notes', 'b', 'docstatus', 'modified_at']);
+    expect(columns.map((c) => c.key)).toEqual(['name', 'notes', 'b', 'docstatus', 'owner', 'modified_at']);
     expect(columns.find((c) => c.key === 'docstatus')?.label).toBe('Status');
   });
 
@@ -87,7 +89,7 @@ describe('listColumns', () => {
 
   it('falls back to the default columns without the title field, and has no status when not submittable', () => {
     const columns = listColumns(meta([field('a', 'data'), field('b', 'int')], false, { title_field: 'a' }));
-    expect(columns.map((c) => c.key)).toEqual(['name', 'b', 'modified_at']);
+    expect(columns.map((c) => c.key)).toEqual(['name', 'b', 'owner', 'modified_at']);
   });
 
   it('right-aligns numbers only', () => {
@@ -103,6 +105,43 @@ describe('rowTitle', () => {
     expect(rowTitle({ name: 'N1', a: '' }, m)).toEqual({ title: 'N1', name: 'N1' });
     expect(rowTitle({ name: 'N1', a: null }, m)).toEqual({ title: 'N1', name: 'N1' });
     expect(rowTitle({ name: 'N1', a: 'Ada' }, meta([]))).toEqual({ title: 'N1', name: 'N1' });
+  });
+});
+
+describe('link titles in the list', () => {
+  const fields = [field('customer', 'link', { target: 'customer' }), field('a', 'data')];
+  const titles = { customer: { 'ada@x.y': 'Ada Lovelace' } };
+
+  it('shows the title of a Link cell, else the name', () => {
+    expect(formatCell('ada@x.y', 'link', 'customer', titles)).toBe('Ada Lovelace');
+    expect(formatCell('bob@x.y', 'link', 'customer', titles)).toBe('bob@x.y');
+    expect(formatCell('ada@x.y', 'link', 'customer')).toBe('ada@x.y');
+    expect(formatCell('ada@x.y', 'link', 'other', titles)).toBe('ada@x.y');
+    expect(formatCell('ada@x.y', 'data', 'customer', titles)).toBe('ada@x.y'); // only Link cells
+  });
+
+  it('gives a Link column its target', () => {
+    const columns = listColumns(meta(fields));
+    expect(columns.find((c) => c.key === 'customer')).toMatchObject({ type: 'link', target: 'customer' });
+    expect(columns.find((c) => c.key === 'a')).not.toHaveProperty('target');
+  });
+
+  it('titles a row by the Link title when the title field is a Link', () => {
+    const m = meta(fields, false, { title_field: 'customer' });
+    expect(rowTitle({ name: 'SO-1', customer: 'ada@x.y' }, m, titles)).toEqual({ title: 'Ada Lovelace', name: 'SO-1' });
+    expect(rowTitle({ name: 'SO-1', customer: 'bob@x.y' }, m, titles)).toEqual({ title: 'bob@x.y', name: 'SO-1' });
+    expect(rowTitle({ name: 'SO-1', customer: 'ada@x.y' }, m)).toEqual({ title: 'ada@x.y', name: 'SO-1' });
+    // A title field that is not a Link is never looked up.
+    const plain = meta(fields, false, { title_field: 'a' });
+    expect(rowTitle({ name: 'SO-1', a: 'ada@x.y' }, plain, titles).title).toBe('ada@x.y');
+  });
+});
+
+describe('showingText', () => {
+  it('names the range of the page', () => {
+    expect(showingText(0, 20)).toBe('Showing 1\u201320');
+    expect(showingText(40, 3)).toBe('Showing 41\u201343');
+    expect(showingText(0, 0)).toBe('No rows');
   });
 });
 
