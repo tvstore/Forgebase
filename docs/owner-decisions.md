@@ -197,14 +197,15 @@ where its details live.
 These decisions were approved in the information session. Their ADRs and milestone entries are written by the UX.3 and
 M8 pull requests. T1 to T3 are recorded in [ADR 0017](adr/0017-desk-styling-tailwind.md) (UX.3,
 [#31](https://github.com/agilma/Forgebase/pull/31)); T4 (UX.3 before M8.1) is recorded in ADR 0017 and the
-[milestones](blueprint/milestones.md). The M8 rows are still planned: until their pull requests land, this table is
-their only record.
+[milestones](blueprint/milestones.md). The workflow row is recorded in [ADR 0015](adr/0015-workflow-states-and-transitions.md)
+(M8.1, [#32](https://github.com/agilma/Forgebase/pull/32)). The other M8 rows are still planned: until their pull
+requests land, this table is their only record.
 
 | Decision | Recorded in |
 |---|---|
 | T1: **Tailwind CSS v4** as a build-time styling tool. Still no component kits. *"UI pakai tailwind agar tampilan ui clean, simpel, elegan dan cocok untuk corporate"* | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | T2: **Navy #1B2A5C** (the logo background) is the primary UI colour (supersedes UX-5). Yellow is used only in the logo: *"jangan warna kuning pakai warna background dari logo"*. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
 | T3: system font stack. | [ADR 0017](adr/0017-desk-styling-tailwind.md) |
-| Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | planned: the M8.1 ADR |
+| Workflow lives in the DocType file. A transition needs both the role and the underlying right. A DocType with a workflow changes state only through transitions. `before_transition` hook; transition log. | [ADR 0015](adr/0015-workflow-states-and-transitions.md) |
 | Saved views: private per user; shared views only by Administrator. Group-by summary. | planned: the M8.3 pull request |
 | Query reports: app-defined SQL, limited by role, run in a read-only transaction with limits. No CSV export and no charts in M8. | planned: the M8.4 ADR |

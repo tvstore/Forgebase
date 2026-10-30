@@ -15,6 +15,7 @@
 use std::fmt;
 
 use crate::meta::DocType;
+use crate::workflow::Transition;
 
 /// The built-in role that bypasses every permission rule.
 pub const ADMINISTRATOR: &str = "Administrator";
@@ -242,6 +243,37 @@ pub fn evaluate(doctype: &DocType, caller: &Caller, right: Right) -> Access {
     access
 }
 
+/// Decides how far `caller` may take `transition` of the workflow of `doctype` (M8.1, ADR
+/// 0015, the transition-role rule that extends ADR 0011): **the role and the right**.
+///
+/// - The system context and an administrator get [`Access::All`], as in [`evaluate`].
+/// - Otherwise the caller needs one of the transition's `roles` **and** the right that the
+///   docstatus move needs ([`Move::right`](crate::workflow::Move::right): write, submit or
+///   cancel). The answer is then what [`evaluate`] says for that right: [`Access::All`], or
+///   [`Access::OwnerOnly`] when only an `if_owner` rule grants it (the caller applies it to the
+///   document). A role never grants a right: a transition role without the right is
+///   [`Access::Denied`], and so is the right without a transition role.
+/// - A DocType without a workflow, or a transition that does not belong to it (an unknown
+///   state, a docstatus move a workflow does not allow), is [`Access::Denied`].
+///
+/// The right is decided by [`evaluate`] and nowhere else; this function only adds the role.
+pub fn transition_access(doctype: &DocType, caller: &Caller, transition: &Transition) -> Access {
+    let Some(workflow) = &doctype.workflow else {
+        return Access::Denied;
+    };
+    let Some(movement) = workflow.move_of(transition) else {
+        return Access::Denied;
+    };
+    let has_role = match caller {
+        Caller::User { roles, .. } => transition.roles.iter().any(|r| roles.contains(r)),
+        Caller::System { .. } => true,
+    };
+    if !caller.bypasses_permissions() && !has_role {
+        return Access::Denied;
+    }
+    evaluate(doctype, caller, movement.right())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +290,7 @@ mod tests {
             permissions,
             title_field: None,
             list_fields: None,
+            workflow: None,
         }
     }
 
@@ -400,5 +433,133 @@ mod tests {
         for bad in ["", "   ", "a\tb", "a\0b", "\n"] {
             assert!(check_role_name(bad).is_err(), "{bad:?}");
         }
+    }
+
+    fn with_workflow(permissions: Vec<PermissionRule>) -> DocType {
+        let mut doctype = DocType::from_toml_str(
+            r#"
+name = "order"
+label = "Order"
+submittable = true
+[workflow]
+[[workflow.states]]
+name = "Draft"
+docstatus = 0
+[[workflow.states]]
+name = "Pending"
+docstatus = 0
+[[workflow.states]]
+name = "Approved"
+docstatus = 1
+[[workflow.states]]
+name = "Cancelled"
+docstatus = 2
+[[workflow.transitions]]
+action = "Send"
+from = "Draft"
+to = "Pending"
+roles = ["Clerk"]
+[[workflow.transitions]]
+action = "Approve"
+from = "Pending"
+to = "Approved"
+roles = ["Manager"]
+[[workflow.transitions]]
+action = "Cancel"
+from = "Approved"
+to = "Cancelled"
+roles = ["Manager"]
+"#,
+        )
+        .expect("valid DocType");
+        doctype.permissions = permissions;
+        doctype
+    }
+
+    fn take(doctype: &DocType, caller: &Caller, action: &str) -> Access {
+        let workflow = doctype.workflow.as_ref().expect("workflow");
+        let transition = workflow
+            .transitions
+            .iter()
+            .find(|t| t.action == action)
+            .expect("transition");
+        transition_access(doctype, caller, transition)
+    }
+
+    #[test]
+    fn a_transition_needs_a_role_and_the_right_of_its_move() {
+        let d = with_workflow(vec![
+            only("Clerk", Right::Write, false),
+            only("Manager", Right::Submit, false),
+            only("Auditor", Right::Cancel, false),
+            only("Owner", Right::Submit, true),
+        ]);
+        // Draft to draft needs write: Clerk has the role and the right.
+        assert_eq!(take(&d, &user(&["Clerk"]), "Send"), Access::All);
+        // Approve moves 0 to 1, which needs the submit right: Manager has the role and the right.
+        assert_eq!(take(&d, &user(&["Manager"]), "Approve"), Access::All);
+        // The role without the right: Manager has no cancel right.
+        assert_eq!(take(&d, &user(&["Manager"]), "Cancel"), Access::Denied);
+        // The right without the role: Auditor may cancel but is not a role of Cancel.
+        assert_eq!(take(&d, &user(&["Auditor"]), "Cancel"), Access::Denied);
+        assert_eq!(
+            take(&d, &user(&["Manager", "Auditor"]), "Cancel"),
+            Access::All
+        );
+        // A user with neither.
+        assert_eq!(take(&d, &user(&["Other"]), "Send"), Access::Denied);
+        assert_eq!(take(&d, &user(&[]), "Send"), Access::Denied);
+        // A similar role name is not the role.
+        assert_eq!(take(&d, &user(&["clerk"]), "Send"), Access::Denied);
+    }
+
+    #[test]
+    fn if_owner_limits_the_right_of_a_transition() {
+        let d = with_workflow(vec![
+            only("Clerk", Right::Write, true),
+            only("Manager", Right::Submit, true),
+            only("Manager", Right::Cancel, false),
+        ]);
+        assert_eq!(take(&d, &user(&["Clerk"]), "Send"), Access::OwnerOnly);
+        assert_eq!(take(&d, &user(&["Manager"]), "Approve"), Access::OwnerOnly);
+        assert_eq!(take(&d, &user(&["Manager"]), "Cancel"), Access::All);
+    }
+
+    #[test]
+    fn administrator_and_system_pass_the_role_check() {
+        // No rules at all, and the roles of the transitions are not theirs.
+        let d = with_workflow(vec![]);
+        for action in ["Send", "Approve", "Cancel"] {
+            assert_eq!(take(&d, &user(&[ADMINISTRATOR]), action), Access::All);
+            assert_eq!(take(&d, &Caller::system("cli"), action), Access::All);
+            assert_eq!(
+                take(&d, &user(&["Clerk", "Manager"]), action),
+                Access::Denied
+            );
+        }
+    }
+
+    #[test]
+    fn no_workflow_or_a_foreign_transition_is_denied() {
+        let plain = doctype(vec![only("Clerk", Right::Write, false)]);
+        let foreign = Transition {
+            action: "Send".into(),
+            from: "Draft".into(),
+            to: "Pending".into(),
+            roles: vec!["Clerk".into()],
+        };
+        assert_eq!(
+            transition_access(&plain, &Caller::system("cli"), &foreign),
+            Access::Denied
+        );
+        let d = with_workflow(vec![]);
+        let unknown_state = Transition {
+            to: "Nowhere".into(),
+            ..foreign
+        };
+        assert_eq!(
+            transition_access(&d, &Caller::system("cli"), &unknown_state),
+            Access::Denied
+        );
     }
 }

@@ -13,6 +13,8 @@ use serde_json::Value as Json;
 
 const ENV_VAR: &str = "FORGEBASE_TEST_DATABASE_URL";
 const DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/quickstart");
+/// A submittable DocType with a workflow (M8.1).
+const WORKFLOW_DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/workflow");
 
 /// Removes `customer` and the example DocTypes that depend on it, as if they had never been synced.
 const DROP_CUSTOMER: &str = "DROP TABLE doc_sales_order_item, doc_sales_order, doc_customer; \
@@ -283,7 +285,7 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 7 pending"), "{text}");
+    assert!(text.contains("framework migrations: 8 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
@@ -291,7 +293,8 @@ fn dry_run_creates_nothing() {
             && text.contains("0004 apps")
             && text.contains("0005 jobs")
             && text.contains("0006 schedules")
-            && text.contains("0007 finished_jobs_index"),
+            && text.contains("0007 finished_jobs_index")
+            && text.contains("0008 workflow_log"),
         "{text}"
     );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
@@ -326,7 +329,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 7 applied"), "{text}");
+    assert!(text.contains("framework migrations: 8 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -1891,4 +1894,211 @@ fn the_worker_of_a_binary_without_app_jobs_runs_the_built_in_jobs_and_stops_on_s
         code(&db.forgebase(&["worker", "--doctypes", DOCTYPES, "--concurrency", "65"])),
         Some(2)
     );
+}
+
+#[test]
+fn doc_transition_takes_a_workflow_transition_as_the_system_context() {
+    let db = TestDb::new();
+    let migrate = db.forgebase(&["migrate", "--doctypes", WORKFLOW_DOCTYPES]);
+    assert_eq!(code(&migrate), Some(0), "{}", stderr(&migrate));
+    let run = |args: &[&str]| {
+        let mut full = args.to_vec();
+        full.extend_from_slice(&["--doctypes", WORKFLOW_DOCTYPES]);
+        db.forgebase(&full)
+    };
+    let inserted = run(&["doc", "insert", "purchase", "--data", r#"{"title":"p"}"#]);
+    assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+    let purchase = json(&inserted);
+    let name = purchase["name"].as_str().expect("name").to_owned();
+    assert_eq!(purchase["workflow_state"], "Draft");
+    assert_eq!(purchase["docstatus"], 0);
+
+    // The roles are not checked: the actor has none, and Approve names a role nobody has.
+    let sent = run(&[
+        "doc",
+        "transition",
+        "purchase",
+        &name,
+        "Send",
+        "--version",
+        "1",
+        "--actor",
+        "ann",
+    ]);
+    assert_eq!(code(&sent), Some(0), "{}", stderr(&sent));
+    let sent = json(&sent);
+    assert_eq!(
+        (
+            &sent["workflow_state"],
+            &sent["version"],
+            &sent["modified_by"]
+        ),
+        (&Json::from("Pending"), &Json::from(2), &Json::from("ann"))
+    );
+    // `doc get` prints the state too.
+    let got = json(&run(&["doc", "get", "purchase", &name]));
+    assert_eq!(got["workflow_state"], "Pending");
+
+    // Errors and exit codes are those of `doc submit`: 1 with the message on standard error.
+    let stale = run(&[
+        "doc",
+        "transition",
+        "purchase",
+        &name,
+        "Approve",
+        "--version",
+        "9",
+    ]);
+    assert_eq!(code(&stale), Some(1));
+    assert!(
+        stderr(&stale).contains("current version 2"),
+        "{}",
+        stderr(&stale)
+    );
+    let wrong = run(&[
+        "doc",
+        "transition",
+        "purchase",
+        &name,
+        "Cancel",
+        "--version",
+        "2",
+    ]);
+    assert_eq!(code(&wrong), Some(1));
+    assert!(
+        stderr(&wrong).contains("is in state `Pending`: no transition `Cancel` from it"),
+        "{}",
+        stderr(&wrong)
+    );
+    // Without --version it is a usage error (exit 2).
+    let missing = run(&["doc", "transition", "purchase", &name, "Approve"]);
+    assert_eq!(code(&missing), Some(2));
+
+    // Plain submit and cancel are refused on a DocType with a workflow.
+    for step in ["submit", "cancel"] {
+        let refused = run(&["doc", step, "purchase", &name, "--version", "2"]);
+        assert_eq!(code(&refused), Some(1), "{step}");
+        assert!(
+            stderr(&refused).contains("has a workflow; use a transition"),
+            "{}",
+            stderr(&refused)
+        );
+    }
+    // Approve submits the document, Cancel cancels it.
+    let approved = json(&run(&[
+        "doc",
+        "transition",
+        "purchase",
+        &name,
+        "Approve",
+        "--version",
+        "2",
+    ]));
+    assert_eq!(
+        (&approved["workflow_state"], &approved["docstatus"]),
+        (&Json::from("Approved"), &Json::from(1))
+    );
+    let cancelled = json(&run(&[
+        "doc",
+        "transition",
+        "purchase",
+        &name,
+        "Cancel",
+        "--version",
+        "3",
+    ]));
+    assert_eq!(
+        (&cancelled["workflow_state"], &cancelled["docstatus"]),
+        (&Json::from("Cancelled"), &Json::from(2))
+    );
+    // The log has every transition with its actor.
+    assert_eq!(
+        db.scalar(
+            "SELECT string_agg(action || ':' || actor, ',' ORDER BY id) FROM fb_workflow_log"
+        )
+        .as_deref(),
+        Some("Send:ann,Approve:cli,Cancel:cli")
+    );
+
+    // A DocType without a workflow: `transition` says so.
+    let other = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&other), Some(0), "{}", stderr(&other));
+    let none = db.forgebase(&[
+        "doc",
+        "transition",
+        "customer",
+        "x",
+        "Send",
+        "--version",
+        "1",
+        "--doctypes",
+        DOCTYPES,
+    ]);
+    assert_eq!(code(&none), Some(1));
+}
+
+#[test]
+fn migrate_gives_documents_their_state_and_warns_about_a_state_that_is_gone() {
+    let db = TestDb::new();
+    // The DocType without its workflow: a draft, a submitted and a cancelled document.
+    let dir = std::env::temp_dir().join(format!("forgebase-test-workflow-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let text =
+        std::fs::read_to_string(format!("{WORKFLOW_DOCTYPES}/purchase.toml")).expect("fixture");
+    let without = text
+        .split("[workflow]")
+        .next()
+        .expect("before the workflow");
+    std::fs::write(dir.join("purchase.toml"), without).expect("write");
+    let before = dir.to_str().expect("UTF-8 path").to_owned();
+    let result = std::panic::catch_unwind(|| {
+        let migrate = db.forgebase(&["migrate", "--doctypes", &before]);
+        assert_eq!(code(&migrate), Some(0), "{}", stderr(&migrate));
+        for _ in 0..3 {
+            let inserted = db.forgebase(&[
+                "doc",
+                "insert",
+                "purchase",
+                "--data",
+                r#"{"title":"p"}"#,
+                "--doctypes",
+                &before,
+            ]);
+            assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+        }
+        db.exec("UPDATE doc_purchase SET docstatus = 1 WHERE name = (SELECT name FROM doc_purchase ORDER BY created_at, id LIMIT 1 OFFSET 1)");
+        db.exec("UPDATE doc_purchase SET docstatus = 2 WHERE name = (SELECT name FROM doc_purchase ORDER BY created_at, id LIMIT 1 OFFSET 2)");
+
+        // Adding the workflow: the column is added and the documents get a state per docstatus.
+        let migrate = db.forgebase(&["migrate", "--doctypes", WORKFLOW_DOCTYPES]);
+        assert_eq!(code(&migrate), Some(0), "{}", stderr(&migrate));
+        assert!(
+            stdout(&migrate).contains("workflow_state"),
+            "{}",
+            stdout(&migrate)
+        );
+        assert!(stderr(&migrate).is_empty(), "{}", stderr(&migrate));
+        assert_eq!(
+            db.scalar("SELECT string_agg(docstatus::text || '=' || workflow_state, ',' ORDER BY docstatus) FROM doc_purchase")
+                .as_deref(),
+            Some("0=Draft,1=Approved,2=Cancelled")
+        );
+        // Again: no change, no warning.
+        let again = db.forgebase(&["migrate", "--doctypes", WORKFLOW_DOCTYPES]);
+        assert_eq!(code(&again), Some(0), "{}", stderr(&again));
+        assert!(stderr(&again).is_empty(), "{}", stderr(&again));
+
+        // A state the workflow no longer has: one warning line on standard error, exit 0.
+        db.exec("UPDATE doc_purchase SET workflow_state = 'Gone' WHERE docstatus > 0");
+        let warned = db.forgebase(&["migrate", "--doctypes", WORKFLOW_DOCTYPES]);
+        assert_eq!(code(&warned), Some(0), "{}", stderr(&warned));
+        assert_eq!(
+            stderr(&warned),
+            "warning: site `default`: DocType `purchase`: 2 documents are in a workflow state that no longer exists; no transition applies to them\n"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

@@ -244,7 +244,7 @@ fn kind(json: &Json) -> &'static str {
 }
 
 /// RFC 3339 in UTC. `to_offset` panics when the UTC instant is out of range, so it is checked.
-fn utc_rfc3339(t: &OffsetDateTime) -> Result<String, String> {
+pub(crate) fn utc_rfc3339(t: &OffsetDateTime) -> Result<String, String> {
     t.checked_to_offset(UtcOffset::UTC)
         .ok_or_else(|| "out of range once converted to UTC".to_owned())?
         .format(&Rfc3339)
@@ -274,8 +274,9 @@ fn from_value(name: &str, value: &Value) -> Result<Json, JsonError> {
 }
 
 /// A stored document as a JSON object: the standard columns (and, for a submittable DocType,
-/// `docstatus` as 0, 1 or 2 and `amended_from` as a name or `null`), the field values and, for
-/// each Table field, the array of its rows.
+/// `docstatus` as 0, 1 or 2 and `amended_from` as a name or `null`; for a DocType with a
+/// workflow, `workflow_state` as the name of the state, absent while the document has none), the
+/// field values and, for each Table field, the array of its rows.
 pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
     let rfc3339 = |field: &str, t: &OffsetDateTime| {
         utc_rfc3339(t)
@@ -318,6 +319,10 @@ pub fn document_to_json(doc: &StoredDocument) -> Result<Json, JsonError> {
             "amended_from".to_owned(),
             doc.amended_from.clone().map_or(Json::Null, Json::String),
         );
+    }
+    // Only a DocType with a workflow has a state (a document that has none yet has no key).
+    if let Some(state) = &doc.workflow_state {
+        object.insert("workflow_state".to_owned(), Json::String(state.clone()));
     }
     for (name, value) in &doc.values {
         object.insert(name.clone(), from_value(name, value)?);
@@ -531,6 +536,7 @@ target = "other"
             version: 1,
             docstatus: None,
             amended_from: None,
+            workflow_state: None,
             values: BTreeMap::from([("l".to_owned(), Value::Text("ann@example.com".into()))]),
             tables: BTreeMap::new(),
         };
@@ -644,6 +650,7 @@ target = "other"
             version: 3,
             docstatus: None,
             amended_from: None,
+            workflow_state: None,
             values: BTreeMap::from([
                 ("at".to_owned(), Value::Datetime(at)),
                 ("on".to_owned(), Value::Date(date)),
@@ -769,6 +776,7 @@ target = "other"
             version: 1,
             docstatus: None,
             amended_from: None,
+            workflow_state: None,
             values: BTreeMap::new(),
             tables: BTreeMap::from([("lines".to_owned(), rows), ("empty".to_owned(), Vec::new())]),
         };
@@ -807,6 +815,7 @@ target = "other"
             version: 3,
             docstatus,
             amended_from: amended_from.map(str::to_owned),
+            workflow_state: None,
             values: BTreeMap::new(),
             tables: BTreeMap::new(),
         };
@@ -818,5 +827,32 @@ target = "other"
         assert_eq!(json["amended_from"], Json::Null);
         let json = document_to_json(&stored(None, None)).unwrap();
         assert!(json.get("docstatus").is_none() && json.get("amended_from").is_none());
+    }
+
+    #[test]
+    fn workflow_state_is_output_only_when_the_document_has_one() {
+        let stored = |workflow_state: Option<&str>| StoredDocument {
+            id: "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b".parse().unwrap(),
+            name: "n".to_owned(),
+            owner: "o".to_owned(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            modified_at: OffsetDateTime::UNIX_EPOCH,
+            modified_by: "o".to_owned(),
+            version: 1,
+            docstatus: None,
+            amended_from: None,
+            workflow_state: workflow_state.map(str::to_owned),
+            values: BTreeMap::new(),
+            tables: BTreeMap::new(),
+        };
+        let json = document_to_json(&stored(Some("Pending"))).unwrap();
+        assert_eq!(json["workflow_state"], "Pending");
+        // A DocType without a workflow (and a document that has no state yet): no key.
+        assert!(
+            document_to_json(&stored(None))
+                .unwrap()
+                .get("workflow_state")
+                .is_none()
+        );
     }
 }

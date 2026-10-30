@@ -52,8 +52,9 @@
 //! # The binary
 //!
 //! `forgebase [OPTIONS] COMMAND`: `migrate` (framework migrations, DocType schema sync and app
-//! migrations), `doc` (`insert`, `get`, `list`, `update`, `delete`, `submit`, `cancel` and
-//! `amend` of documents; `update`, `delete`, `submit`, `cancel` and `amend` need `--version`),
+//! migrations), `doc` (`insert`, `get`, `list`, `update`, `delete`, `submit`, `cancel`, `amend`
+//! and `transition` of documents; `update`, `delete`, `submit`, `cancel`, `amend` and `transition`
+//! need `--version`; `transition` takes the action of a workflow, M8.1),
 //! `user` (`create`, `set-password`, `add-role`, `remove-role`, `disable`, `enable`; passwords
 //! come from standard input), `token` (`create`, `revoke`), `serve` (the HTTP API; no
 //! migrations), `worker` (runs background jobs until Ctrl-C or SIGTERM), `job` (`list`, `show`,
@@ -76,7 +77,8 @@
 //!
 //! The binary is a trusted local tool: `doc` commands run as the **system context**
 //! (`Caller::System` in `forgebase-core`), so no permission rules apply to them, and
-//! `--actor` only names who is recorded (in `owner` / `modified_by`; default `cli`). It does not
+//! `--actor` only names who is recorded (in `owner` / `modified_by`; default `cli`). That includes
+//! `doc transition`: the roles of a workflow transition are not checked either. It does not
 //! authenticate anyone. Real users and their permissions apply to the HTTP API (`serve`). See
 //! `docs/blueprint/architecture.md`, ADR 0002, ADR 0011 and ADR 0012.
 //!
@@ -120,7 +122,7 @@ pub use schedule::Schedule;
 // What a hook needs to read and change a document. These are the types of `forgebase-core`.
 pub use forgebase_core::document::{Changes, DocStatus, Document, Row};
 pub use forgebase_core::hooks::{
-    DocTypeHooks, EnqueuedJob, EnqueuedJobs, HookContext, HookError, Operation,
+    DocTypeHooks, EnqueuedJob, EnqueuedJobs, HookContext, HookError, Operation, TransitionInfo,
 };
 pub use forgebase_core::value::Value;
 // The payloads of `Value`, re-exported so an app uses the same versions.

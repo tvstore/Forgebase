@@ -138,6 +138,14 @@ async fn migrate_site(
             );
         }
     }
+    // The documents of a workflow that are in a state it no longer defines: kept as they are.
+    for warning in &report.workflow_warnings {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: site `{}`: {warning}",
+            ctx.site.name
+        );
+    }
     Ok(migrate_report(
         &report,
         options.dry_run,
@@ -312,6 +320,14 @@ enum Operation {
         expected_version: i64,
         actor: String,
     },
+    /// A workflow transition: the action of the transition from the document's state.
+    Transition {
+        doctype: String,
+        name: String,
+        action: String,
+        expected_version: i64,
+        actor: String,
+    },
     /// Submit, cancel or amend: a document operation without data.
     Status {
         kind: StatusKind,
@@ -348,6 +364,9 @@ fn target(command: &DocCommand) -> (&DocTypesDir, &str) {
             doctype, doctypes, ..
         }
         | DocCommand::Cancel {
+            doctype, doctypes, ..
+        }
+        | DocCommand::Transition {
             doctype, doctypes, ..
         }
         | DocCommand::Amend {
@@ -419,6 +438,19 @@ fn prepare(
             actor,
             ..
         } => status(StatusKind::Cancel, doctype, name, version, actor),
+        DocCommand::Transition {
+            name,
+            action,
+            version,
+            actor,
+            ..
+        } => Operation::Transition {
+            doctype,
+            name,
+            action,
+            expected_version: version.expected_version,
+            actor: actor.actor,
+        },
         DocCommand::Amend {
             name,
             version,
@@ -510,6 +542,24 @@ async fn execute(site: &SiteContext, operation: Operation) -> Result<(), CliErro
                 &name,
                 expected_version,
                 &changes,
+                &Caller::system(actor),
+            )
+            .await?
+        }
+        Operation::Transition {
+            doctype,
+            name,
+            action,
+            expected_version,
+            actor,
+        } => {
+            forgebase_db::transition(
+                client,
+                registry,
+                &doctype,
+                &name,
+                &action,
+                expected_version,
                 &Caller::system(actor),
             )
             .await?

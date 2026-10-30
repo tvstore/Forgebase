@@ -446,7 +446,7 @@ fn commands_touch_only_the_database_of_their_site() {
     let output = pair.run(&["migrate", "--site", "a", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let migrations = "SELECT count(*)::text FROM fb_migration";
-    assert_eq!(pair.a.scalar(migrations).as_deref(), Some("7"));
+    assert_eq!(pair.a.scalar(migrations).as_deref(), Some("8"));
     assert_eq!(
         pair.b.scalar("SELECT to_regclass('fb_migration')::text"),
         None
@@ -457,7 +457,7 @@ fn commands_touch_only_the_database_of_their_site() {
     );
     let output = pair.run(&["migrate", "--site", "b", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
-    assert_eq!(pair.b.scalar(migrations).as_deref(), Some("7"));
+    assert_eq!(pair.b.scalar(migrations).as_deref(), Some("8"));
 
     let customer = r#"{"email":"ann@example.com","full_name":"Ann"}"#;
     let output = pair.run(&[

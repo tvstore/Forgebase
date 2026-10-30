@@ -1,6 +1,6 @@
 # 0012 App model and public API boundary
 
-- Status: Accepted. Public surface extended by M6.1 and M6.2 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
+- Status: Accepted. Public surface extended by M6.1 and M6.2 (see [ADR 0013](0013-jobs-scheduler-and-transactional-outbox.md)) and M8.1 (see [ADR 0015](0015-workflow-states-and-transitions.md)). Original status: Accepted (owner decisions 1 to 4 and 6 and the API boundary of the M5 plan v2, 2026-10-29; implementation details of M5.1 separated below)
 - Date: 2026-10-29
 
 ## Context
@@ -60,6 +60,19 @@ Nothing else is public. The stock `forgebase` binary is `Forgebase::new().run()`
 | `testing::run_schedules_at(&Forgebase, &TestDb, OffsetDateTime) -> usize` | Enqueues the schedules that are due at the given time with the worker's own tick; `run_jobs` then runs them. |
 
 The app name `forgebase` is reserved for the framework's own jobs (a startup error for an app).
+
+### Public surface update (M8.1)
+
+[ADR 0015](0015-workflow-states-and-transitions.md) (the M8 plan, owner decisions of 2026-10-30) adds these items. Nothing else becomes public; the existing items are unchanged.
+
+| Item | Purpose |
+|---|---|
+| `Operation::Transition` (`Operation` is `#[non_exhaustive]`) | The operation a hook runs for when a document of a DocType with a workflow takes a transition, and for the `validate` hooks of a move that does not submit or cancel. A move that submits or cancels runs its hooks with `Operation::Submit` or `Operation::Cancel`. |
+| `HookContext::transition` (a public field, `Option<&TransitionInfo>`), `HookContext::with_transition(&TransitionInfo)` | The transition a hook runs for: `Some` for the `before_transition` hook and for `Operation::Transition`, `None` for every other operation. `with_transition` lets an app's unit test of a hook build the context. `HookContext` stays `Copy`. |
+| `TransitionInfo` (`new(action, from, to)`; public fields `action`, `from`, `to`; `#[non_exhaustive]`) | What the hook is told: the action and the two states. |
+| `DocTypeHooks::before_transition(&self, ctx, &mut Document)` | The new hook point, with a default that does nothing: it runs after the permission checks and before `validate`, `before_submit` and `before_cancel` of the move; it may veto, change values and enqueue jobs. |
+
+The workflow itself (`Workflow`, `WorkflowState`, `Transition` and the rest of `forgebase-core::workflow`) is **not** re-exported: an app writes it in the DocType file (`[workflow]`), and the types stay internal like the other metadata types. `Documents` (the job API) has no `transition` in M8.1.
 
 ## Implementation details (M5.1)
 

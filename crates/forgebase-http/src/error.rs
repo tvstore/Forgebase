@@ -4,12 +4,13 @@
 //! | Code | Status | Meaning |
 //! |---|---|---|
 //! | `unauthenticated` | 401 | no valid session or token, or a failed login (one message each) |
-//! | `permission_denied` | 403 | the caller lacks the right |
+//! | `permission_denied` | 403 | the caller lacks the right (for a transition: the role or the right; for an update: the `edit_roles` of the state) |
 //! | `csrf_failed` | 403 | missing or wrong `X-Forgebase-CSRF` |
 //! | `not_found` | 404 | unknown route, DocType or document (also a document the caller cannot read) |
 //! | `method_not_allowed` | 405 | |
 //! | `conflict` | 409 | the document changed (`version`), or changed while being read |
 //! | `invalid_docstatus`, `already_amended`, `field_locked` | 409 | the document's state forbids it |
+//! | `workflow_required`, `no_workflow`, `unknown_transition` | 409 | submit or cancel on a DocType with a workflow (use a transition); a transition, its list or history on a DocType without one; no such transition from the document's state |
 //! | `unique_violation`, `linked_document_exists` | 409 | |
 //! | `not_submittable` | 422 | submit, cancel or amend of a DocType that is not submittable |
 //! | `validation_failed` | 422 | the data breaks the DocType's rules; `details` lists every problem |
@@ -153,7 +154,12 @@ impl From<DbError> for ApiError {
             DbError::UnknownDocType { .. } | DbError::ChildDocType { .. } => {
                 Self::not_found("unknown doctype")
             }
-            DbError::PermissionDenied { .. } => Self::new(S::FORBIDDEN, "permission_denied", text),
+            DbError::PermissionDenied { .. }
+            | DbError::TransitionDenied { .. }
+            | DbError::EditDenied { .. } => Self::new(S::FORBIDDEN, "permission_denied", text),
+            DbError::WorkflowRequired { .. } => Self::new(S::CONFLICT, "workflow_required", text),
+            DbError::NoWorkflow { .. } => Self::new(S::CONFLICT, "no_workflow", text),
+            DbError::UnknownTransition { .. } => Self::new(S::CONFLICT, "unknown_transition", text),
             DbError::InvalidQuery(_) => Self::invalid_query(text),
             DbError::NoChanges => Self::bad_request(text),
             DbError::Conflict { .. } | DbError::ChangedWhileReading { .. } => {

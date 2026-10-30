@@ -23,7 +23,10 @@
 //! and fails the operation.
 //!
 //! DocTypes with `submittable = true` also have [`submit`], [`cancel`] and [`amend`], and their
-//! documents carry a [`DocStatus`]: see those functions for the rules.
+//! documents carry a [`DocStatus`]: see those functions for the rules. A DocType with a
+//! `[workflow]` (M8.1, ADR 0015) changes state only through [`crate::transition`], which continues
+//! in the update, submit or cancel pipeline of this module; [`submit`] and [`cancel`] refuse it
+//! ([`DbError::WorkflowRequired`]).
 //!
 //! # Permissions (M3.2, ADR 0011)
 //!
@@ -51,7 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use forgebase_core::document::{Changes, DocStatus, Document, Row, ValidationError, validate};
 use forgebase_core::hooks::{DocTypeHooks, EnqueuedJobs, HookContext, HookError, Operation};
 use forgebase_core::ident::table_name;
-use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
+use forgebase_core::meta::{DocType, FieldType, Naming, Registry, WORKFLOW_COLUMN};
 use forgebase_core::permission::{Access, Caller, Right, evaluate};
 use forgebase_core::series::SeriesPattern;
 use forgebase_core::value::Value;
@@ -101,6 +104,11 @@ pub struct StoredDocument {
     /// For a document made by [`amend`]: the name of the cancelled document it replaces. `None`
     /// otherwise, and for every DocType that is not submittable.
     pub amended_from: Option<String>,
+    /// The name of the workflow state the document is in (M8.1, ADR 0015): set by insert, amend
+    /// and transitions, never by a caller. `None` for a DocType without a workflow, and for a
+    /// document of a DocType with a workflow that has no state yet (`migrate` gives existing
+    /// documents one; such a document has no transitions).
+    pub workflow_state: Option<String>,
     /// One entry per column field of the DocType (every field except Table fields), in
     /// field-name order; [`Value::Null`] when absent. A Link field holds the target document's
     /// `name` as [`Value::Text`].
@@ -183,6 +191,9 @@ pub struct StoredDocument {
 /// **Docstatus.** A document of a submittable DocType starts as a draft (`docstatus` 0, no
 /// `amended_from`); neither can be set through `doc` (they are not fields, so a value for them is
 /// an unknown field).
+///
+/// **Workflow.** A document of a DocType with a workflow starts in the initial state (the first
+/// one); `workflow_state` cannot be set through `doc` either.
 pub async fn insert(
     client: &mut impl GenericClient,
     registry: &Registry,
@@ -269,6 +280,15 @@ async fn insert_in(
     let amended_from = amend.map(|a| a.from.as_str());
     if amend.is_some() {
         params.push(&amended_from);
+    }
+    // A new document, an amendment too, starts in the initial state of the workflow.
+    let initial_state = doctype
+        .workflow
+        .as_ref()
+        .and_then(|w| w.initial())
+        .map(|state| state.name.as_str());
+    if doctype.workflow.is_some() {
+        params.push(&initial_state);
     }
 
     let row = client
@@ -417,6 +437,11 @@ async fn get_in(
 /// the stored value is no change), and only the `allow_on_submit` columns are written.
 /// `docstatus` and `amended_from` are not fields and cannot be changed here.
 ///
+/// **Workflow.** `workflow_state` is not a field either: only a transition changes it. A draft
+/// in a state that has `edit_roles` can be updated only by a caller with one of those roles
+/// ([`DbError::EditDenied`], checked after the lock, before any hook; the system context and an
+/// administrator pass). The caller's write right is needed as always.
+///
 /// **Optimistic concurrency.** The update is applied only if the document's current `version`
 /// equals `expected_version` (the version the caller read). Of two concurrent updates with the
 /// same `expected_version`, exactly one succeeds. Conflict detection assumes READ COMMITTED, the
@@ -487,6 +512,7 @@ async fn update_in(
         }
         status => status == Some(DocStatus::Submitted),
     };
+    check_edit_roles(doctype, &current, caller)?;
     check_read_only(
         registry,
         doctype,
@@ -508,8 +534,48 @@ async fn update_in(
         )));
     }
     let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Update).with_jobs(jobs);
+    let pipeline = Pipeline {
+        registry,
+        doctype,
+        target: Target {
+            name,
+            expected_version,
+            caller,
+            read_owner: grant.read_owner,
+        },
+    };
+    update_tail(client, &pipeline, &current, doc, &ctx, submitted, None).await
+}
+
+/// What the pipelines after the lock share: the registry, the DocType and the document the
+/// write is for.
+pub(crate) struct Pipeline<'a> {
+    pub(crate) registry: &'a Registry,
+    pub(crate) doctype: &'a DocType,
+    pub(crate) target: Target<'a>,
+}
+
+/// The rest of an update, from the `validate` hooks on: the stored document `current` has been
+/// locked and `doc` is the document to validate and write (the stored one with the changes
+/// merged in, or, for a transition, as `before_transition` left it). With `submitted` only the
+/// `allow_on_submit` fields are written (the others are checked to be unchanged), and with
+/// `state` the workflow state is written too (a transition).
+pub(crate) async fn update_tail(
+    client: &impl GenericClient,
+    pipeline: &Pipeline<'_>,
+    current: &StoredDocument,
+    mut doc: Document,
+    ctx: &HookContext<'_>,
+    submitted: bool,
+    state: Option<&str>,
+) -> Result<StoredDocument, DbError> {
+    let Pipeline {
+        registry,
+        doctype,
+        target,
+    } = pipeline;
     run_hooks(registry, doctype, "validate", |hooks| {
-        hooks.validate(&ctx, &mut doc)
+        hooks.validate(ctx, &mut doc)
     })?;
     if let Naming::Field(field) = &doctype.naming
         && doc.values.get(field) != Some(&Value::Text(current.name.clone()))
@@ -520,41 +586,46 @@ async fn update_in(
     }
     // A hook must not get around the lock either.
     if submitted {
-        check_not_locked(doctype, &current, &doc)?;
+        check_not_locked(doctype, current, &doc)?;
     }
     let mut errors = validate(registry, doctype, &doc).err().unwrap_or_default();
     // A submitted document only writes its `allow_on_submit` fields (the others are unchanged,
     // checked above).
     let columns = column_values(doctype, &doc, submitted);
-    let changed_tables = changed_tables(&current, &doc);
+    let changed_tables = changed_tables(current, &doc);
     let (links, writes) = resolve(
         client,
         registry,
-        caller,
+        target.caller,
         doctype,
         (&columns, &changed_tables),
-        Some(&current),
+        Some(current),
         &mut errors,
     )
     .await?;
     if !errors.is_empty() {
         return Err(DbError::Validation(errors));
     }
-    let target = Target {
-        name,
-        expected_version,
-        caller,
-        read_owner: grant.read_owner,
-    };
     write_update(
         client,
         registry,
         doctype,
-        &target,
-        (&columns, &links, &writes),
+        target,
+        (&with_state(columns, state), &links, &writes),
         None,
     )
     .await
+}
+
+/// `columns` with the workflow state added: the column is written like a field, as text.
+fn with_state(
+    mut columns: BTreeMap<String, Value>,
+    state: Option<&str>,
+) -> BTreeMap<String, Value> {
+    if let Some(state) = state {
+        columns.insert(WORKFLOW_COLUMN.to_owned(), Value::Text(state.to_owned()));
+    }
+    columns
 }
 
 /// Refuses caller input for `read_only` fields ([`ValidationError::ReadOnly`], wrapped in
@@ -647,7 +718,7 @@ fn changed_tables(current: &StoredDocument, doc: &Document) -> BTreeMap<String, 
 /// A submitted document is locked: every column field that is not `allow_on_submit` and every
 /// table must equal the stored one in `doc`. (A key that `doc` does not have is not a change:
 /// a missing value is null as on update, and a table key that is absent keeps its rows.)
-fn check_not_locked(
+pub(crate) fn check_not_locked(
     doctype: &DocType,
     current: &StoredDocument,
     doc: &Document,
@@ -757,7 +828,7 @@ fn invalid_status(doctype: &DocType, current: &StoredDocument, operation: &'stat
 }
 
 /// The stored document must have docstatus `needed` for `operation`.
-fn require_status(
+pub(crate) fn require_status(
     doctype: &DocType,
     current: &StoredDocument,
     needed: DocStatus,
@@ -774,7 +845,8 @@ fn require_status(
 /// is locked (see [`update`]). Returns the document as stored.
 ///
 /// `doctype` must have `submittable = true` ([`DbError::NotSubmittable`]) and the document must be
-/// a draft ([`DbError::InvalidDocStatus`]). The caller needs the **submit** right and must be able
+/// a draft ([`DbError::InvalidDocStatus`]). A DocType with a workflow refuses it first, before
+/// anything is looked up ([`DbError::WorkflowRequired`]): use a transition. The caller needs the **submit** right and must be able
 /// to read the document; `expected_version` and the permission checks work as for [`update`];
 /// `version` is incremented, `modified_at` and `modified_by` are set.
 ///
@@ -824,6 +896,7 @@ async fn submit_in(
     caller: &Caller,
     jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
+    require_no_workflow(doctype, "submit")?;
     check_actor(caller.name())?;
     require_submittable(doctype, "submit")?;
     let grant = grant(doctype, caller, Right::Submit)?;
@@ -838,42 +911,65 @@ async fn submit_in(
     )
     .await?;
     require_status(doctype, &current, DocStatus::Draft, "submit")?;
-    let mut doc = as_document(&current);
+    let doc = as_document(&current);
     let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Submit).with_jobs(jobs);
+    let pipeline = Pipeline {
+        registry,
+        doctype,
+        target: Target {
+            name,
+            expected_version,
+            caller,
+            read_owner: grant.read_owner,
+        },
+    };
+    submit_tail(client, &pipeline, &current, doc, &ctx, None).await
+}
+
+/// The rest of a submit, from the `validate` hooks on: `doc` is the stored draft, or, for a
+/// transition, as `before_transition` left it. Writes the values, the changed tables, docstatus 1
+/// and, with `state`, the workflow state.
+pub(crate) async fn submit_tail(
+    client: &impl GenericClient,
+    pipeline: &Pipeline<'_>,
+    current: &StoredDocument,
+    mut doc: Document,
+    ctx: &HookContext<'_>,
+    state: Option<&str>,
+) -> Result<StoredDocument, DbError> {
+    let Pipeline {
+        registry,
+        doctype,
+        target,
+    } = pipeline;
     run_hooks(registry, doctype, "validate", |hooks| {
-        hooks.validate(&ctx, &mut doc)
+        hooks.validate(ctx, &mut doc)
     })?;
     run_hooks(registry, doctype, "before_submit", |hooks| {
-        hooks.before_submit(&ctx, &mut doc)
+        hooks.before_submit(ctx, &mut doc)
     })?;
     let mut errors = validate(registry, doctype, &doc).err().unwrap_or_default();
     let columns = column_values(doctype, &doc, false);
-    let changed_tables = changed_tables(&current, &doc);
+    let changed_tables = changed_tables(current, &doc);
     let (links, writes) = resolve(
         client,
         registry,
-        caller,
+        target.caller,
         doctype,
         (&columns, &changed_tables),
-        Some(&current),
+        Some(current),
         &mut errors,
     )
     .await?;
     if !errors.is_empty() {
         return Err(DbError::Validation(errors));
     }
-    let target = Target {
-        name,
-        expected_version,
-        caller,
-        read_owner: grant.read_owner,
-    };
     write_update(
         client,
         registry,
         doctype,
-        &target,
-        (&columns, &links, &writes),
+        target,
+        (&with_state(columns, state), &links, &writes),
         Some(DocStatus::Submitted),
     )
     .await
@@ -883,7 +979,8 @@ async fn submit_in(
 /// [amended](amend); it cannot be updated. Returns the document as stored.
 ///
 /// Documents that link to this one are not touched (no automatic cancellation of linked
-/// documents). `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document
+/// documents). A DocType with a workflow refuses it first, before anything is looked up
+/// ([`DbError::WorkflowRequired`]): use a transition. `doctype` must be submittable ([`DbError::NotSubmittable`]) and the document
 /// submitted ([`DbError::InvalidDocStatus`]). The caller needs the **cancel** right and must be
 /// able to read the document; `expected_version` and the permission checks work as for
 /// [`update`]; `version` is incremented, `modified_at` and `modified_by` are set.
@@ -928,6 +1025,7 @@ async fn cancel_in(
     caller: &Caller,
     jobs: &EnqueuedJobs,
 ) -> Result<StoredDocument, DbError> {
+    require_no_workflow(doctype, "cancel")?;
     check_actor(caller.name())?;
     require_submittable(doctype, "cancel")?;
     let grant = grant(doctype, caller, Right::Cancel)?;
@@ -944,21 +1042,71 @@ async fn cancel_in(
     require_status(doctype, &current, DocStatus::Submitted, "cancel")?;
     let doc = as_document(&current);
     let ctx = HookContext::new(&doctype.name, caller.name(), Operation::Cancel).with_jobs(jobs);
-    run_hooks(registry, doctype, "before_cancel", |hooks| {
-        hooks.before_cancel(&ctx, &doc)
-    })?;
-    let target = Target {
-        name,
-        expected_version,
-        caller,
-        read_owner: grant.read_owner,
+    let pipeline = Pipeline {
+        registry,
+        doctype,
+        target: Target {
+            name,
+            expected_version,
+            caller,
+            read_owner: grant.read_owner,
+        },
     };
+    cancel_tail(client, &pipeline, &current, doc, &ctx, None).await
+}
+
+/// The rest of a cancel, from the `before_cancel` hooks on: `doc` is the stored document, or,
+/// for a transition, as `before_transition` left it (the caller has refused a change to a locked
+/// field). Writes docstatus 2 and, with `state`, the workflow state; a change to an
+/// `allow_on_submit` field is validated and written too. There is no other validation: nothing
+/// else changes.
+pub(crate) async fn cancel_tail(
+    client: &impl GenericClient,
+    pipeline: &Pipeline<'_>,
+    current: &StoredDocument,
+    doc: Document,
+    ctx: &HookContext<'_>,
+    state: Option<&str>,
+) -> Result<StoredDocument, DbError> {
+    let Pipeline {
+        registry,
+        doctype,
+        target,
+    } = pipeline;
+    run_hooks(registry, doctype, "before_cancel", |hooks| {
+        hooks.before_cancel(ctx, &doc)
+    })?;
+    // Only a transition can have changed anything (an `allow_on_submit` field, see the caller).
+    let null = Value::Null;
+    let columns: BTreeMap<String, Value> = column_values(doctype, &doc, true)
+        .into_iter()
+        .filter(|(field, value)| current.values.get(field).unwrap_or(&null) != value)
+        .collect();
+    let mut errors = if columns.is_empty() {
+        Vec::new()
+    } else {
+        validate(registry, doctype, &doc).err().unwrap_or_default()
+    };
+    let no_tables = BTreeMap::new();
+    let (links, writes) = resolve(
+        client,
+        registry,
+        target.caller,
+        doctype,
+        (&columns, &no_tables),
+        Some(current),
+        &mut errors,
+    )
+    .await?;
+    if !errors.is_empty() {
+        return Err(DbError::Validation(errors));
+    }
     write_update(
         client,
         registry,
         doctype,
-        &target,
-        (&BTreeMap::new(), &BTreeMap::new(), &[]),
+        target,
+        (&with_state(columns, state), &links, &writes),
         Some(DocStatus::Cancelled),
     )
     .await
@@ -1203,6 +1351,14 @@ async fn delete_in(
         };
         return Err(stale_or_missing(client, doctype, &target).await?);
     }
+    // The history goes with the document: there is no audit trail yet, and a name can be reused.
+    // Always, also for a DocType whose workflow was removed: the rows would otherwise outlive it.
+    client
+        .execute(
+            "DELETE FROM fb_workflow_log WHERE doctype = $1::text AND name = $2::text",
+            &[&doctype.name, &name],
+        )
+        .await?;
     Ok(())
 }
 
@@ -1210,7 +1366,7 @@ async fn delete_in(
 /// outbox, ADR 0013): after every hook has run and before the commit, so a refused or rolled-back
 /// operation leaves no job. An unknown job name or an oversize payload is [`DbError::Job`] and
 /// fails the whole operation.
-async fn write_jobs(
+pub(crate) async fn write_jobs(
     client: &impl GenericClient,
     registry: &Registry,
     jobs: &EnqueuedJobs,
@@ -1221,7 +1377,7 @@ async fn write_jobs(
 
 /// Calls `call` for every hook set registered for the DocType, in registration order, and stops
 /// at the first error, which becomes [`DbError::Hook`] naming `hook`.
-fn run_hooks(
+pub(crate) fn run_hooks(
     registry: &Registry,
     doctype: &DocType,
     hook: &'static str,
@@ -1238,7 +1394,7 @@ fn run_hooks(
 }
 
 /// The stored document as the [`Document`] hooks and validation work on.
-fn as_document(stored: &StoredDocument) -> Document {
+pub(crate) fn as_document(stored: &StoredDocument) -> Document {
     Document {
         name: Some(stored.name.clone()),
         values: stored.values.clone(),
@@ -1247,24 +1403,24 @@ fn as_document(stored: &StoredDocument) -> Document {
 }
 
 /// What a caller may do with one existing document for an operation, decided by the evaluator.
-struct Grant<'a> {
-    right: Right,
+pub(crate) struct Grant<'a> {
+    pub(crate) right: Right,
     /// With an `if_owner` *read*: the owner of the only documents the caller can see. `None`:
     /// every document. Applied in the SQL that finds the document.
-    read_owner: Option<&'a str>,
+    pub(crate) read_owner: Option<&'a str>,
     /// With an `if_owner` right: the owner of the only documents the right applies to.
-    right_owner: Option<&'a str>,
+    pub(crate) right_owner: Option<&'a str>,
 }
 
 /// The document an operation works on, for the errors of a write that matched no row.
-struct Target<'a> {
-    name: &'a str,
-    expected_version: i64,
-    caller: &'a Caller,
-    read_owner: Option<&'a str>,
+pub(crate) struct Target<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) expected_version: i64,
+    pub(crate) caller: &'a Caller,
+    pub(crate) read_owner: Option<&'a str>,
 }
 
-fn permission_denied(doctype: &DocType, right: Right) -> DbError {
+pub(crate) fn permission_denied(doctype: &DocType, right: Right) -> DbError {
     DbError::PermissionDenied {
         doctype: doctype.name.clone(),
         right,
@@ -1304,6 +1460,67 @@ fn grant<'a>(doctype: &DocType, caller: &'a Caller, right: Right) -> Result<Gran
     })
 }
 
+/// Like [`grant`] for an operation whose right is not known before the document is read (a
+/// transition): only the caller's name and the read access are checked, the right is
+/// [`Right::Read`] and is not limited to own documents.
+pub(crate) fn read_grant<'a>(doctype: &DocType, caller: &'a Caller) -> Result<Grant<'a>, DbError> {
+    check_actor(caller.name())?;
+    let read = access_to(doctype, caller, Right::Read)?;
+    Ok(Grant {
+        right: Right::Read,
+        read_owner: owner_scope(read, caller),
+        right_owner: None,
+    })
+}
+
+/// Submit and cancel are refused on a DocType with a workflow: its documents change state only
+/// through a transition (ADR 0015). The first check of both, so it says nothing about a document.
+fn require_no_workflow(doctype: &DocType, operation: &'static str) -> Result<(), DbError> {
+    if doctype.workflow.is_some() {
+        return Err(DbError::WorkflowRequired {
+            doctype: doctype.name.clone(),
+            operation,
+        });
+    }
+    Ok(())
+}
+
+/// A draft in a state with `edit_roles` can be updated only by a caller who has one of them (on
+/// top of the write right). The system context and an administrator pass, like everywhere. A
+/// state without `edit_roles`, an unknown state and a document that is not a draft change nothing.
+fn check_edit_roles(
+    doctype: &DocType,
+    current: &StoredDocument,
+    caller: &Caller,
+) -> Result<(), DbError> {
+    if matches!(
+        current.docstatus,
+        Some(DocStatus::Submitted | DocStatus::Cancelled)
+    ) {
+        return Ok(());
+    }
+    let Some(state) = current
+        .workflow_state
+        .as_deref()
+        .and_then(|name| doctype.workflow.as_ref()?.state(name))
+        .filter(|state| !state.edit_roles.is_empty())
+    else {
+        return Ok(());
+    };
+    let allowed = match caller {
+        Caller::User { roles, .. } => state.edit_roles.iter().any(|r| roles.contains(r)),
+        Caller::System { .. } => true,
+    };
+    if allowed || caller.bypasses_permissions() {
+        Ok(())
+    } else {
+        Err(DbError::EditDenied {
+            doctype: doctype.name.clone(),
+            state: state.name.clone(),
+        })
+    }
+}
+
 /// Whether the caller has any read access to the DocType (used to decide what an error may say).
 fn can_read_doctype(registry: &Registry, doctype: &str, caller: &Caller) -> bool {
     registry
@@ -1318,7 +1535,7 @@ fn can_read_doctype(registry: &Registry, doctype: &str, caller: &Caller) -> bool
 /// on is [`DbError::PermissionDenied`]; a version other than `expected_version` is
 /// [`DbError::Conflict`]. Nothing else has been done at that point. Writers of the rows take this
 /// lock first, so the rows read here cannot change under the caller.
-async fn lock_current(
+pub(crate) async fn lock_current(
     client: &impl GenericClient,
     registry: &Registry,
     doctype: &DocType,
@@ -1766,12 +1983,22 @@ pub(crate) fn status_columns(doctype: &DocType) -> &'static [&'static str] {
     }
 }
 
+/// The column after the [`status_columns`] that only the table of a DocType with a workflow has.
+fn workflow_columns(doctype: &DocType) -> &'static [&'static str] {
+    if doctype.workflow.is_some() {
+        &[WORKFLOW_COLUMN]
+    } else {
+        &[]
+    }
+}
+
 /// What every statement on a document table returns, in decode order: the standard columns, the
-/// [`status_columns`], then [`field_items`].
+/// [`status_columns`], the [`workflow_columns`], then [`field_items`].
 pub(crate) fn select_list(doctype: &DocType) -> String {
     let mut items: Vec<String> = STANDARD_COLUMNS
         .iter()
         .chain(status_columns(doctype))
+        .chain(workflow_columns(doctype))
         .copied()
         .map(quote_ident)
         .collect();
@@ -1804,7 +2031,8 @@ fn field_placeholders(doctype: &DocType, first: usize) -> Vec<String> {
 }
 
 /// Placeholders `$1` (id), `$2` (name) and `$3` (actor, used twice), then one per column field,
-/// then, for an amendment, `amended_from`. `docstatus` is not written: its default (0) is a draft.
+/// then, for an amendment, `amended_from`, then, for a DocType with a workflow, the initial state.
+/// `docstatus` is not written: its default (0) is a draft.
 fn insert_sql(doctype: &DocType, amended: bool) -> String {
     let mut values = vec![
         "$1::uuid".to_owned(),
@@ -1821,6 +2049,12 @@ fn insert_sql(doctype: &DocType, amended: bool) -> String {
         columns.push_str(", ");
         columns.push_str(&quote_ident("amended_from"));
         values.push(format!("${}::text", 4 + doctype.column_fields().count()));
+    }
+    if doctype.workflow.is_some() {
+        let n = 4 + doctype.column_fields().count() + usize::from(amended);
+        columns.push_str(", ");
+        columns.push_str(&quote_ident(WORKFLOW_COLUMN));
+        values.push(format!("${n}::text"));
     }
     format!(
         "INSERT INTO {} ({columns}) VALUES ({}) RETURNING {}",
@@ -1922,6 +2156,12 @@ pub(crate) fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocumen
     } else {
         (None, None)
     };
+    let status_len = status_columns(doctype).len();
+    let workflow_state = if doctype.workflow.is_some() {
+        row.try_get(STANDARD_COLUMNS.len() + status_len)?
+    } else {
+        None
+    };
     Ok(StoredDocument {
         id: row.try_get(0)?,
         name: row.try_get(1)?,
@@ -1932,10 +2172,11 @@ pub(crate) fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocumen
         version: row.try_get(6)?,
         docstatus,
         amended_from,
+        workflow_state,
         values: decode_fields(
             doctype,
             row,
-            STANDARD_COLUMNS.len() + status_columns(doctype).len(),
+            STANDARD_COLUMNS.len() + status_len + workflow_columns(doctype).len(),
         )?,
         tables: BTreeMap::new(),
     })
@@ -2163,5 +2404,43 @@ mod tests {
             amended_name("X-18446744073709551615", Some("X")),
             "X-18446744073709551615-1"
         );
+    }
+
+    fn flow() -> DocType {
+        DocType::from_toml_str(
+            "name = \"flow\"\nlabel = \"F\"\nsubmittable = true\n\
+             [[fields]]\nname = \"title\"\ntype = \"data\"\n\
+             [workflow]\n[[workflow.states]]\nname = \"Open\"\ndocstatus = 0\n",
+        )
+        .expect("valid DocType")
+    }
+
+    #[test]
+    fn a_workflow_doctype_selects_and_binds_the_state_after_the_status_columns() {
+        let doctype = flow();
+        assert!(
+            select_list(&doctype).starts_with(
+                "\"id\", \"name\", \"owner\", \"created_at\", \"modified_at\", \"modified_by\", \"version\", \"docstatus\", \"amended_from\", \"workflow_state\", \"title\""
+            ),
+            "{}",
+            select_list(&doctype)
+        );
+        // The initial state is the last bound value, after the fields and `amended_from`.
+        let plain = insert_sql(&doctype, false);
+        assert!(
+            plain.contains("\"version\", \"title\", \"workflow_state\") VALUES (")
+                && plain.contains("1, $4::varchar, $5::text) RETURNING"),
+            "{plain}"
+        );
+        let amended = insert_sql(&doctype, true);
+        assert!(
+            amended.contains("\"title\", \"amended_from\", \"workflow_state\") VALUES (")
+                && amended.contains("1, $4::varchar, $5::text, $6::text) RETURNING"),
+            "{amended}"
+        );
+        // A DocType without a workflow has no such column in any statement.
+        assert!(!select_list(&quote()).contains("workflow_state"));
+        assert!(!insert_sql(&quote(), true).contains("workflow_state"));
+        assert!(!select_list(&customer()).contains("workflow_state"));
     }
 }

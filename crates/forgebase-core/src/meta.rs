@@ -4,10 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::document::DocStatus;
 use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
 use crate::permission::{self, PermissionRule, Right};
 use crate::series::{SeriesError, SeriesPattern};
+use crate::workflow::{MAX_NAME_LEN, Move, Workflow};
 
 /// Default `max_length` of a Data field.
 pub const DEFAULT_MAX_LENGTH: u32 = 140;
@@ -74,6 +76,12 @@ pub struct DocType {
     /// desk's own default. Existing fields, no Table or Text field, no duplicates, at most
     /// [`MAX_LIST_FIELDS`]; not allowed on a child DocType. Metadata for the desk only.
     pub list_fields: Option<Vec<String>>,
+    /// The states a document moves through and the transitions between them (`[workflow]`,
+    /// M8.1, ADR 0015), or `None`. Defined by the app in the DocType file. On a DocType with a
+    /// workflow, plain submit and cancel are refused and the state changes only through
+    /// transitions. Not allowed on a child DocType, and a field of the DocType may not be named
+    /// `workflow_state`.
+    pub workflow: Option<Workflow>,
 }
 
 /// One field of a [`DocType`].
@@ -605,6 +613,151 @@ pub enum DefinitionError {
         /// The Table fields, as `doctype.field`.
         uses: Vec<String>,
     },
+    /// A child DocType has a `[workflow]`; only the parent has states.
+    #[error("a child doctype cannot have a workflow")]
+    ChildWithWorkflow,
+    /// A workflow has no states.
+    #[error("workflow: at least one state is required (the first is the initial state)")]
+    WorkflowNoStates,
+    /// The first state, the initial one, is not a draft.
+    #[error("workflow: the first state `{state}` is the initial state and must have docstatus 0")]
+    WorkflowInitialNotDraft {
+        /// The first state.
+        state: String,
+    },
+    /// The name of a state or an action is empty (after trimming), too long or has a NUL character.
+    #[error("workflow: {kind} name `{name}` {reason}")]
+    WorkflowName {
+        /// `state` or `action`.
+        kind: &'static str,
+        /// The rejected name.
+        name: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+    /// Two states share a name.
+    #[error("workflow: state `{state}` is defined more than once")]
+    WorkflowDuplicateState {
+        /// The repeated name.
+        state: String,
+    },
+    /// The docstatus of a state is not 0, 1 or 2.
+    #[error("workflow: state `{state}`: docstatus {found} is not 0, 1 or 2")]
+    WorkflowInvalidDocStatus {
+        /// The state.
+        state: String,
+        /// The rejected value.
+        found: i64,
+    },
+    /// The style of a state is not one of the known ones.
+    #[error(
+        "workflow: state `{state}`: unknown style `{found}` (expected one of neutral, success, warning, danger, info)"
+    )]
+    WorkflowUnknownStyle {
+        /// The state.
+        state: String,
+        /// The rejected style.
+        found: String,
+    },
+    /// A state has docstatus 1 or 2 on a DocType that is not submittable.
+    #[error(
+        "workflow: state `{state}` has docstatus {docstatus}, which needs `submittable = true`"
+    )]
+    WorkflowStateNeedsSubmittable {
+        /// The state.
+        state: String,
+        /// Its docstatus.
+        docstatus: i16,
+    },
+    /// A state with docstatus 1 or 2 has `edit_roles`; only a draft can be edited by them.
+    #[error("workflow: state `{state}`: edit_roles are only allowed on a state with docstatus 0")]
+    WorkflowEditRolesNotDraft {
+        /// The state.
+        state: String,
+    },
+    /// A role of a state's `edit_roles` or of a transition's `roles` is not a valid role name.
+    #[error("workflow: {place}: invalid role `{role}`: {reason}")]
+    WorkflowInvalidRole {
+        /// Where the role is written: `state `x` edit_roles` or `transition `a` from `b``.
+        place: String,
+        /// The rejected role.
+        role: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+    /// A transition names a state that does not exist in `from` or `to`.
+    #[error("workflow: transition `{action}` from `{from}`: unknown state `{state}` in `{key}`")]
+    WorkflowUnknownState {
+        /// The transition's action.
+        action: String,
+        /// The transition's `from`.
+        from: String,
+        /// `from` or `to`.
+        key: &'static str,
+        /// The name that is not a state.
+        state: String,
+    },
+    /// Two transitions from the same state have the same action.
+    #[error("workflow: action `{action}` is defined more than once from state `{from}`")]
+    WorkflowDuplicateAction {
+        /// The action.
+        action: String,
+        /// The state.
+        from: String,
+    },
+    /// A transition has no roles.
+    #[error("workflow: transition `{action}` from `{from}` needs at least one role")]
+    WorkflowNoRoles {
+        /// The action.
+        action: String,
+        /// The state.
+        from: String,
+    },
+    /// A role is listed twice in the roles of one transition.
+    #[error(
+        "workflow: transition `{action}` from `{from}`: role `{role}` is listed more than once"
+    )]
+    WorkflowDuplicateRole {
+        /// The action.
+        action: String,
+        /// The state.
+        from: String,
+        /// The repeated role.
+        role: String,
+    },
+    /// A transition leads to its own state.
+    #[error("workflow: transition `{action}` leads from state `{state}` to itself")]
+    WorkflowSelfTransition {
+        /// The action.
+        action: String,
+        /// The state.
+        state: String,
+    },
+    /// A transition makes a docstatus move that is not allowed.
+    #[error(
+        "workflow: transition `{action}` from `{from}` to `{to}` moves docstatus {from_docstatus} to {to_docstatus}; only 0 to 0, 0 to 1, 1 to 1 and 1 to 2 are allowed"
+    )]
+    WorkflowBadMove {
+        /// The action.
+        action: String,
+        /// The `from` state.
+        from: String,
+        /// The `to` state.
+        to: String,
+        /// Docstatus of `from`.
+        from_docstatus: i16,
+        /// Docstatus of `to`.
+        to_docstatus: i16,
+    },
+    /// No chain of transitions leads from the initial state to this state.
+    #[error("workflow: state `{state}` cannot be reached from the initial state")]
+    WorkflowUnreachableState {
+        /// The state.
+        state: String,
+    },
+    /// A field is named `workflow_state` on a DocType with a workflow, which has that column.
+    #[error("field `workflow_state` clashes with the column of the workflow state")]
+    WorkflowStateFieldName,
 }
 
 /// Error returned when loading a DocType from TOML.
@@ -738,6 +891,7 @@ impl DocType {
         }
         self.check_desk_keys(failed, &mut errors);
         self.check_permissions(&mut errors);
+        self.check_workflow(failed, &mut errors);
         if self.submittable {
             if self.is_child {
                 errors.push(DefinitionError::ChildSubmittable);
@@ -875,6 +1029,124 @@ impl DocType {
         }
     }
 
+    /// The `[workflow]`: names, docstatus rules, roles, transitions and reachability.
+    fn check_workflow(&self, failed: &[String], errors: &mut Vec<DefinitionError>) {
+        let Some(workflow) = &self.workflow else {
+            return;
+        };
+        if self.is_child {
+            errors.push(DefinitionError::ChildWithWorkflow);
+            return;
+        }
+        if self.field(WORKFLOW_COLUMN).is_some() || failed.iter().any(|f| f == WORKFLOW_COLUMN) {
+            errors.push(DefinitionError::WorkflowStateFieldName);
+        }
+        let Some(initial) = workflow.initial() else {
+            errors.push(DefinitionError::WorkflowNoStates);
+            return;
+        };
+        if initial.docstatus != DocStatus::Draft {
+            errors.push(DefinitionError::WorkflowInitialNotDraft {
+                state: initial.name.clone(),
+            });
+        }
+        let mut names = BTreeSet::new();
+        for state in &workflow.states {
+            check_workflow_name("state", &state.name, errors);
+            if !names.insert(state.name.as_str()) {
+                errors.push(DefinitionError::WorkflowDuplicateState {
+                    state: state.name.clone(),
+                });
+            }
+            if state.docstatus != DocStatus::Draft && !self.submittable {
+                errors.push(DefinitionError::WorkflowStateNeedsSubmittable {
+                    state: state.name.clone(),
+                    docstatus: state.docstatus.as_i16(),
+                });
+            }
+            if !state.edit_roles.is_empty() && state.docstatus != DocStatus::Draft {
+                errors.push(DefinitionError::WorkflowEditRolesNotDraft {
+                    state: state.name.clone(),
+                });
+            }
+            let place = format!("state `{}` edit_roles", state.name);
+            for role in &state.edit_roles {
+                check_workflow_role(&place, role, errors);
+            }
+        }
+        let mut actions = BTreeSet::new();
+        for t in &workflow.transitions {
+            check_workflow_name("action", &t.action, errors);
+            if !actions.insert((t.from.as_str(), t.action.as_str())) {
+                errors.push(DefinitionError::WorkflowDuplicateAction {
+                    action: t.action.clone(),
+                    from: t.from.clone(),
+                });
+            }
+            for (key, state) in [("from", &t.from), ("to", &t.to)] {
+                if !names.contains(state.as_str()) {
+                    errors.push(DefinitionError::WorkflowUnknownState {
+                        action: t.action.clone(),
+                        from: t.from.clone(),
+                        key,
+                        state: state.clone(),
+                    });
+                }
+            }
+            if t.roles.is_empty() {
+                errors.push(DefinitionError::WorkflowNoRoles {
+                    action: t.action.clone(),
+                    from: t.from.clone(),
+                });
+            }
+            let place = format!("transition `{}` from `{}`", t.action, t.from);
+            let mut roles = BTreeSet::new();
+            for role in &t.roles {
+                check_workflow_role(&place, role, errors);
+                if !roles.insert(role.as_str()) {
+                    errors.push(DefinitionError::WorkflowDuplicateRole {
+                        action: t.action.clone(),
+                        from: t.from.clone(),
+                        role: role.clone(),
+                    });
+                }
+            }
+            if t.from == t.to && names.contains(t.from.as_str()) {
+                errors.push(DefinitionError::WorkflowSelfTransition {
+                    action: t.action.clone(),
+                    state: t.from.clone(),
+                });
+            } else if let (Some(from), Some(to)) = (workflow.state(&t.from), workflow.state(&t.to))
+                && Move::of(from.docstatus, to.docstatus).is_none()
+            {
+                errors.push(DefinitionError::WorkflowBadMove {
+                    action: t.action.clone(),
+                    from: t.from.clone(),
+                    to: t.to.clone(),
+                    from_docstatus: from.docstatus.as_i16(),
+                    to_docstatus: to.docstatus.as_i16(),
+                });
+            }
+        }
+        // Reachability from the initial state, over the transitions that name existing states.
+        let mut reached = BTreeSet::from([initial.name.as_str()]);
+        let mut queue = vec![initial.name.as_str()];
+        while let Some(from) = queue.pop() {
+            for t in workflow.transitions_from(from) {
+                if names.contains(t.to.as_str()) && reached.insert(t.to.as_str()) {
+                    queue.push(t.to.as_str());
+                }
+            }
+        }
+        for state in &workflow.states {
+            if !reached.contains(state.name.as_str()) {
+                errors.push(DefinitionError::WorkflowUnreachableState {
+                    state: state.name.clone(),
+                });
+            }
+        }
+    }
+
     fn check_naming_field(&self, name: &str, errors: &mut Vec<DefinitionError>) {
         let field = name.to_owned();
         match self.field(name) {
@@ -896,6 +1168,41 @@ impl DocType {
                 }
             }
         }
+    }
+}
+
+/// The name of the framework column that holds the state of a document of a DocType with a
+/// workflow.
+pub const WORKFLOW_COLUMN: &str = "workflow_state";
+
+/// A state or action name: not blank, no leading or trailing whitespace, at most
+/// [`MAX_NAME_LEN`] characters, no NUL.
+fn check_workflow_name(kind: &'static str, name: &str, errors: &mut Vec<DefinitionError>) {
+    let reason = if name.trim().is_empty() {
+        "must not be empty"
+    } else if name.trim() != name {
+        "must not start or end with whitespace"
+    } else if name.chars().count() > MAX_NAME_LEN {
+        "is longer than 64 characters"
+    } else if name.contains('\0') {
+        "must not contain a NUL character"
+    } else {
+        return;
+    };
+    errors.push(DefinitionError::WorkflowName {
+        kind,
+        name: name.to_owned(),
+        reason,
+    });
+}
+
+fn check_workflow_role(place: &str, role: &str, errors: &mut Vec<DefinitionError>) {
+    if let Err(reason) = permission::check_role_name(role) {
+        errors.push(DefinitionError::WorkflowInvalidRole {
+            place: place.to_owned(),
+            role: role.to_owned(),
+            reason,
+        });
     }
 }
 
@@ -1265,6 +1572,7 @@ mod tests {
             permissions: vec![],
             title_field: None,
             list_fields: None,
+            workflow: None,
         }
     }
 

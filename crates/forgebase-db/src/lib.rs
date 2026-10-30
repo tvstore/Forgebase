@@ -3,7 +3,7 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1 and M6.2):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2 and M8.1):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
 //!   rustls); until then run over a local or private network.
@@ -20,6 +20,9 @@
 //!   apps a database records.
 //! - [`pg_environment`] and [`inspect_database`] (M7.3): the `PG*` variables for `pg_dump` and
 //!   `pg_restore`, and the server version and emptiness check of `site backup` and `site restore`.
+//! - [`transition`], [`available_transitions`] and [`history`] (M8.1, ADR 0015): the workflow of a
+//!   DocType, run in the update, submit and cancel pipelines; the transition log is the table of
+//!   migration 0008, and `migrate` gives existing documents their state.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
 //!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own
@@ -64,6 +67,7 @@ mod plan;
 pub mod schedule;
 mod sync;
 mod value;
+mod workflow;
 
 pub use app_migrations::{
     AppMigration, AppSpec, AppliedAppMigration, tables_exist as app_migration_tables_exist,
@@ -82,6 +86,9 @@ pub use migrate::{MIGRATIONS, Migration, migrate_framework};
 pub use plan::{Conflict, Step, Warning};
 pub use sync::{SyncOptions, SyncReport, sync};
 pub use tokio_postgres::{Client, GenericClient, SimpleQueryMessage, Transaction};
+pub use workflow::{
+    AvailableTransitions, HistoryEntry, MAX_HISTORY, available_transitions, history, transition,
+};
 
 use deadpool_postgres::Runtime;
 use forgebase_core::meta::Registry;
@@ -124,6 +131,10 @@ pub struct MigrateReport {
     /// each; with a dry run, the planned ones. Empty when the schedules were not given
     /// ([`migrate_apps`]) or, in a dry run, while framework migrations are pending.
     pub schedules: Vec<String>,
+    /// Warnings of the workflow backfill (the state of existing documents, see ADR 0015), one line per DocType
+    /// with documents in a state its workflow no longer defines. Empty in a dry run (nothing is
+    /// backfilled) and when there is nothing to say.
+    pub workflow_warnings: Vec<String>,
 }
 
 /// Applies the framework migrations, then syncs the DocType schema. Same as [`migrate_apps`]
@@ -250,6 +261,7 @@ async fn migrate_locked(
             sync: None,
             app_migrations,
             schedules: Vec::new(),
+            workflow_warnings: Vec::new(),
         });
     }
     let pending = app_migrations::pending(client, apps).await?;
@@ -270,10 +282,18 @@ async fn migrate_locked(
         Some(declared) => schedule::sync(client, declared, options.dry_run).await?,
         None => Vec::new(),
     };
+    // After the sync, so the `workflow_state` columns exist; a dry run keeps nothing, so there
+    // is nothing to backfill.
+    let workflow_warnings = if options.dry_run {
+        Vec::new()
+    } else {
+        workflow::backfill_workflow_states(client, registry).await?
+    };
     Ok(MigrateReport {
         migrations,
         sync: Some(sync),
         app_migrations,
         schedules,
+        workflow_warnings,
     })
 }

@@ -1,6 +1,6 @@
 # 0011 Permission model, phase 1
 
-- Status: Accepted (owner decisions 2, 9, 10 and 12 of the M3 plan, 2026-10-29; implementation details of M3.2 separated below)
+- Status: Accepted (owner decisions 2, 9, 10 and 12 of the M3 plan, 2026-10-29; implementation details of M3.2 separated below). Extended by [ADR 0015](0015-workflow-states-and-transitions.md) (2026-10-30): the transition-role rule, a transition needs a role of the transition and the underlying right.
 - Date: 2026-10-29
 
 ## Context

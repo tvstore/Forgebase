@@ -5,7 +5,7 @@
 //! depends on no other Forgebase crate.
 //! See ADR 0002 and `docs/blueprint/architecture.md`.
 //!
-//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3, M2.4 and M3.2):
+//! Implemented so far (milestones M1.1, M2.1, M2.2, M2.3, M2.4, M3.2 and M8.1):
 //!
 //! - [`ident`]: identifier rules and table naming for DocTypes and fields.
 //! - [`meta`]: the DocType model, [`DocType::from_toml_str`](meta::DocType::from_toml_str) and the
@@ -20,6 +20,8 @@
 //! - [`permission`]: `[[permissions]]` rules, [`Right`](permission::Right), the
 //!   [`Caller`](permission::Caller) and [`evaluate`](permission::evaluate), the one function that
 //!   decides access (M3.2, ADR 0011).
+//! - [`workflow`]: the states and transitions of a DocType's `[workflow]` (M8.1, ADR 0015); who
+//!   may take a transition is [`transition_access`](permission::transition_access).
 //!
 //! Documents of a `submittable` DocType have a [`DocStatus`](document::DocStatus) (draft,
 //! submitted, cancelled).
@@ -31,5 +33,6 @@ pub mod meta;
 pub mod permission;
 pub mod series;
 pub mod value;
+pub mod workflow;
 
 mod load;

@@ -21,6 +21,7 @@ use crate::auth::{Authenticated, Credential, SESSION_COOKIE};
 use crate::error::ApiError;
 use crate::json::{
     JsonError, document_to_json, documents_to_json, input_from_json, parse_filters, parse_sort,
+    utc_rfc3339,
 };
 
 /// Session lifetime in the cookie (`Max-Age`): the 7 days of the session's absolute expiry.
@@ -429,14 +430,14 @@ pub async fn delete(
 }
 
 #[derive(Clone, Copy)]
-enum Transition {
+enum Lifecycle {
     Submit,
     Cancel,
     Amend,
 }
 
-async fn transition(
-    kind: Transition,
+async fn lifecycle(
+    kind: Lifecycle,
     state: AppState,
     authenticated: Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
@@ -452,18 +453,18 @@ async fn transition(
     let client = &mut **client;
     let (registry, doctype, name) = (state.registry(), doctype.name.as_str(), name.as_str());
     let (status, stored) = match kind {
-        Transition::Submit => (
+        Lifecycle::Submit => (
             StatusCode::OK,
             forgebase_db::submit(client, registry, doctype, name, expected_version, &caller)
                 .await?,
         ),
-        Transition::Cancel => (
+        Lifecycle::Cancel => (
             StatusCode::OK,
             forgebase_db::cancel(client, registry, doctype, name, expected_version, &caller)
                 .await?,
         ),
         // The amendment is a new document.
-        Transition::Amend => (
+        Lifecycle::Amend => (
             StatusCode::CREATED,
             forgebase_db::amend(client, registry, doctype, name, expected_version, &caller).await?,
         ),
@@ -479,7 +480,7 @@ pub async fn submit(
     query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    transition(Transition::Submit, state, authenticated, path, query, body).await
+    lifecycle(Lifecycle::Submit, state, authenticated, path, query, body).await
 }
 
 /// `POST /api/v1/resource/{doctype}/{name}/cancel`: body `{"version": N}`.
@@ -490,7 +491,7 @@ pub async fn cancel(
     query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    transition(Transition::Cancel, state, authenticated, path, query, body).await
+    lifecycle(Lifecycle::Cancel, state, authenticated, path, query, body).await
 }
 
 /// `POST /api/v1/resource/{doctype}/{name}/amend`: body `{"version": N}`; 201 with the new
@@ -502,5 +503,113 @@ pub async fn amend(
     query: RawQuery,
     ApiJson(body): ApiJson,
 ) -> Reply {
-    transition(Transition::Amend, state, authenticated, path, query, body).await
+    lifecycle(Lifecycle::Amend, state, authenticated, path, query, body).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Workflow (M8.1, ADR 0015)
+// ---------------------------------------------------------------------------------------------
+
+/// `POST /api/v1/resource/{doctype}/{name}/transition`: body `{"action": "...", "version": N}`.
+/// 200 with the document as stored, like submit. Who may take it is decided by `forgebase-db`
+/// (the transition's role and the right of its docstatus move).
+pub async fn transition(
+    State(state): State<AppState>,
+    authenticated: Authenticated,
+    path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
+    ApiJson(body): ApiJson,
+) -> Reply {
+    let (Path((doctype_name, name)), Query(query)) = (path?, query?);
+    let doctype = doctype(&state, &doctype_name)?;
+    params(query, &[])?;
+    let map = object(body, &["action", "version"])?;
+    let expected_version = version(&map)?;
+    let action = map
+        .get("action")
+        .and_then(Json::as_str)
+        .ok_or_else(|| ApiError::bad_request("`action` must be a string"))?;
+    let mut client = state.client().await?;
+    let stored = forgebase_db::transition(
+        &mut **client,
+        state.registry(),
+        &doctype.name,
+        &name,
+        action,
+        expected_version,
+        &authenticated.caller(),
+    )
+    .await?;
+    Ok(data(StatusCode::OK, document_to_json(&stored)?))
+}
+
+/// `GET /api/v1/resource/{doctype}/{name}/transitions`: the state of the document and the
+/// transitions from it that the caller may take now (role and right, `if_owner` applied; a
+/// transition whose from-state has another docstatus than the document is left out).
+/// Hooks are not run, so a hook may still refuse one.
+pub async fn transitions(
+    State(state): State<AppState>,
+    authenticated: Authenticated,
+    path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
+) -> Reply {
+    let (Path((doctype_name, name)), Query(query)) = (path?, query?);
+    let doctype = doctype(&state, &doctype_name)?;
+    params(query, &[])?;
+    let mut client = state.client().await?;
+    let available = forgebase_db::available_transitions(
+        &mut **client,
+        state.registry(),
+        &doctype.name,
+        &name,
+        &authenticated.caller(),
+    )
+    .await?;
+    let transitions: Vec<Json> = available
+        .transitions
+        .iter()
+        .map(|t| json!({"action": t.action, "to": t.to}))
+        .collect();
+    Ok(data(
+        StatusCode::OK,
+        json!({"state": available.state, "transitions": transitions}),
+    ))
+}
+
+/// `GET /api/v1/resource/{doctype}/{name}/history`: the transitions of the document, oldest
+/// first, at most the newest 500.
+pub async fn history(
+    State(state): State<AppState>,
+    authenticated: Authenticated,
+    path: Result<Path<(String, String)>, PathRejection>,
+    query: RawQuery,
+) -> Reply {
+    let (Path((doctype_name, name)), Query(query)) = (path?, query?);
+    let doctype = doctype(&state, &doctype_name)?;
+    params(query, &[])?;
+    let mut client = state.client().await?;
+    let entries = forgebase_db::history(
+        &mut **client,
+        state.registry(),
+        &doctype.name,
+        &name,
+        &authenticated.caller(),
+    )
+    .await?;
+    let history = entries
+        .iter()
+        .map(|e| {
+            Ok(json!({
+                "action": e.action,
+                "from": e.from,
+                "to": e.to,
+                "actor": e.actor,
+                "at": utc_rfc3339(&e.at).map_err(|problem| JsonError::Output {
+                    field: "at".to_owned(),
+                    problem,
+                })?,
+            }))
+        })
+        .collect::<Result<Vec<_>, JsonError>>()?;
+    Ok(data(StatusCode::OK, json!({"history": history})))
 }

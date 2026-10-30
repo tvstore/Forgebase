@@ -111,6 +111,7 @@ mod tests {
             sync: Some(sync(0, vec![], false)),
             app_migrations: vec![],
             schedules: vec![],
+            workflow_warnings: vec![],
         };
         assert_eq!(
             migrate_report(&report, false, 0),
@@ -125,6 +126,7 @@ mod tests {
             sync: Some(sync(0, vec![], false)),
             app_migrations: vec![],
             schedules: vec![],
+            workflow_warnings: vec![],
         };
         assert!(!migrate_report(&report, false, 0).contains("schedules"));
         report.schedules = vec!["add crm.digest (daily 06:30)".to_owned()];
@@ -148,11 +150,12 @@ mod tests {
             )),
             app_migrations: vec![],
             schedules: vec![],
+            workflow_warnings: vec![],
         };
         let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 7 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n"
+                "framework migrations: 8 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n"
             ),
             "{text}"
         );
@@ -171,9 +174,10 @@ mod tests {
             sync: None,
             app_migrations: vec![],
             schedules: vec![],
+            workflow_warnings: vec![],
         };
         let text = migrate_report(&report, true, 0);
-        assert!(text.contains("7 pending"), "{text}");
+        assert!(text.contains("8 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 
@@ -184,6 +188,7 @@ mod tests {
             sync: Some(sync(2, vec![], true)),
             app_migrations: vec![],
             schedules: vec![],
+            workflow_warnings: vec![],
         };
         let text = migrate_report(&report, true, 0);
         assert!(text.contains("would apply 2 step(s)"), "{text}");
@@ -202,6 +207,7 @@ mod tests {
             sync: Some(sync(0, vec![], false)),
             app_migrations: vec![],
             schedules: vec![],
+            workflow_warnings: vec![],
         };
         // No apps: nothing is said. Apps without pending migrations: up to date.
         assert!(!migrate_report(&report, false, 0).contains("app migrations"));
