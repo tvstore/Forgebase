@@ -70,6 +70,7 @@ that you did. An owner-level decision ([AGENTS.md §10.4](../AGENTS.md#104-devia
 | 2026-10-28/29 | Operating model: the information session holds plans and results, and a working session executes with standing merge authorization. Deviations follow PDCA. *"conversation ini hanya untuk information, hasil plan dan hasil task ... untuk pengerjaan, merge, dll PR, pindahkan di session working, dan allow otomatis, dan otomasi merge ... jika tidak sesuai plan, selalu PDCA"* | [AGENTS.md §10](../AGENTS.md#10-operating-model) |
 | 2026-10-29 | Results-only reporting in the information session. Android push notifications for results. *"hanya hasil yang kamu update jgn ada informasi menunggu kerjaan"*; *"jangan muncul kan tidak ada hasil baru"* | this file, §1.8 |
 | 2026-10-30 | Record every owner decision and comment here, tidied up, so that other agents can share the owner's thinking. *"setiap putusan saya atau yang saya berikan informasi simpan ke memory ... agar nanti bisa share ke agent lain"* | this file |
+| 2026-10-30 | Keep at most the 10 newest GitHub Actions workflow runs: *"kamu bisa jika sudah selesai hapus github actions yg sudah selesai maksimal 10 github actions aktif"*. The information session prunes completed runs to the newest 10 after each merge (never queued or running runs, never a run still needed as CI evidence); the working session reports each merge and does not delete runs. | this file |
 
 ## 3. Decision log
 
