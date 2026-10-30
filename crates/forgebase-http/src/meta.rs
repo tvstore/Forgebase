@@ -51,7 +51,8 @@ fn naming(naming: &Naming) -> String {
     }
 }
 
-/// One field: name, label, type, flags and the type's parameters.
+/// One field: name, label, type, flags (`required`, `unique`, `allow_on_submit`, `read_only`) and
+/// the type's parameters.
 fn field(field: &DocField) -> Map<String, Json> {
     let mut map = Map::new();
     map.insert("name".to_owned(), json!(field.name));
@@ -60,6 +61,7 @@ fn field(field: &DocField) -> Map<String, Json> {
     map.insert("required".to_owned(), json!(field.required));
     map.insert("unique".to_owned(), json!(field.unique));
     map.insert("allow_on_submit".to_owned(), json!(field.allow_on_submit));
+    map.insert("read_only".to_owned(), json!(field.read_only));
     match &field.field_type {
         FieldType::Data { max_length } => {
             map.insert("max_length".to_owned(), json!(max_length));
@@ -158,6 +160,8 @@ pub async fn read(
             "app": state.registry().owner(&doctype.name),
             "naming": naming(&doctype.naming),
             "submittable": doctype.submittable,
+            "title_field": doctype.title_field,
+            "list_fields": doctype.list_fields,
             "fields": fields,
             "rights": rights(doctype, &caller),
         }),
@@ -211,7 +215,8 @@ required = true
         assert_eq!(
             amount,
             json!({"name": "amount", "label": "Amount", "type": "decimal", "required": false,
-                   "unique": false, "allow_on_submit": false, "precision": 12, "scale": 2})
+                   "unique": false, "allow_on_submit": false, "read_only": false,
+                   "precision": 12, "scale": 2})
         );
         let state = Json::Object(field(&invoice.fields[1]));
         assert_eq!(state["options"], json!(["open", "paid"]));

@@ -47,7 +47,7 @@ async fn the_meta_list_has_the_readable_doctypes_only_sorted_by_name() {
         (
             "root",
             &[
-                "bill", "dropbox", "holder", "item", "locked", "note", "secret", "vault",
+                "bill", "dropbox", "holder", "item", "ledger", "locked", "note", "secret", "vault",
             ],
         ),
         ("reader", &["holder", "item", "note"]),
@@ -152,20 +152,25 @@ async fn the_meta_of_one_doctype_describes_its_fields_and_child_tables() {
     assert_eq!(
         data["fields"],
         json!([
-            {"name": "title", "label": "title", "type": "data", "required": true,
-             "unique": false, "allow_on_submit": false, "max_length": 140},
-            {"name": "body", "label": "body", "type": "text", "required": false,
-             "unique": false, "allow_on_submit": false},
-            {"name": "points", "label": "points", "type": "int", "required": false,
-             "unique": false, "allow_on_submit": false},
-            {"name": "lines", "label": "lines", "type": "table", "required": false,
-             "unique": false, "allow_on_submit": false, "target": "note_line",
+            {"name": "title", "label": "Title", "type": "data", "required": true,
+             "unique": false, "allow_on_submit": false, "read_only": false, "max_length": 140},
+            {"name": "body", "label": "Body", "type": "text", "required": false,
+             "unique": false, "allow_on_submit": false, "read_only": false},
+            {"name": "points", "label": "Points", "type": "int", "required": false,
+             "unique": false, "allow_on_submit": false, "read_only": false},
+            {"name": "lines", "label": "Lines", "type": "table", "required": false,
+             "unique": false, "allow_on_submit": false, "read_only": false,
+             "target": "note_line",
              "fields": [
-                {"name": "text", "label": "text", "type": "data", "required": false,
-                 "unique": false, "allow_on_submit": false, "max_length": 140}
+                {"name": "text", "label": "Text", "type": "data", "required": false,
+                 "unique": false, "allow_on_submit": false, "read_only": false,
+                 "max_length": 140}
              ]}
         ])
     );
+    // No `title_field` and `list_fields` in the DocType: null.
+    assert_eq!(data["title_field"], Json::Null);
+    assert_eq!(data["list_fields"], Json::Null);
     // Metadata only: no rules, no roles, no documents.
     assert!(!reply.text.contains("permissions"));
     assert!(!reply.text.contains("Writer"));
@@ -431,4 +436,34 @@ async fn the_session_route_needs_a_valid_cookie_session() {
     assert_eq!(out.status, StatusCode::NO_CONTENT);
     let reply = env.send(refresh("/api/v1/session").cookie(&gone)).await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_meta_shows_read_only_fields_title_field_and_list_fields() {
+    let env = env_with_users().await;
+    let root = env.login("root").await;
+    let data = env
+        .send(get("/api/v1/meta/ledger").session(&root))
+        .await
+        .data();
+    assert_eq!(data["label"], "Ledger");
+    assert_eq!(data["title_field"], "title");
+    assert_eq!(data["list_fields"], json!(["title", "total"]));
+    let fields = data["fields"].as_array().expect("fields");
+    let read_only = |field: &Json| (field["name"].clone(), field["read_only"].clone());
+    assert_eq!(
+        fields.iter().map(read_only).collect::<Vec<_>>(),
+        [
+            (json!("title"), json!(false)),
+            (json!("total"), json!(true)),
+            (json!("lines"), json!(false)),
+        ]
+    );
+    // The inlined child fields carry the flag too, and a humanized label.
+    let child = fields[2]["fields"].as_array().expect("child fields");
+    assert_eq!(
+        child.iter().map(read_only).collect::<Vec<_>>(),
+        [(json!("qty"), json!(false)), (json!("amount"), json!(true))]
+    );
+    assert_eq!(child[1]["label"], "Amount");
 }

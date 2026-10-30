@@ -15,6 +15,29 @@ pub const DEFAULT_MAX_LENGTH: u32 = 140;
 pub const MAX_DATA_LENGTH: u32 = 65_535;
 /// Largest allowed Decimal precision (the range of `rust_decimal`).
 pub const MAX_DECIMAL_PRECISION: u8 = 28;
+/// Largest number of fields in a DocType's `list_fields`.
+pub const MAX_LIST_FIELDS: usize = 8;
+/// Field kinds a `title_field` may have: short values that read as a title. Not Text (long),
+/// Check (a flag, no name) or Table (no value).
+pub const TITLE_FIELD_KINDS: [&str; 7] = [
+    "data", "int", "decimal", "date", "datetime", "select", "link",
+];
+
+/// The default label of a name: split on `_`, capitalise the first letter of each part, join
+/// with a space. `order_date` gives `Order Date`.
+pub fn humanize(name: &str) -> String {
+    name.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// A document type: a named list of fields stored in one table.
 ///
@@ -25,7 +48,7 @@ pub const MAX_DECIMAL_PRECISION: u8 = 28;
 pub struct DocType {
     /// Identifier, see [`ident::validate_doctype_name`].
     pub name: String,
-    /// Human-readable name. Never derived from `name`.
+    /// Human-readable name. Without a `label` in the TOML file it is [`humanize`]d from `name`.
     pub label: String,
     /// How document names are generated.
     pub naming: Naming,
@@ -43,6 +66,14 @@ pub struct DocType {
     /// default). A child DocType has none: its rows follow the parent's rules. Decisions are made
     /// by [`evaluate`](crate::permission::evaluate), nowhere else.
     pub permissions: Vec<PermissionRule>,
+    /// The field that best names a document for a person (`title_field`, UX.1), or `None`.
+    /// A non-Table field of a kind in [`TITLE_FIELD_KINDS`]; not allowed on a child DocType.
+    /// Metadata for the desk only: the framework attaches no behaviour to it.
+    pub title_field: Option<String>,
+    /// The columns the desk list shows after `name` (`list_fields`, UX.1), or `None` for the
+    /// desk's own default. Existing fields, no Table or Text field, no duplicates, at most
+    /// [`MAX_LIST_FIELDS`]; not allowed on a child DocType. Metadata for the desk only.
+    pub list_fields: Option<Vec<String>>,
 }
 
 /// One field of a [`DocType`].
@@ -50,7 +81,7 @@ pub struct DocType {
 pub struct DocField {
     /// Identifier, see [`ident::validate_field_name`].
     pub name: String,
-    /// Human-readable name; defaults to `name` when loaded from TOML without a label.
+    /// Human-readable name; when loaded from TOML without a label, `name` [`humanize`]d.
     pub label: String,
     /// The type and its parameters.
     pub field_type: FieldType,
@@ -63,6 +94,10 @@ pub struct DocField {
     /// (not a Table field) of a submittable DocType; the rows of Table fields are always locked
     /// once the document is submitted.
     pub allow_on_submit: bool,
+    /// The field is written only by hooks (and by migrations), never by a caller: `forgebase-db`
+    /// refuses caller input for it (UX.1). Not allowed on a Table field, and not together with
+    /// `required` (a caller could never provide the value).
+    pub read_only: bool,
 }
 
 /// The closed set of field types. Link arrived in M2.1, Table in M2.2.
@@ -329,6 +364,71 @@ pub enum DefinitionError {
         field: String,
         /// Its actual type name.
         found: &'static str,
+    },
+    /// A Table field is `read_only` (its rows are not computed columns).
+    #[error("field `{field}`: a table field cannot be read_only")]
+    ReadOnlyTable {
+        /// The field.
+        field: String,
+    },
+    /// A field is both `read_only` and `required`: a caller could never provide the value.
+    #[error("field `{field}`: a read_only field cannot be required")]
+    ReadOnlyRequired {
+        /// The field.
+        field: String,
+    },
+    /// `title_field` or `list_fields` on a child DocType.
+    #[error("a child doctype cannot have `{key}`")]
+    ChildWithDeskKey {
+        /// `title_field` or `list_fields`.
+        key: &'static str,
+    },
+    /// `title_field` names a field the DocType does not have.
+    #[error("title_field `{field}` is not a field of the doctype")]
+    TitleFieldMissing {
+        /// The named field.
+        field: String,
+    },
+    /// `title_field` names a field of a kind that cannot be a title.
+    #[error(
+        "title_field `{field}` is a {found} field (allowed: data, int, decimal, date, datetime, select, link)"
+    )]
+    TitleFieldKind {
+        /// The named field.
+        field: String,
+        /// Its actual type name.
+        found: &'static str,
+    },
+    /// `list_fields` is an empty list.
+    #[error("list_fields must not be empty (leave it out for the default)")]
+    EmptyListFields,
+    /// `list_fields` has more than [`MAX_LIST_FIELDS`] entries.
+    #[error("list_fields has {count} fields, at most {max} are allowed")]
+    TooManyListFields {
+        /// Number of entries.
+        count: usize,
+        /// The limit.
+        max: usize,
+    },
+    /// `list_fields` names a field the DocType does not have.
+    #[error("list_fields `{field}` is not a field of the doctype")]
+    ListFieldMissing {
+        /// The named field.
+        field: String,
+    },
+    /// `list_fields` names a Table or Text field.
+    #[error("list_fields `{field}` is a {found} field (table and text fields cannot be listed)")]
+    ListFieldKind {
+        /// The named field.
+        field: String,
+        /// Its actual type name.
+        found: &'static str,
+    },
+    /// `list_fields` names a field twice.
+    #[error("list_fields names `{field}` more than once")]
+    DuplicateListField {
+        /// The repeated field.
+        field: String,
     },
     /// The naming field is not required.
     #[error("naming field `{field}` must be required")]
@@ -621,6 +721,22 @@ impl DocType {
                 });
             }
         }
+        for field in &self.fields {
+            if !field.read_only {
+                continue;
+            }
+            if matches!(field.field_type, FieldType::Table { .. }) {
+                errors.push(DefinitionError::ReadOnlyTable {
+                    field: field.name.clone(),
+                });
+            }
+            if field.required {
+                errors.push(DefinitionError::ReadOnlyRequired {
+                    field: field.name.clone(),
+                });
+            }
+        }
+        self.check_desk_keys(failed, &mut errors);
         self.check_permissions(&mut errors);
         if self.submittable {
             if self.is_child {
@@ -653,6 +769,75 @@ impl DocType {
             self.check_naming_field(name, &mut errors);
         }
         errors
+    }
+
+    /// `title_field` and `list_fields`. A name in `failed` is a field that could not be converted;
+    /// its real problem is already reported, so it is not reported again as missing.
+    fn check_desk_keys(&self, failed: &[String], errors: &mut Vec<DefinitionError>) {
+        if self.is_child {
+            if self.title_field.is_some() {
+                errors.push(DefinitionError::ChildWithDeskKey { key: "title_field" });
+            }
+            if self.list_fields.is_some() {
+                errors.push(DefinitionError::ChildWithDeskKey { key: "list_fields" });
+            }
+            return;
+        }
+        if let Some(name) = &self.title_field
+            && !failed.contains(name)
+        {
+            match self.field(name) {
+                None => errors.push(DefinitionError::TitleFieldMissing {
+                    field: name.clone(),
+                }),
+                Some(f) if !TITLE_FIELD_KINDS.contains(&f.field_type.name()) => {
+                    errors.push(DefinitionError::TitleFieldKind {
+                        field: name.clone(),
+                        found: f.field_type.name(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(list) = &self.list_fields {
+            if list.is_empty() {
+                errors.push(DefinitionError::EmptyListFields);
+            }
+            if list.len() > MAX_LIST_FIELDS {
+                errors.push(DefinitionError::TooManyListFields {
+                    count: list.len(),
+                    max: MAX_LIST_FIELDS,
+                });
+            }
+            let mut seen = BTreeSet::new();
+            for name in list {
+                if !seen.insert(name.as_str()) {
+                    errors.push(DefinitionError::DuplicateListField {
+                        field: name.clone(),
+                    });
+                } else if failed.contains(name) {
+                    continue;
+                } else {
+                    match self.field(name) {
+                        None => errors.push(DefinitionError::ListFieldMissing {
+                            field: name.clone(),
+                        }),
+                        Some(f)
+                            if matches!(
+                                f.field_type,
+                                FieldType::Table { .. } | FieldType::Text
+                            ) =>
+                        {
+                            errors.push(DefinitionError::ListFieldKind {
+                                field: name.clone(),
+                                found: f.field_type.name(),
+                            });
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
     }
 
     fn check_permissions(&self, errors: &mut Vec<DefinitionError>) {
@@ -1043,6 +1228,20 @@ impl fmt::Display for FieldType {
 mod tests {
     use super::*;
 
+    #[test]
+    fn humanize_splits_on_underscores_and_capitalises() {
+        for (name, label) in [
+            ("order_date", "Order Date"),
+            ("qty", "Qty"),
+            ("customer_group", "Customer Group"),
+            ("a_b_c", "A B C"),
+            ("item2_total", "Item2 Total"),
+            ("", ""),
+        ] {
+            assert_eq!(humanize(name), label, "{name}");
+        }
+    }
+
     fn field(name: &str, field_type: FieldType) -> DocField {
         DocField {
             name: name.into(),
@@ -1051,6 +1250,7 @@ mod tests {
             required: false,
             unique: false,
             allow_on_submit: false,
+            read_only: false,
         }
     }
 
@@ -1063,6 +1263,8 @@ mod tests {
             is_child: false,
             submittable: false,
             permissions: vec![],
+            title_field: None,
+            list_fields: None,
         }
     }
 

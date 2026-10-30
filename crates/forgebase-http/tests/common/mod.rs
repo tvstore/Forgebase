@@ -180,6 +180,45 @@ cancel = true
 amend = true
 "#;
 
+/// Read-only fields (a computed `total` and a computed line `amount`), a title and list fields.
+/// `Keeper` has every plain right.
+const LEDGER: &str = r#"
+name = "ledger"
+label = "Ledger"
+title_field = "title"
+list_fields = ["title", "total"]
+[[fields]]
+name = "title"
+type = "data"
+required = true
+[[fields]]
+name = "total"
+type = "int"
+read_only = true
+[[fields]]
+name = "lines"
+type = "table"
+target = "ledger_line"
+[[permissions]]
+role = "Keeper"
+read = true
+write = true
+create = true
+delete = true
+"#;
+
+const LEDGER_LINE: &str = r#"
+name = "ledger_line"
+is_child = true
+[[fields]]
+name = "qty"
+type = "int"
+[[fields]]
+name = "amount"
+type = "int"
+read_only = true
+"#;
+
 /// No rules at all: closed to everyone but Administrator.
 const SECRET: &str = r#"
 name = "secret"
@@ -205,7 +244,17 @@ create = true
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
     for text in [
-        ITEM, HOLDER, VAULT, LOCKED, NOTE, NOTE_LINE, BILL, SECRET, DROPBOX,
+        ITEM,
+        HOLDER,
+        VAULT,
+        LOCKED,
+        NOTE,
+        NOTE_LINE,
+        BILL,
+        LEDGER,
+        LEDGER_LINE,
+        SECRET,
+        DROPBOX,
     ] {
         registry
             .add(DocType::from_toml_str(text).expect("valid DocType"))

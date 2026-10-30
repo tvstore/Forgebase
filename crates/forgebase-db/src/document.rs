@@ -132,8 +132,14 @@ pub struct StoredDocument {
 /// **Atomicity.** Everything runs in `client.transaction()` (see the module documentation): the
 /// document and all its rows are written, or nothing is. That holds on a pooled connection too.
 ///
-/// **Pipeline.** In this order: the DocType must not be a child DocType; the registered
-/// `before_insert` hooks run on `doc` (in registration order, and they may modify it); the
+/// **Read-only fields.** A field marked `read_only` is written only by hooks: a non-null value
+/// for one in `doc`, or in a row of any table, is refused before any hook runs
+/// ([`ValidationError::ReadOnly`] in [`DbError::Validation`], wrapped in
+/// [`ValidationError::InRow`] for a row). An amendment copies the cancelled document, and the copy
+/// is not caller input, so it is not refused.
+///
+/// **Pipeline.** In this order: the DocType must not be a child DocType; the caller's input is
+/// checked for read-only fields; the registered `before_insert` hooks run on `doc` (in registration order, and they may modify it); the
 /// `validate` hooks run; the framework validates the result ([`forgebase_core::document::validate`]);
 /// Links are resolved; the name is chosen; the document and its rows are written. The hooks see
 /// the document **before** framework validation, so it may be invalid, but the validation runs
@@ -216,6 +222,10 @@ async fn insert_in(
     } else {
         Operation::Insert
     };
+    // An amendment copies the cancelled document: that is not caller input.
+    if amend.is_none() {
+        check_read_only(registry, doctype, (&doc.values, &doc.tables), None)?;
+    }
     let ctx = HookContext::new(&doctype.name, actor, operation).with_jobs(jobs);
     run_hooks(registry, doctype, "before_insert", |hooks| {
         hooks.before_insert(&ctx, &mut doc)
@@ -370,16 +380,21 @@ async fn get_in(
 ///    unknown or unreadable name is [`DbError::NotFound`], a document the caller may not write
 ///    is [`DbError::PermissionDenied`] and a `version` other than `expected_version` is
 ///    [`DbError::Conflict`], in this order and all before any hook runs;
-/// 2. the changes are merged into it: the stored values overlaid with `changes.values`, and the
-///    rows of a Table field from `changes.tables` when given, else the stored rows;
-/// 3. a change to the naming field is rejected;
-/// 4. the registered `validate` hooks run on the merged document (in registration order, and
+/// 2. the caller's `changes` are checked for `read_only` fields ([`ValidationError::ReadOnly`]):
+///    a top-level value that differs from the stored one is refused (sending the stored value
+///    back is allowed), and so is any row in `changes.tables` with a non-null value for a
+///    read_only field of the child DocType. A client that replaces a table must therefore leave
+///    the computed columns out of its rows. Hooks may still set read_only fields;
+/// 3. the changes are merged into it: the stored values overlaid with `changes.values`, and
+///    the rows of a Table field from `changes.tables` when given, else the stored rows;
+/// 4. a change to the naming field is rejected;
+/// 5. the registered `validate` hooks run on the merged document (in registration order, and
 ///    they may modify it; the naming field must stay as it is);
-/// 5. the framework validates the whole merged document
+/// 6. the framework validates the whole merged document
 ///    ([`forgebase_core::document::validate`]), so a stored value that is not valid any more (a
 ///    required field that is null in the row, for example) is reported too, and a hook cannot
 ///    leave an invalid document;
-/// 6. Links are resolved, then **every column field** of the merged document is written, and
+/// 7. Links are resolved, then **every column field** of the merged document is written, and
 ///    the rows of every Table field whose rows differ from the stored ones (given in `changes` or
 ///    modified by a hook) are replaced, so row ids change only for a table whose rows changed.
 ///    `version` is incremented in the same statement as the document row, which comes first.
@@ -472,6 +487,12 @@ async fn update_in(
         }
         status => status == Some(DocStatus::Submitted),
     };
+    check_read_only(
+        registry,
+        doctype,
+        (&changes.values, &changes.tables),
+        Some(&current),
+    )?;
     let mut doc = as_document(&current);
     doc.values.extend(changes.values.clone());
     doc.tables.extend(changes.tables.clone());
@@ -534,6 +555,57 @@ async fn update_in(
         None,
     )
     .await
+}
+
+/// Refuses caller input for `read_only` fields ([`ValidationError::ReadOnly`], wrapped in
+/// [`ValidationError::InRow`] for a row). Runs on what the caller supplied, before the hooks, so
+/// a hook may still set such a field.
+///
+/// A top-level value is refused when it is not null and, for an update (`stored` is the current
+/// document), differs from the stored value: sending the stored value back is allowed. A row of
+/// a table is refused when it has a non-null value for a read_only field of the child DocType,
+/// so a client that replaces a table leaves those columns out.
+fn check_read_only(
+    registry: &Registry,
+    doctype: &DocType,
+    (values, tables): (&BTreeMap<String, Value>, &BTreeMap<String, Vec<Row>>),
+    stored: Option<&StoredDocument>,
+) -> Result<(), DbError> {
+    let mut errors = Vec::new();
+    for field in doctype.column_fields().filter(|f| f.read_only) {
+        let Some(value) = values.get(&field.name).filter(|v| **v != Value::Null) else {
+            continue;
+        };
+        if stored.is_some_and(|s| s.values.get(&field.name) == Some(value)) {
+            continue;
+        }
+        errors.push(ValidationError::ReadOnly {
+            field: field.name.clone(),
+        });
+    }
+    for (table, target) in doctype.table_fields().map(|(f, t)| (&f.name, t)) {
+        let (Some(rows), Some(child)) = (tables.get(table), registry.get(target)) else {
+            continue;
+        };
+        for (i, row) in rows.iter().enumerate() {
+            for field in child.fields.iter().filter(|f| f.read_only) {
+                if row.get(&field.name).is_some_and(|v| *v != Value::Null) {
+                    errors.push(ValidationError::InRow {
+                        field: table.clone(),
+                        row: i + 1,
+                        error: Box::new(ValidationError::ReadOnly {
+                            field: field.name.clone(),
+                        }),
+                    });
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(DbError::Validation(errors))
+    }
 }
 
 /// The column values to write for `doc`: every column field (a value a hook removed is cleared),

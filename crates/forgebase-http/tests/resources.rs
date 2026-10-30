@@ -779,3 +779,70 @@ async fn a_child_doctype_is_not_a_resource_and_table_rows_round_trip() {
         .collect();
     assert_eq!(texts, [json!("a"), json!("b")]);
 }
+
+#[tokio::test]
+async fn a_caller_cannot_set_a_read_only_field_422_validation_failed() {
+    let env = Env::new().await;
+    env.user("keeper", &["Keeper"]).await;
+    let keeper = env.login("keeper").await;
+    let details = |reply: &common::Reply| -> Vec<String> {
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            reply.text
+        );
+        assert_eq!(reply.code(), "validation_failed");
+        reply.json()["error"]["details"]
+            .as_array()
+            .expect("details")
+            .iter()
+            .map(|d| d.as_str().expect("text").to_owned())
+            .collect()
+    };
+
+    // Insert: the top-level field and a row field are both named.
+    let reply = env
+        .send(
+            post("/api/v1/resource/ledger")
+                .session(&keeper)
+                .json(json!({"title": "t", "total": 5, "lines": [{"qty": 1, "amount": 2}]})),
+        )
+        .await;
+    assert_eq!(
+        details(&reply),
+        [
+            "field `total` is read-only",
+            "field `lines` row 1: field `amount` is read-only"
+        ]
+    );
+
+    // Without the computed values the insert works; null counts as "not given".
+    let reply = env
+        .send(
+            post("/api/v1/resource/ledger")
+                .session(&keeper)
+                .json(json!({"title": "t", "total": null, "lines": [{"qty": 1}]})),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text);
+    let name = reply.data()["name"].as_str().expect("name").to_owned();
+
+    // Update: a changed value is refused, the stored one (null) sent back is not.
+    let patch = |data: Json| {
+        req(Method::PATCH, &uri("ledger", &name))
+            .session(&keeper)
+            .json(json!({"version": 1, "data": data}))
+    };
+    let reply = env.send(patch(json!({"total": 9}))).await;
+    assert_eq!(details(&reply), ["field `total` is read-only"]);
+    let reply = env
+        .send(patch(json!({"lines": [{"qty": 1, "amount": 3}]})))
+        .await;
+    assert_eq!(
+        details(&reply),
+        ["field `lines` row 1: field `amount` is read-only"]
+    );
+    let reply = env.send(patch(json!({"title": "u", "total": null}))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+}

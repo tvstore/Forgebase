@@ -164,6 +164,13 @@ pub enum ValidationError {
         /// Allowed integer digits (`precision - scale`).
         max: u8,
     },
+    /// A caller supplied a value for a `read_only` field. Not produced by [`validate`] (a hook
+    /// may set such a field): `forgebase-db` reports it for the caller's input, before the hooks.
+    #[error("field `{field}` is read-only")]
+    ReadOnly {
+        /// The field.
+        field: String,
+    },
     /// A Link value names a document that does not exist. Not produced by [`validate`] (which
     /// does no I/O): `forgebase-db` reports it when it resolves the link.
     #[error("field `{field}`: {target} `{name}` does not exist")]
@@ -197,6 +204,7 @@ impl ValidationError {
             | ValidationError::TooLong { field, .. }
             | ValidationError::InvalidOption { field, .. }
             | ValidationError::ContainsNul { field }
+            | ValidationError::ReadOnly { field }
             | ValidationError::DecimalScale { field, .. }
             | ValidationError::DecimalPrecision { field, .. }
             | ValidationError::LinkNotFound { field, .. }
@@ -456,6 +464,7 @@ mod tests {
             required,
             unique: false,
             allow_on_submit: false,
+            read_only: false,
         }
     }
 
@@ -467,6 +476,8 @@ mod tests {
             is_child: false,
             submittable: false,
             permissions: vec![],
+            title_field: None,
+            list_fields: None,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, true),
                 f("notes", FieldType::Text, false),
@@ -850,6 +861,8 @@ mod tests {
             is_child: false,
             submittable: false,
             permissions: vec![],
+            title_field: None,
+            list_fields: None,
             fields: vec![
                 f("title", FieldType::Data { max_length: 5 }, false),
                 f(
@@ -868,6 +881,8 @@ mod tests {
             is_child: true,
             submittable: false,
             permissions: vec![],
+            title_field: None,
+            list_fields: None,
             fields: vec![
                 f("qty", FieldType::Int, true),
                 f("note", FieldType::Data { max_length: 3 }, false),
