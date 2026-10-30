@@ -26,7 +26,7 @@ export interface Sort {
   desc: boolean;
 }
 
-const isNumeric = (type: FieldType): boolean => type === 'int' || type === 'decimal';
+export const isNumeric = (type: FieldType): boolean => type === 'int' || type === 'decimal';
 
 /** Numbers are right-aligned in the list. */
 export const isNumericColumn = (column: Column): boolean => isNumeric(column.type);

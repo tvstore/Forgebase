@@ -4,6 +4,7 @@ import { FieldControl } from './FieldControl';
 import { errorKey, blankRow } from '../fields';
 import type { Errors, FormRow, FormValue } from '../fields';
 import { focusAfterRemove } from '../filters';
+import { isNumeric } from '../listing';
 import type { FieldMeta } from '../types';
 
 interface Props {
@@ -64,7 +65,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
               <tr>
                 <th scope="col">Row</th>
                 {columns.map((c) => (
-                  <th key={c.name} scope="col">
+                  <th key={c.name} scope="col" className={isNumeric(c.type) ? 'num' : undefined}>
                     {c.label}
                     {c.required && !readOnly && !c.read_only ? <span aria-hidden="true"> *</span> : null}
                   </th>
@@ -85,7 +86,7 @@ export function TableGrid({ field, rows, onChange, readOnly, errors, idBase }: P
                     const message = errors[key];
                     const cellId = `${idBase}-${row.key}-${c.name}`;
                     return (
-                      <td key={c.name}>
+                      <td key={c.name} className={isNumeric(c.type) ? 'num' : undefined}>
                         <FieldControl
                           id={cellId}
                           field={c}

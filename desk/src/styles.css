@@ -3,9 +3,9 @@
    yellow (it lives only inside the logo mark). System fonts, no external files (CSP). The tokens
    are in @theme below; the contrast ratios (WCAG AA) are in docs/blueprint/architecture.md, §11.
 
-   Structure: utilities come from Tailwind. The classes in @layer components exist only where a
-   long utility list repeated across the app would hurt readability (buttons, badges, cards,
-   table, shell); they are written with @apply and the theme tokens. */
+   Structure: the existing semantic class names are kept and defined in @layer components with
+   @apply and the theme tokens, so the TSX did not change and behaviour stays the same. New desk
+   work (M8) may use utility classes directly where that reads better. */
 
 @import 'tailwindcss';
 
@@ -93,7 +93,7 @@
 
   /* One focus ring everywhere: navy, offset 2 px; white on navy surfaces (the top bar). */
   :focus-visible {
-    @apply rounded-sm outline-2 outline-offset-2 outline-primary;
+    @apply outline-2 outline-offset-2 outline-primary;
   }
 
   button {
@@ -243,10 +243,6 @@
 
   .is-readonly input[type='checkbox'] {
     opacity: 1;
-  }
-
-  td input[readonly] {
-    padding-left: 0.25rem;
   }
 
   /* ---------- Alerts, badges ---------- */
@@ -766,6 +762,14 @@
 
   .grid-table td {
     @apply min-w-28 align-top;
+  }
+
+  .grid-table td.num input {
+    @apply text-right tabular-nums;
+  }
+
+  .grid-table td.num input[readonly] {
+    @apply pr-0;
   }
 
   .grid-table .remove-cell {
