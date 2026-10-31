@@ -40,7 +40,7 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0008](0008-model-selection-policy.md) | Model selection policy for the agent workflow | Accepted by owner |
 | [0009](0009-lifecycle-pipeline-and-hooks.md) | Lifecycle pipeline and hooks | Accepted |
 | [0010](0010-authentication-and-sessions.md) | Authentication and sessions | Accepted |
-| [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted |
+| [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted (extended by M9.3: the `export` and `import` rights) |
 | [0012](0012-app-model-and-public-api-boundary.md) | App model and public API boundary | Accepted |
 | [0013](0013-jobs-scheduler-and-transactional-outbox.md) | Jobs, scheduler and transactional outbox | Accepted |
 | [0014](0014-multi-site-database-per-site.md) | Multi-site: database per site | Accepted |
@@ -49,4 +49,5 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0017](0017-desk-styling-tailwind.md) | Desk styling: Tailwind CSS, theme tokens, no component kits | Accepted (supersedes UX-5; amended by the UX.4 section: Inter, copied icons, OFL-1.1 for fonts) |
 | [0018](0018-postgres-tls.md) | TLS to PostgreSQL | Accepted by owner |
 | [0019](0019-app-method-endpoints.md) | App method endpoints | Accepted (amended by M9.2: reads run in a savepoint) |
-| [0020](0020-outgoing-webhooks.md) | Outgoing webhooks | Accepted |
+| [0020](0020-outgoing-webhooks.md) | Outgoing webhooks | Accepted (amended by M9.3: 16-byte secrets, an unavailable snapshot, the Azure WireServer) |
+| [0021](0021-import-and-export.md) | Import and export | Accepted |

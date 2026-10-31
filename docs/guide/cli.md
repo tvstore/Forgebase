@@ -104,7 +104,7 @@ cargo run -p sales -- webhook remove orders
 ```
 
 - **`add NAME --doctype D --events E1,E2 --url URL`.** The name follows the rules of a DocType name (lower-case letters, digits, underscores). The DocType must exist on the site and must not be a child DocType. The events are `insert`, `update`, `delete`, `submit`, `cancel` and `transition`; a workflow transition that submits or cancels the document also fires `submit` or `cancel`, and an amendment fires `insert`. The URL must be `https://`, have a host and **no user info** (`user:password@` is refused: put a token in the path or, better, verify the signature). Like the `doc` commands it needs `--doctypes DIR` when the binary has no apps. Every error repeats nothing of the URL.
-- **`--secret-stdin`** (on `add` and `rotate-secret`) reads the secret from the first line of standard input instead of generating one (32 random bytes as hex). It is not printed back. The secret is **stored in plain text** in the site's database, because the signature needs it: anyone who can read the database or a backup of it can read it.
+- **`--secret-stdin`** (on `add` and `rotate-secret`) reads the secret from the first line of standard input instead of generating one (32 random bytes as hex). It must be **at least 16 bytes** (a shorter one is refused and nothing changes). It is not printed back. The secret is **stored in plain text** in the site's database, because the signature needs it: anyone who can read the database or a backup of it can read it.
 - **`--allow-private`** lets the URL resolve to a loopback, private, link-local or reserved address, **the cloud metadata address included**. Without it such a delivery is refused for good (the SSRF guard). Use it only for a receiver inside your own network, and know that it widens what the worker can reach.
 - **`--insecure-http`** allows `http://`, for development only: the payload and the signature travel unencrypted. `add` prints a warning and `list` shows the flag.
 - **`list`** prints the host of the URL (scheme, host and port) but never its path or query, which often hold a token, and never the secret.
@@ -113,6 +113,30 @@ cargo run -p sales -- webhook remove orders
 
 To see what happened to deliveries use the job commands: `forgebase job list --name forgebase.deliver_webhook` (a failing receiver shows `HTTP 500` or a connection error in `LAST_ERROR`, never the URL path), `job show ID` and `job retry ID` for a dead one (5 attempts, 30 s doubling up to 1 h).
 
+
+## Data commands: export and import (M9.3)
+
+`data export` writes the documents of a DocType to a CSV or JSON file, and `data import` reads such a file into documents ([ADR 0021](../adr/0021-import-and-export.md); the HTTP routes and the desk pages are in the [HTTP API](http-api.md#import-and-export-m93) and [desk](desk.md) guides). Like the `doc` commands they run as the trusted system context: no permission rules apply, and `--actor` names who is recorded as owner on import.
+
+```sh
+# Export the gold customers, newest first, as CSV to standard input of another tool or to a new file
+cargo run -p sales -- data export customer --format csv \
+  --filter '[{"field":"tier","op":"=","value":"gold"}]' --sort modified_at:desc \
+  --fields name,full_name,tier --out gold-customers.csv
+# wrote 12 row(s) to gold-customers.csv
+
+# Check a file without keeping anything, then import it
+cargo run -p sales -- data import customer new-customers.csv --format csv --dry-run
+cargo run -p sales -- data import customer new-customers.csv --format csv --actor jane
+# {"dry_run": false, "error_count": 0, "errors": [], "inserted": 250, "mode": "insert", "rows": 250, "updated": 0}
+```
+
+- **`export DOCTYPE [--format csv|json] [--filter JSON] [--sort FIELD[:desc]] [--fields a,b] [--out FILE] [--limit-override N]`.** `--filter` and `--sort` are those of `doc list`; there is no paging. The default format is CSV; the default output is standard output. `--out FILE` creates a **new** file (an existing one is an error) and a failed export removes its partial file. The export is read in one consistent snapshot and written page by page, so it needs little memory. More rows than the limit (100 000) are refused before anything is written, with the count; `--limit-override N` raises the limit for this run.
+- **The CSV file** is UTF-8 without a byte order mark, CRLF line ends, a header of the keys (`name` and the fields, or `--fields`), no child tables. Dates and datetimes are ISO 8601, decimals exact strings, booleans `true`/`false`, a link the target's name, null an empty cell. **Formula protection:** text that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a spreadsheet does not run it. Numbers are never changed (`-5` stays `-5`). Import does not strip the `'`: **to keep exact text, use JSON**. The JSON file is an array of documents with their child rows, the shape of `doc get`, and can be imported again.
+- **`import DOCTYPE FILE --format csv|json [--upsert] [--dry-run] [--actor NAME]`.** The whole file is **one transaction** and every row goes through the normal pipeline (hooks, validation, naming, webhooks); each row has its own savepoint, so all errors are found in one run. If any row has an error **nothing is imported**. The summary is printed as JSON (the same as the API's `data`) with the first 100 row errors, each with `row` (1-based among the data rows), `line` (CSV), `name`, `code`, `message` and `details`; the exit code is 1 when any row failed, also with `--dry-run`. At most 10 000 rows. A file that cannot be used at all (an unknown, duplicate or table column, a bad encoding) is refused before anything runs.
+- **CSV import.** The first row names the fields; a `name` column is allowed. Table fields cannot be CSV columns (use JSON). A cell is read by its field's type: a date `YYYY-MM-DD`, a datetime RFC 3339, an integer, a decimal, a boolean `true`, `false`, `1` or `0`, a link by the target's name. **An empty cell is "not given":** on insert the field keeps its default (or null); on an upsert of an existing document it is **set to null**. A UTF-8 byte order mark at the start is accepted. JSON import takes an array of objects as `doc insert --data` does; the standard keys an export adds (`id`, `owner`, `version`, ...) are ignored.
+- **`--upsert`** updates the document that a row's `name` names and inserts the rows whose name does not exist, when the DocType's naming allows a given name (a DocType named by a field takes the name that equals the field's value; random and series naming give their own names, so such a row is an error). A DocType named by a field cannot be renamed: the row's naming field must equal the name.
+- **Time.** The transaction is as long as the file: about 37 seconds for 10 000 rows of a simple DocType (measured with a debug build on a local PostgreSQL; the export of the same rows takes half a second). Run big imports when the site is quiet.
 
 ## Sites
 

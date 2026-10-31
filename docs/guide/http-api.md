@@ -81,3 +81,63 @@ curl -s -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
 
 Whatever the method did in the transaction is rolled back on every error.
 
+## Import and export (M9.3)
+
+Files in and out ([ADR 0021](../adr/0021-import-and-export.md)). Both are **rights of their own**, off for every role until a DocType's `[[permissions]]` grant them: **export** needs `read` and `export`, **import** needs `import` and `create` (and `write` for an upsert). An `if_owner` right limits an export to the caller's own documents.
+
+```sh
+# Export the gold customers as CSV: the filters and sort of the list, and a fields list. A GET: no CSRF header.
+curl -s -b jar.txt -G http://localhost:8000/api/v1/export/customer \
+  --data-urlencode 'format=csv' --data-urlencode 'fields=name,full_name,tier' \
+  --data-urlencode 'filters=[{"field":"tier","op":"=","value":"gold"}]' --data-urlencode 'sort=name' -o gold.csv
+
+# Everything as JSON, child rows included (a top-level array, the shape of GET /resource/{doctype}/{name})
+curl -s -b jar.txt 'http://localhost:8000/api/v1/export/sales_order?format=json' -o orders.json
+
+# Check a CSV file without keeping anything (dry_run=1), then import it. The body is the raw file.
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: text/csv' \
+  --data-binary @new-customers.csv 'http://localhost:8000/api/v1/import/customer?format=csv&dry_run=1'
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: text/csv' \
+  --data-binary @new-customers.csv 'http://localhost:8000/api/v1/import/customer?format=csv'
+# {"data": {"dry_run": false, "mode": "insert", "rows": 250, "inserted": 250, "updated": 0, "errors": [], "error_count": 0}}
+
+# A report as a file (a POST with the parameters, like a run)
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"params": {"from": "2026-10-01", "to": "2026-10-31"}}' \
+  'http://localhost:8000/api/v1/report/sales.sales_by_customer/export?format=csv' -o report.csv
+```
+
+**Export** `GET /api/v1/export/{doctype}`: `format` (`csv`, the default, or `json`), `filters` and `sort` (as for the list), `fields` (a comma separated list of fields and of the standard columns `name`, `owner`, `modified_by`, `created_at`, `modified_at`, `version`; a table field only for JSON); no `limit` or `offset`.
+
+| Status | When |
+|---|---|
+| 200 | a streamed file; `Content-Disposition: attachment; filename="<doctype>-<UTC time>.csv"`, `Cache-Control: no-store` and `X-Forgebase-Row-Count` |
+| 400 `invalid_query` | a bad format, filter, sort or field list, or a parameter that is not allowed (`limit`, a repeated one) |
+| 403 `permission_denied` | no `read` or no `export` right (the message names it) |
+| 404 | an unknown DocType (a child DocType too) |
+| 422 `export_too_large` | more rows than the limit (100 000): `details` has the `count` and the `limit`; narrow the filters. Nothing was sent. |
+
+- **One snapshot.** The export reads from one consistent snapshot of the database and writes page by page (1000 rows), so it needs little memory whatever its size.
+- **A failure halfway cannot change the status** (it is sent with the first bytes): the connection is closed and the body is incomplete. **Treat an incomplete body as a failure**: a JSON file whose array is not closed, or a CSV with fewer rows than `X-Forgebase-Row-Count`.
+- **CSV rules.** UTF-8 without a byte order mark, CRLF, a header of the keys; a cell is quoted when it has a comma, a quote, a line break or a space at either end, and a quote is doubled. Dates and datetimes are ISO 8601, decimals exact strings, booleans `true`/`false`, links the target's name, null empty, no child tables. **Text that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`** so a spreadsheet does not run it as a formula; numbers, dates and booleans are never changed. CSV import does not strip the `'`: to keep the exact text, export and import JSON.
+- **Report export** `POST /api/v1/report/{app}.{name}/export?format=csv|json` takes the body of a run and answers the same file formats (JSON is `{"columns", "rows", "truncated"}`); the report's own roles (404 otherwise), row limit and timeout; `X-Forgebase-Truncated: true` when the result was cut at the limit. It is not streamed: the result is already bounded.
+
+**Import** `POST /api/v1/import/{doctype}?format=csv|json&mode=insert|upsert&dry_run=1`. The body is the file, with `Content-Type: text/csv` or `application/json` (else 415). `format` is required, `mode` defaults to `insert`.
+
+| Status | When |
+|---|---|
+| 200 | `{"data": {"dry_run", "mode", "rows", "inserted", "updated", "errors": [...], "error_count"}}`. With `dry_run=1` this is also the answer when rows have errors: it lists them and nothing was kept. |
+| 400 `invalid_query` | a bad or missing `format`, `mode` or `dry_run`, or another parameter |
+| 403 `permission_denied` | no `import` right, no `create`, or (upsert) no `write` (checked before the body is read) |
+| 413 `payload_too_large` | the body is over 16 MiB (`import_body_limit_bytes`; other routes keep their 1 MiB) |
+| 415 | the `Content-Type` is not that of the format |
+| 422 `invalid_import` | the file cannot be used at all: not UTF-8, bad JSON, an unknown, duplicate or table column in a CSV (`details` lists them), a ragged CSV row |
+| 422 `import_too_large` | more than 10 000 rows (`details.limit`); nothing ran |
+| 422 `import_failed` | at least one row has an error: **nothing was imported**. `details` is the summary above, with `errors` (the first 100) and `error_count` (all). |
+
+- **All or nothing.** The file is one transaction and every row goes through the normal pipeline as the caller (hooks, validation, naming, permissions, webhooks), each in a savepoint, so one run finds every error. A row error is `{"row": 2, "line": 3, "name": "ann@example.com", "code": "validation_failed", "message": "validation failed", "details": ["field `full_name` is required"]}`: `row` counts the data rows from 1, `line` is the line of a CSV file, `code`, `message` and `details` are what the document API would answer for that row. Webhook deliveries and jobs of the rows exist only if the import commits.
+- **CSV**: the first row names the fields (a `name` column is allowed). A cell is read by the type of its field (a date `YYYY-MM-DD`, a datetime RFC 3339, an integer, a decimal, a boolean `true`/`false`/`1`/`0`, a link by name); a cell that cannot be read is an error of its row. **An empty cell is not given:** on insert the default (or null) applies, on an upsert of an existing document the field is **set to null**. A byte order mark is accepted. Table fields are not CSV columns: use JSON.
+- **JSON**: an array of objects as for `POST /resource/{doctype}` (child rows as arrays, an optional `name`). The standard keys an export has (`id`, `owner`, `created_at`, `modified_at`, `modified_by`, `version`, `docstatus`, `amended_from`, `workflow_state`) are ignored.
+- **`mode=upsert`** (needs `write`) updates the document a row's `name` names, sending only the fields the row gives (a given table replaces its rows), and inserts the others when the naming allows a given name. A DocType with random or series naming gives its own names, so a row for a name that does not exist is an error there; for such a DocType a JSON export imports again as an upsert of the same documents. A DocType named by a field takes the name that equals the field's value and cannot be renamed.
+- **It is a long transaction**: about 37 seconds for 10 000 rows (measured). Keep imports to the few roles that load data, and put a timeout and a request limit in the reverse proxy.
+
