@@ -208,6 +208,13 @@ jobs:
             esac
           done
           echo "FORGEBASE_PG_BIN=$bin" >> "$GITHUB_ENV"
+      # TLS to PostgreSQL (M9.0, ADR 0018): a second PostgreSQL 16 on port 5433 with ssl=on and a
+      # throwaway CA, started by the same script that runs locally. It appends
+      # FORGEBASE_TEST_TLS_URL, FORGEBASE_TEST_TLS_CA and FORGEBASE_TEST_TLS_WRONG_CA to
+      # GITHUB_ENV, so the TLS tests run in the `cargo test` below. They fail (never skip) when CI
+      # is true and these variables are missing. Docker and openssl are on the runner.
+      - name: PostgreSQL 16 with TLS
+        run: .github/ci/pg-tls.sh up "$RUNNER_TEMP/pg-tls"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
