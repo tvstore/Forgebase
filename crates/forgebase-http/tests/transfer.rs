@@ -1515,7 +1515,8 @@ async fn the_name_of_an_error_entry_is_shortened_too() {
     check(&reply);
     // A name that the database refuses (random naming) is shortened as well.
     let file = format!("name,title\r\n{junk},a\r\n");
-    check(&import(&env, &importer, "?format=csv", "text/csv", &file).await);
+    let reply = import(&env, &importer, "?format=csv", "text/csv", &file).await;
+    check(&reply);
     let entry = &reply.json()["error"]["details"]["errors"][0];
     assert!(entry["name"].as_str().unwrap().chars().count() <= 65);
 }
@@ -1583,7 +1584,6 @@ async fn workflow_state_is_ignored_on_import_for_a_doctype_with_a_workflow() {
 async fn request_body_input_is_not_echoed_in_full_outside_import_and_export() {
     let env = env().await;
     let root = env.login("root").await;
-    let junk = "\u{1}".repeat(150 * 1024);
     let key = "k".repeat(900 * 1024);
     let small = |reply: &Reply| assert!(reply.text.len() < 16_000, "{} bytes", reply.text.len());
     let reply = env
@@ -1625,5 +1625,66 @@ async fn request_body_input_is_not_echoed_in_full_outside_import_and_export() {
         )
         .await;
     small(&reply);
-    let _ = junk;
+}
+
+#[tokio::test]
+async fn every_error_response_is_small_whatever_the_request_echoed() {
+    let env = env().await;
+    let root = env.login("root").await;
+    let small = |what: &str, reply: &Reply| {
+        assert!(
+            reply.text.len() < 16_000,
+            "{what}: {} bytes",
+            reply.text.len()
+        );
+    };
+    // A JSON import of one row with about a million unknown keys, top level and in a child row.
+    let keys: String = (0..1_000_000).map(|i| format!("\"k{i}\":1,")).collect();
+    let body = format!(r#"[{{{keys}"title":"a"}}]"#);
+    let reply = import(&env, &root, "?format=json", "application/json", &body).await;
+    small("import, top level", &reply);
+    let body = format!(r#"[{{"title":"a","lines":[{{{keys}"what":"x"}}]}}]"#);
+    let reply = import(&env, &root, "?format=json", "application/json", &body).await;
+    small("import, child row", &reply);
+    // The same through POST /resource, within its body limit.
+    let keys: String = (0..60_000).map(|i| format!("\"k{i}\":1,")).collect();
+    let body = format!(r#"{{{keys}"title":"a"}}"#);
+    let reply = env
+        .send(
+            post("/api/v1/resource/parcel")
+                .session(&root)
+                .raw("application/json", body.as_bytes()),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    small("create, top level", &reply);
+    let body = format!(r#"{{"title":"a","lines":[{{{keys}"what":"x"}}]}}"#);
+    let reply = env
+        .send(
+            post("/api/v1/resource/parcel")
+                .session(&root)
+                .raw("application/json", body.as_bytes()),
+        )
+        .await;
+    small("create, child row", &reply);
+    // A transition with a huge action.
+    let name = env
+        .admin_insert(&root, "purchase", json!({"title": "p"}))
+        .await;
+    let action = "a".repeat(900 * 1024);
+    let reply = env
+        .send(
+            post(&format!("/api/v1/resource/purchase/{name}/transition"))
+                .session(&root)
+                .json(json!({"action": action, "version": 1})),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    small("transition", &reply);
+    // A huge name in the path.
+    let reply = env
+        .send(get(&format!("/api/v1/resource/parcel/{}", "n".repeat(60_000))).session(&root))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    small("path name", &reply);
 }

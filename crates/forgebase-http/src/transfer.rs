@@ -44,7 +44,7 @@ use forgebase_db::{
 };
 use serde_json::{Map, Value as Json, json};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, capped};
 use crate::json::{JsonError, document_to_json, from_value, input_from_json};
 
 /// The file format of an import or export.
@@ -363,18 +363,6 @@ pub enum FileError {
         /// The limit.
         limit: usize,
     },
-}
-
-/// Keeps at most [`MAX_REPORTED_ERRORS`] problems and ends the list with "and N more", so the
-/// number of problems does not grow with the file. Each problem is short too, because what it
-/// repeats of the input goes through `shorten` (about 64 characters).
-fn capped(mut problems: Vec<String>) -> Vec<String> {
-    if problems.len() > MAX_REPORTED_ERRORS {
-        let more = problems.len() - MAX_REPORTED_ERRORS;
-        problems.truncate(MAX_REPORTED_ERRORS);
-        problems.push(format!("and {more} more"));
-    }
-    problems
 }
 
 fn invalid(problem: impl Into<String>) -> FileError {

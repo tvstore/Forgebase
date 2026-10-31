@@ -28,6 +28,10 @@
 //! | `report_timeout` | 504 | a query report ran over its time limit (M8.4) |
 //! | `internal` | 500 | generic message; the real error goes to standard error |
 //!
+//! Every error body is bounded where it is built (`IntoResponse`): the message and each detail are cut to
+//! [`MAX_MESSAGE_CHARS`] characters and a list of details has at most 100 entries and an "and N more" entry,
+//! whatever the request echoed into it.
+//!
 //! Messages never contain passwords, tokens, secrets or the database URL. Database errors that
 //! are not the caller's fault are logged and replaced by a generic message.
 
@@ -38,9 +42,9 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use forgebase_db::DbError;
 use forgebase_db::auth::AuthError;
-use serde_json::json;
+use forgebase_db::{DbError, MAX_REPORTED_ERRORS};
+use serde_json::{Value, json};
 
 use crate::json::JsonError;
 
@@ -187,13 +191,57 @@ impl ApiError {
     }
 }
 
+/// The longest message or detail an error response carries, in characters.
+pub const MAX_MESSAGE_CHARS: usize = 512;
+
+/// `text` cut to [`MAX_MESSAGE_CHARS`] characters on a character boundary, with `…` if cut.
+fn cut(text: &str) -> String {
+    match text.char_indices().nth(MAX_MESSAGE_CHARS) {
+        None => text.to_owned(),
+        Some((end, _)) => format!("{}…", &text[..end]),
+    }
+}
+
+/// A list of problems bounded for a response: at most [`MAX_REPORTED_ERRORS`] entries and an
+/// "and N more" entry, each cut to [`MAX_MESSAGE_CHARS`].
+pub(crate) fn capped(mut problems: Vec<String>) -> Vec<String> {
+    if problems.len() > MAX_REPORTED_ERRORS {
+        let more = problems.len() - MAX_REPORTED_ERRORS;
+        problems.truncate(MAX_REPORTED_ERRORS);
+        problems.push(format!("and {more} more"));
+    }
+    problems.iter().map(|p| cut(p)).collect()
+}
+
+/// `details` as an object, bounded the same way: strings cut, arrays capped, recursively.
+fn bound(value: Value) -> Value {
+    match value {
+        Value::String(text) if text.len() > MAX_MESSAGE_CHARS => Value::String(cut(&text)),
+        Value::Array(mut items) => {
+            let more = items.len().saturating_sub(MAX_REPORTED_ERRORS);
+            items.truncate(MAX_REPORTED_ERRORS);
+            let mut items: Vec<Value> = items.into_iter().map(bound).collect();
+            if more > 0 {
+                items.push(Value::String(format!("and {more} more")));
+            }
+            Value::Array(items)
+        }
+        Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, bound(v))).collect()),
+        other => other,
+    }
+}
+
+/// The one place where an error becomes a response body, so **every** error response of the API
+/// is bounded whatever the request echoed into it: the message and each detail are cut to
+/// [`MAX_MESSAGE_CHARS`] characters and a list of details has at most [`MAX_REPORTED_ERRORS`]
+/// entries and an "and N more" line (arrays inside an object `details` too).
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut error = json!({"code": self.code, "message": self.message});
+        let mut error = json!({"code": self.code, "message": cut(&self.message)});
         if let Some(details) = self.details_json {
-            error["details"] = details;
+            error["details"] = bound(details);
         } else if !self.details.is_empty() {
-            error["details"] = json!(self.details);
+            error["details"] = json!(capped(self.details));
         }
         let mut response = (self.status, Json(json!({ "error": error }))).into_response();
         if let Some(seconds) = self.retry_after {
@@ -321,5 +369,79 @@ impl From<PathRejection> for ApiError {
 impl From<QueryRejection> for ApiError {
     fn from(_: QueryRejection) -> Self {
         Self::invalid_query("invalid query string")
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_message_is_cut_on_a_character_boundary() {
+        assert_eq!(cut("short"), "short");
+        let long = "é".repeat(5_000);
+        let cut = cut(&long);
+        assert_eq!(cut.chars().count(), MAX_MESSAGE_CHARS + 1);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn a_long_list_keeps_a_hundred_entries_and_counts_the_rest() {
+        let many: Vec<String> = (0..1_000_000)
+            .map(|i| format!("{i}{}", "x".repeat(2_000)))
+            .collect();
+        let capped = capped(many);
+        assert_eq!(capped.len(), MAX_REPORTED_ERRORS + 1);
+        assert_eq!(capped.last().unwrap(), "and 999900 more");
+        assert!(
+            capped
+                .iter()
+                .all(|c| c.chars().count() <= MAX_MESSAGE_CHARS + 1)
+        );
+        let few = capped_vec(&["a", "b"]);
+        assert_eq!(few, ["a", "b"]);
+    }
+
+    fn capped_vec(items: &[&str]) -> Vec<String> {
+        capped(items.iter().map(|s| (*s).to_owned()).collect())
+    }
+
+    #[test]
+    fn an_object_has_its_arrays_capped_and_its_strings_cut_recursively() {
+        let long = "y".repeat(10_000);
+        let value = json!({
+            "count": 5,
+            "name": long,
+            "errors": (0..300).map(|i| json!({"row": i, "details": vec![long.clone(); 300]})).collect::<Vec<_>>(),
+        });
+        let bounded = bound(value);
+        assert_eq!(bounded["count"], 5);
+        assert!(bounded["name"].as_str().unwrap().chars().count() <= MAX_MESSAGE_CHARS + 1);
+        let errors = bounded["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), MAX_REPORTED_ERRORS + 1);
+        assert_eq!(errors[100], "and 200 more");
+        let details = errors[0]["details"].as_array().unwrap();
+        assert_eq!(details.len(), MAX_REPORTED_ERRORS + 1);
+        assert!(bounded.to_string().len() < 100_000_000);
+    }
+
+    #[test]
+    fn a_response_body_is_small_whatever_the_error_holds() {
+        let mut error = ApiError::validation(vec!["z".repeat(1_000_000); 1000]);
+        error.message = "m".repeat(1_000_000);
+        let response = error.into_response();
+        let (_, body) = response.into_parts();
+        let bytes = futures_body(body);
+        assert!(bytes < 100_000, "{bytes} bytes");
+    }
+
+    fn futures_body(body: axum::body::Body) -> usize {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(axum::body::to_bytes(body, usize::MAX))
+            .unwrap()
+            .len()
     }
 }

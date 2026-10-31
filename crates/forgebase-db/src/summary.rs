@@ -237,9 +237,10 @@ fn build(doctype: &DocType, owner: Option<&str>, query: &SummaryQuery) -> Result
             Some(t) => t,
             None => {
                 return Err(invalid(format!(
-                    "unknown field {:?} for DocType `{}` in {name:?}",
+                    "unknown field {:?} for DocType `{}` in {:?}",
                     forgebase_core::shorten(field),
-                    doctype.name
+                    doctype.name,
+                    forgebase_core::shorten(&name)
                 )));
             }
         };

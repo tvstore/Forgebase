@@ -92,6 +92,8 @@ Excel files; CSV import of child tables (use JSON); a background import of huge 
 
 ## Consequences
 
+- **Every error response is bounded at one place.** `ApiError::into_response` cuts the `message` and each detail to 512 characters and keeps at most 100 entries plus "and N more" of any list of details, also inside an object `details` such as the summary of `import_failed`. What an import or a request echoes of its input (a million unknown keys, a megabyte-long cell) therefore cannot make an answer grow, whatever call site produced the message; the shortening at the call sites stays as a first line.
+
 - **A new dependency, `csv` 1.4.0** (Unlicense OR MIT), with `csv-core` 0.1.13 (Unlicense OR MIT); `itoa`, `ryu`, `memchr` and `serde_core` were already in the tree. Used for reading only. See the [dependency evaluation](../blueprint/dependency-evaluation.md#15-import-and-export-m93).
 - **`http-body-util` gets its `channel` feature** (it needs `tokio`, already a dependency): the body of a streamed export. No new crate.
 - **Breaking change of the defaults:** `Right::ALL` has two more entries and the metadata API's `rights` two more keys. Nothing is granted by it: **no role may export or import until an app grants it**. Migration note: grant `export = true` (with `read`) and `import = true` (with `create`) to the roles that should have them. `examples/sales` grants `export` on `customer` and `sales_order` to Sales User and Sales Manager and `import` on `customer` to Sales Manager.
