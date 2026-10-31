@@ -34,6 +34,16 @@ DOCTYPES="$E2E_DIR/doctypes"
 rm -rf "$DOCTYPES"
 mkdir -p "$DOCTYPES"
 cp examples/sales/doctypes/*.toml "$DOCTYPES/"
+# e2e only: the example sales order has an approval workflow (M8.5), which refuses the plain Submit and
+# Cancel that the smoke test uses on sales orders. Strip the [workflow] table and its [[workflow.states]] and
+# [[workflow.transitions]] tables, so the sales order stays a plain submittable DocType here; the workflow
+# is tested on the separate DocType purchase_request below. awk drops every line from a table header that
+# starts with [workflow or [[workflow. up to the next table header that does not.
+awk '
+  /^[[:space:]]*\[/ { skip = ($0 ~ /^[[:space:]]*\[\[?workflow[].]/) }
+  !skip
+' "$DOCTYPES/sales_order.toml" > "$DOCTYPES/sales_order.toml.tmp"
+mv "$DOCTYPES/sales_order.toml.tmp" "$DOCTYPES/sales_order.toml"
 cat >> "$DOCTYPES/sales_order.toml" <<'TOML'
 
 # e2e only: may work on orders but not submit them.

@@ -6,9 +6,16 @@
 
 use forgebase::serde_json::json;
 use forgebase::{
-    App, Date, Decimal, DocTypeHooks, Document, FilterOp, HookContext, HookError, JobContext,
-    JobError, JobFuture, JobHandler, ListQuery, Row, Schedule, Value,
+    App, Column, Date, Decimal, DocTypeHooks, Document, FilterOp, HookContext, HookError,
+    JobContext, JobError, JobFuture, JobHandler, ListQuery, Param, Report, Row, Schedule, Value,
 };
+
+/// The largest `total` a **Sales User** may approve: 10 000.00. Above it the `"Approve"` transition is
+/// vetoed and the order needs `"Approve as Manager"`, a transition only a Sales Manager may take.
+///
+/// A constant, because hooks have no database access (see also `sales_extension::MIN_ORDER_TOTAL`).
+/// It is 1 000 000 with scale 2; `from_parts` is the const constructor.
+pub const APPROVAL_LIMIT: Decimal = Decimal::from_parts(1_000_000, 0, 0, false, 2);
 
 /// The app. A plain function that returns data: nothing is registered anywhere else.
 pub fn app() -> App {
@@ -30,6 +37,21 @@ pub fn app() -> App {
         .job("daily_summary", DailySummary)
         // Every day at 02:00 UTC. Run `migrate` after changing a schedule: it stores them.
         .schedule("daily_summary", Schedule::daily_at(2, 0))
+        // A query report (ADR 0016): SQL compiled into the binary, run by the roles named here in a
+        // read-only transaction. Parameters and columns are positional, see the SQL file.
+        .report(
+            "sales_by_customer",
+            Report::sql(include_str!("../reports/sales_by_customer.sql"))
+                .label("Sales by customer")
+                .roles(&["Sales Manager"])
+                .param(Param::date("from").required())
+                .param(Param::date("to").required())
+                .param(Param::link("customer", "customer"))
+                .column(Column::link("customer", "customer"))
+                .column(Column::int("orders"))
+                .column(Column::decimal("total"))
+                .column(Column::date("last_order")),
+        )
         // Data migrations (SQL, append-only): see the comments in the file.
         .migrations(forgebase::migrations![(
             1,
@@ -89,6 +111,34 @@ impl DocTypeHooks for OrderRules {
             }
         }
         enqueue_log(ctx, doc, "submitted")
+    }
+
+    /// The approval limit (see the `[workflow]` of `sales_order.toml`): `"Approve"` is refused for
+    /// an order whose `total` is above [`APPROVAL_LIMIT`].
+    ///
+    /// **Why two actions and not a role check.** Hooks see the actor's name and the transition,
+    /// never the actor's roles (ADR 0009, by design: a rule that depends on roles belongs in the
+    /// permission rules). So the role is part of the *action*: `"Approve"` (Sales User and Sales
+    /// Manager) is limited here, `"Approve as Manager"` (Sales Manager only, checked by the
+    /// framework) has no limit and no hook rule. The veto message names the way out.
+    ///
+    /// `doc` is the stored order, so `total` is the value `validate` computed when it entered
+    /// Pending Approval (that draft-to-draft transition runs `validate`).
+    /// `edit_roles` on `Pending Approval` keeps a Sales User from lowering it afterwards.
+    fn before_transition(
+        &self,
+        ctx: &HookContext<'_>,
+        doc: &mut Document,
+    ) -> Result<(), HookError> {
+        let is_approve = ctx.transition.is_some_and(|t| t.action == "Approve");
+        if let (true, Some(Value::Decimal(total))) = (is_approve, doc.values.get("total"))
+            && *total > APPROVAL_LIMIT
+        {
+            return Err(HookError::new(format!(
+                "orders above {APPROVAL_LIMIT} need a Sales Manager: use 'Approve as Manager'"
+            )));
+        }
+        Ok(())
     }
 
     /// Asks for the job that logs the cancel.
