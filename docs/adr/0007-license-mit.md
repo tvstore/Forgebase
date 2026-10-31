@@ -2,6 +2,7 @@
 
 - Status: Accepted by owner
 - Date: 2026-10-28
+- Note (2026-10-31): the repository was transferred to `tvstore/Forgebase` and made public by the owner ([owner decisions](../owner-decisions.md)); since then Forgebase is open source under MIT. The decision below is unchanged; its wording about the private repository describes the time it was taken.
 
 ## Context
 

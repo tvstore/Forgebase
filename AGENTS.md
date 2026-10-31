@@ -31,7 +31,7 @@ Permanent owner constraints:
 - Start as a modular monolith. Do not build dynamic libraries, a WASM plugin runtime or a complex extension system unless an approved requirement needs it.
 - The intended feature scope in the docs is a direction for exploration, not permission to implement everything at once.
 - Verify dependency licenses and their compatibility, and document the license decision.
-- Do not claim the project is open source while the repository is private; say it is intended to be open source under MIT.
+- The project is open source under the MIT licence (the repository is public since 2026-10-31).
 
 ## 3. Mandatory four-stage workflow
 

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The repository moved to `tvstore/Forgebase` and is public** (owner decision of 2026-10-31, *"repo sudah saya ganti public"*; [owner decisions](docs/owner-decisions.md#repository-public-2026-10-31-information-session)). Repository URLs in `Cargo.toml`, the new-app templates, the README and the docs point to the new location, and the licence wording says the project is open source under the MIT licence (AGENTS.md section 2, README, vision). The project pause of 2026-10-30 is cancelled. No code behaviour changes.
 - **CI cost** (owner decision of 2026-10-30, "setuju C-1 sampai C-5"; [maintenance policy](docs/blueprint/maintenance-policy.md#ci)). CI runs on non-draft pull requests, weekly and on demand, no longer on push to main or daily. A `changes` job classifies the changed paths (`.github/ci/classify-paths.py`, with a unit test) so that documentation-only, desk-only and Rust-only changes run only the jobs they need; a new `docs` job checks relative links and anchors offline (`.github/ci/linkcheck.py`). The Cargo registry, git db and `target/` (and the cargo-deny binary and the npm cache) are cached with `actions/cache` (GitHub-owned, pinned by SHA), `CARGO_INCREMENTAL=0` is set, and the `msrv` and `deny` jobs are one job, `msrv-deny`. [AGENTS.md section 10.2](AGENTS.md#102-roles-in-the-working-session) gains the draft-pull-request process.
 
 ### Added
