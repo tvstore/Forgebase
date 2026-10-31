@@ -84,6 +84,8 @@ export FORGEBASE_TEST_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432
 
 CI runs the same tests against a `postgres:16` service container.
 
+**Webhook tests (M9.2, [ADR 0020](docs/adr/0020-outgoing-webhooks.md)).** `crates/forgebase/tests/webhooks.rs` starts receivers on `127.0.0.1` and, for the `https://` cases, makes a throwaway CA with the `openssl` command-line tool (nothing else to set up; the tests fail loudly if `openssl` is missing). They use `forgebase::testing::webhook_test_settings` to trust that CA and to shorten the delivery time limit.
+
 **TLS tests (M9.0, [ADR 0018](docs/adr/0018-postgres-tls.md)).** `crates/forgebase-db/tests/tls.rs` and `crates/forgebase/tests/backup_tls.rs` need a second PostgreSQL 16 with TLS. `.github/ci/pg-tls.sh` makes one: it needs `openssl` and Docker, generates a throwaway CA, a server certificate (names `localhost` and `127.0.0.1`) and a second, unrelated CA into a directory you give, and starts the container `forgebase-pg-tls` on `127.0.0.1:5433`. It prints the variables the tests read (`FORGEBASE_TEST_TLS_URL`, `FORGEBASE_TEST_TLS_CA`, `FORGEBASE_TEST_TLS_WRONG_CA`); CI appends them to `GITHUB_ENV` in the `check` job, so the TLS tests run in the same `cargo test`. Locally:
 
 ```sh
