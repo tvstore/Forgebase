@@ -84,6 +84,17 @@ export FORGEBASE_TEST_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432
 
 CI runs the same tests against a `postgres:16` service container.
 
+**TLS tests (M9.0, [ADR 0018](docs/adr/0018-postgres-tls.md)).** `crates/forgebase-db/tests/tls.rs` and `crates/forgebase/tests/backup_tls.rs` need a second PostgreSQL 16 with TLS. `.github/ci/pg-tls.sh` makes one: it needs `openssl` and Docker, generates a throwaway CA, a server certificate (names `localhost` and `127.0.0.1`) and a second, unrelated CA into a directory you give, and starts the container `forgebase-pg-tls` on `127.0.0.1:5433`. It prints the variables the tests read (`FORGEBASE_TEST_TLS_URL`, `FORGEBASE_TEST_TLS_CA`, `FORGEBASE_TEST_TLS_WRONG_CA`); CI appends them to `GITHUB_ENV` in the `check` job, so the TLS tests run in the same `cargo test`. Locally:
+
+```sh
+.github/ci/pg-tls.sh up /tmp/forgebase-tls > /tmp/forgebase-tls.env
+export $(cat /tmp/forgebase-tls.env)       # the three variables
+cargo test --workspace --all-features --locked
+.github/ci/pg-tls.sh down                  # removes the container; delete /tmp/forgebase-tls too (it holds throwaway keys)
+```
+
+Without these variables the TLS tests print `SKIPPED` and pass, except when `CI=true`: then they fail. If Docker Hub rate-limits the pull, pull another mirror of the image and `docker tag` it as `postgres:16-bookworm` (the script's default; `PG_TLS_IMAGE` overrides it).
+
 ## The app template
 
 `forgebase new-app` writes the files of `crates/forgebase/templates/app/`. They are not compiled with the workspace, so only the CI job `app-template` (and your own run) proves that the generated crate builds, passes its tests and runs. Run what the job runs after changing the template or anything an app uses (needs the network for crates.io, a few minutes and the PostgreSQL of the section above):

@@ -9,7 +9,7 @@ cargo run -p forgebase -- --version
 
 ## Quick start
 
-Needs a PostgreSQL 16 server and an empty database. Connections are not encrypted yet (no TLS), so use a local or private network.
+Needs a PostgreSQL 16 server and an empty database. Connections are not encrypted unless the URL says `sslmode=require` ([TLS to PostgreSQL](operations.md#tls-to-postgresql)), so on a network that is not private add it.
 
 The quick start runs the binary of the example app [`examples/sales`](../../examples/sales/README.md), so its DocTypes, hooks and data migration are built in and there is no `--doctypes` option. (The stock `forgebase` binary has no apps: it takes the DocTypes of a directory with `--doctypes DIR`, see [Apps](#apps).) Every command here was run against a fresh database.
 

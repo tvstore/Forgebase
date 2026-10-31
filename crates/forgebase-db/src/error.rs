@@ -27,6 +27,10 @@ pub enum DbError {
     /// `create_database` cannot use the URL it was given. Never contains the URL.
     #[error("{0}")]
     CreateDatabase(String),
+    /// The TLS settings of the database URL (`sslmode`, `sslrootcert`, ADR 0018) cannot be used,
+    /// or the roots cannot be loaded. Never contains the URL or the password.
+    #[error("{0}")]
+    Tls(String),
     /// `pg_environment` or `inspect_database` cannot use the URL or the server's answer. Never
     /// contains the URL or a value of it.
     #[error("{0}")]

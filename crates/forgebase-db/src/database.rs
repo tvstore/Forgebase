@@ -1,6 +1,5 @@
 //! Creating a database and reading which apps it records (M7.2, ADR 0014).
 
-use tokio_postgres::NoTls;
 use tokio_postgres::error::SqlState;
 
 use crate::{Client, DbError, quote_ident};
@@ -16,6 +15,8 @@ const MAX_NAME_BYTES: usize = 63;
 /// and password. Returns `true` when it created the database and `false` when it already
 /// existed (nothing is changed then).
 ///
+/// The connection uses the TLS settings of the URL ([`connect`](crate::connect)).
+///
 /// `CREATE DATABASE` cannot run in a transaction, so this uses one plain connection of its own,
 /// closed before it returns. The name must be 1 to 63 ASCII letters, digits, `_` or `-`, and is
 /// quoted with [`quote_ident`]. The role needs the `CREATEDB` privilege.
@@ -25,8 +26,10 @@ pub async fn create_database(
     database_url: &str,
     maintenance_db: Option<&str>,
 ) -> Result<bool, DbError> {
-    let config: tokio_postgres::Config = database_url.parse().map_err(|_| {
-        DbError::CreateDatabase("the database URL is not a valid PostgreSQL URL".to_owned())
+    let (config, tls) = crate::tls::prepare(database_url).map_err(|e| {
+        e.into_db_error(|| {
+            DbError::CreateDatabase("the database URL is not a valid PostgreSQL URL".to_owned())
+        })
     })?;
     let name = config.get_dbname().ok_or_else(|| {
         DbError::CreateDatabase("the database URL does not name a database".to_owned())
@@ -38,7 +41,7 @@ pub async fn create_database(
     }
     let mut maintenance = config.clone();
     maintenance.dbname(maintenance_db.unwrap_or(DEFAULT_MAINTENANCE_DB));
-    let (client, connection) = maintenance.connect(NoTls).await?;
+    let (client, connection) = maintenance.connect(tls).await?;
     let connection = tokio::spawn(connection);
     let created = client
         .batch_execute(&format!("CREATE DATABASE {}", quote_ident(name)))

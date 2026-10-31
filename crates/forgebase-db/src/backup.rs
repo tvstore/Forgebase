@@ -5,18 +5,23 @@
 //! The tools are started by the `forgebase` crate. Nothing here puts a URL, a password or any
 //! other secret into a message: an error names an option, never its value.
 
+use tokio_postgres::Config;
 use tokio_postgres::config::{
-    ChannelBinding, Host, LoadBalanceHosts, SslMode, SslNegotiation, TargetSessionAttrs,
+    ChannelBinding, Host, LoadBalanceHosts, SslNegotiation, TargetSessionAttrs,
 };
-use tokio_postgres::{Config, NoTls};
 
 use crate::database::name_problem;
 use crate::{DbError, SimpleQueryMessage};
 
 /// The `PG*` variables that give `pg_dump` or `pg_restore` the connection of `database_url`:
-/// `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` and, unless it is the default
-/// (`prefer`), `PGSSLMODE`. A part the URL does not have is left out. This keeps the URL and the
+/// `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE` and, with TLS,
+/// `PGSSLROOTCERT`. A part the URL does not have is left out. This keeps the URL and the
 /// password off the command line, where `ps` shows them.
+///
+/// TLS follows ADR 0018: no `sslmode` or `disable` gives `PGSSLMODE=disable`; `require`,
+/// `verify-ca` and `verify-full` give `PGSSLMODE=verify-full` (the verification this crate's own
+/// connections do) and `PGSSLROOTCERT` is the `sslrootcert` path, or `system` (PostgreSQL 16 or
+/// later); `prefer` and other values are errors.
 ///
 /// A URL option that these variables cannot express (more than one host, `options`,
 /// `application_name`, `connect_timeout`, the keepalive and target-session settings, ...) is an
@@ -24,7 +29,12 @@ use crate::{DbError, SimpleQueryMessage};
 /// rule of `create_database`), which also means it can never be read as a connection string.
 /// No error contains a value of the URL.
 pub fn pg_environment(database_url: &str) -> Result<Vec<(&'static str, String)>, DbError> {
-    let config: Config = database_url.parse().map_err(|_| {
+    let (rest, ssl) = crate::tls::parse(database_url).map_err(|e| {
+        e.into_db_error(|| {
+            DbError::Backup("the database URL is not a valid PostgreSQL URL".to_owned())
+        })
+    })?;
+    let config: Config = rest.parse().map_err(|_| {
         DbError::Backup("the database URL is not a valid PostgreSQL URL".to_owned())
     })?;
     if let Some(option) = unsupported_option(&config) {
@@ -62,24 +72,12 @@ pub fn pg_environment(database_url: &str) -> Result<Vec<(&'static str, String)>,
         )));
     }
     env.push(("PGDATABASE", name.to_owned()));
-    match config.get_ssl_mode() {
-        SslMode::Prefer => {}
-        SslMode::Disable => env.push(("PGSSLMODE", "disable".to_owned())),
-        SslMode::Require => env.push(("PGSSLMODE", "require".to_owned())),
-        // `SslMode` is non-exhaustive: a mode added later is an error until it is mapped here.
-        _ => {
-            return Err(DbError::Backup(
-                "the database URL uses a `sslmode` that cannot be passed to pg_dump or \
-                 pg_restore through the PG* environment variables; remove it from the URL"
-                    .to_owned(),
-            ));
-        }
-    }
+    env.extend(crate::tls::pg_ssl_environment(&ssl));
     Ok(env)
 }
 
 /// The name of the first URL option that is not one of host, port, user, password, database and
-/// `sslmode`, if the URL sets one (it differs from the default of an empty configuration).
+/// the TLS parameters (`sslmode`, `sslrootcert`; they are handled apart), if the URL sets one (it differs from the default of an empty configuration).
 fn unsupported_option(config: &Config) -> Option<&'static str> {
     let default = Config::new();
     let checks: [(&'static str, bool); 15] = [
@@ -176,13 +174,15 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_class c JOIN user_schemas s ON s.oid = c.rel
    AND NOT EXISTS (SELECT 1 FROM pg_type t JOIN user_schemas s ON s.oid = t.typnamespace
                    WHERE t.typtype IN ('d', 'e', 'r', 'm'))";
 
-/// Connects to the database of `database_url` once (no pool, no TLS) and reads its
+/// Connects to the database of `database_url` once (no pool; TLS as the URL says) and reads its
 /// [`DatabaseInfo`]. The error is the server's or the connection's, never the URL.
 pub async fn inspect_database(database_url: &str) -> Result<DatabaseInfo, DbError> {
-    let config: Config = database_url.parse().map_err(|_| {
-        DbError::Backup("the database URL is not a valid PostgreSQL URL".to_owned())
+    let (config, tls) = crate::tls::prepare(database_url).map_err(|e| {
+        e.into_db_error(|| {
+            DbError::Backup("the database URL is not a valid PostgreSQL URL".to_owned())
+        })
     })?;
-    let (client, connection) = config.connect(NoTls).await?;
+    let (client, connection) = config.connect(tls).await?;
     let connection = tokio::spawn(connection);
     let info = async {
         let version = single_value(&client, "SHOW server_version_num").await?;
@@ -231,9 +231,10 @@ mod tests {
                 ("PGUSER", "ann".to_owned()),
                 ("PGPASSWORD", "s3cret pw".to_owned()),
                 ("PGDATABASE", "shop_1".to_owned()),
+                ("PGSSLMODE", "disable".to_owned()),
             ]
         );
-        // Parts the URL lacks are left out; sslmode is passed unless it is the default.
+        // Parts the URL lacks are left out; TLS is off unless the URL asks for it (ADR 0018).
         assert_eq!(
             env_of("postgres:///shop?sslmode=disable"),
             [
@@ -241,15 +242,65 @@ mod tests {
                 ("PGSSLMODE", "disable".to_owned())
             ]
         );
+        assert!(env_of("postgres://h/shop").contains(&("PGSSLMODE", "disable".to_owned())));
+        // `require` and the stricter modes verify the host name, so pg_dump gets `verify-full`.
+        for mode in ["require", "verify-ca", "verify-full"] {
+            let env = env_of(&format!("postgres://h/shop?sslmode={mode}"));
+            assert!(
+                env.contains(&("PGSSLMODE", "verify-full".to_owned())),
+                "{mode}"
+            );
+            assert!(
+                env.contains(&("PGSSLROOTCERT", "system".to_owned())),
+                "{mode}"
+            );
+        }
+        let env = env_of("postgres://h/shop?sslmode=require&sslrootcert=/etc/ca%20x.pem");
+        assert!(env.contains(&("PGSSLROOTCERT", "/etc/ca x.pem".to_owned())));
+        // `prefer` is refused, with a message that names neither the URL nor the password.
+        let message = pg_environment("postgres://u:pw@h/shop?sslmode=prefer")
+            .expect_err("prefer")
+            .to_string();
+        assert!(message.contains("`sslmode=prefer` is not supported") && !message.contains("pw"));
+    }
+
+    #[test]
+    fn tls_is_found_behind_an_encoded_question_mark_and_an_encoded_key() {
+        for url in [
+            "postgres://u:a%3Fb@h/shop?sslmode=require",
+            "postgres://u:x%3Fsslmode=disable@h/shop?sslmode=require",
+            "postgres://u@h/shop?%73slmode=require",
+        ] {
+            let env = env_of(url);
+            assert!(
+                env.contains(&("PGSSLMODE", "verify-full".to_owned())),
+                "{url}"
+            );
+        }
+        let env = env_of("postgres://u:a%3Fb%2Fc%23d@h/shop?sslmode=require");
+        assert!(env.contains(&("PGPASSWORD", "a?b/c#d".to_owned())));
+        let message = pg_environment("postgres://u:pw@h/shop?%73slcert=x")
+            .expect_err("sslcert")
+            .to_string();
         assert!(
-            env_of("postgres://h/shop?sslmode=prefer")
-                .iter()
-                .all(|(name, _)| *name != "PGSSLMODE")
+            message.contains("`sslcert`") && !message.contains("pw"),
+            "{message}"
         );
-        assert!(
-            env_of("postgres://h/shop?sslmode=require")
-                .contains(&("PGSSLMODE", "require".to_owned()))
-        );
+    }
+
+    #[test]
+    fn raw_special_characters_before_the_first_at_are_refused_for_the_backup_tools_too() {
+        for url in [
+            "postgres://db.example.com/app?sslmode=verify-full&application_name=svc@db.example.com",
+            "postgres://db.example.com?sslmode=verify-full&application_name=svc@db.example.com",
+            "postgres://u:pw?x@h/shop?sslmode=require",
+            "postgres://u:pw/x@h/shop?sslmode=require",
+            "postgres://u:pw#x@h/shop?sslmode=require",
+        ] {
+            let message = pg_environment(url).expect_err(url).to_string();
+            assert!(message.contains("before its first `@`"), "{url}: {message}");
+            assert!(!message.contains("pw"), "{message}");
+        }
     }
 
     #[test]

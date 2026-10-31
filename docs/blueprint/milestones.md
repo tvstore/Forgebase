@@ -171,10 +171,14 @@ UX.4 (the desk polish, owner decision U1) runs between M8.1 and M8.2, so that th
 - **Status:** delivered by this pull request (owner decision of 2026-10-31, *"setuju R1, D1, D2"*; see [owner decisions](../owner-decisions.md#docs-front-page-and-deploy-2026-10-31-setuju-r1-d1-d2-information-session)). It runs between M8 and M9 and touches nothing under `crates/`.
 - **Scope:** the README as the documentation front page with the walkthroughs moved to `docs/guide/`; a `Dockerfile`, `deploy/` (compose and Caddy), the [deploy guide](../guide/deploy.md); single-container mode (`deploy/entrypoint.sh all`); the CI job `docker`.
 - **Exit criteria:** the image builds; a `docker run` smoke test (the login page, a login and `/api/v1/meta`, a graceful stop); the link check passes; independent review PASS.
-- **Non-goals:** Render + Neon (needs TLS to PostgreSQL, pending an owner decision); a registry push; Kubernetes.
+- **Non-goals:** Render + Neon (needs TLS to PostgreSQL: it came with M9.0, see below); a registry push; Kubernetes.
 
 ## M9 Integration
 
+- **M9.0 TLS to PostgreSQL** (a step before M9.1): **delivered by this pull request** (owner decision of 2026-10-31, *"setuju ci-result dan setuju M9.0"*; see [owner decisions](../owner-decisions.md#postgres-tls-and-ci-result-2026-10-31-setuju-ci-result-dan-setuju-m90-information-session) and [ADR 0018](../adr/0018-postgres-tls.md)).
+  - **Scope:** `sslmode` and `sslrootcert` in the database URL for every connection and for `site backup` and `site restore`; the one new dependency `tokio-postgres-rustls` with rustls and `ring`; tests against a PostgreSQL 16 with TLS and a throwaway CA, in CI and locally; the Render + Neon path in the [deploy guide](../guide/deploy.md#3-render--neon-free-path); the CI job `ci-result` (see [the maintenance policy](maintenance-policy.md#ci)). No new bootstrap feature: the first Administrator is created with `user create` against the Neon URL.
+  - **Exit criteria:** `require` with the right CA connects and a wrong CA fails; `prefer` is refused; migrate, the pool, `site create`, `site backup` and `site restore` work over TLS; `cargo tree -i aws-lc-rs`, `openssl-sys` and `webpki-roots` are empty; `cargo deny` and the MSRV check pass; independent review PASS.
+  - **Numbering:** M9.0 takes ADR 0018, so the M9 ADRs shift by one: the methods ADR (M9.1) is 0019 and the webhooks ADR (M9.2) is 0020. The planned references to 0018 and 0019 in older text are to be read that way.
 - **Scope:** `/api/v1/method` for registered endpoints, webhooks through the outbox, import/export, fixtures. Capability 6.
 - **Exit criteria:** (to be set in the M9 plan) including authorization tests for every method endpoint.
 - **Non-goals:** GraphQL, RPC by dotted path.

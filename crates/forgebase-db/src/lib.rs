@@ -3,10 +3,11 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1 and M8.3):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1, M8.3 and M9.0):
 //!
-//! - [`connect`]: a connection pool. TLS to PostgreSQL is **not supported yet** (planned:
-//!   rustls); until then run over a local or private network.
+//! - [`connect`]: a connection pool. TLS to PostgreSQL follows the `sslmode` of the URL (M9.0,
+//!   ADR 0018): none by default, `sslmode=require` for TLS with full verification (rustls with
+//!   `ring`), `sslrootcert` for a private CA.
 //! - [`migrate_framework`]: Forgebase's own tables (`fb_migration`, `fb_doctype`, `fb_series`, the
 //!   naming series counters, from migration 0002, and the auth tables of migration 0003).
 //! - [`sync`]: additive DocType schema sync with dry-run, conflict refusal and `lock_timeout`;
@@ -73,6 +74,7 @@ mod reports;
 pub mod schedule;
 mod summary;
 mod sync;
+mod tls;
 mod value;
 mod views;
 mod workflow;
@@ -108,12 +110,14 @@ pub use workflow::{
 
 use deadpool_postgres::Runtime;
 use forgebase_core::meta::Registry;
-use tokio_postgres::NoTls;
 
 /// Creates a connection pool for `database_url` (`postgres://user:password@host:port/database`)
 /// and checks that a connection can be made.
 ///
-/// TLS is not supported yet: connections are made without encryption. There is no connect
+/// TLS follows the `sslmode` of the URL (ADR 0018): none without `sslmode` or with `disable`;
+/// `require`, `verify-ca` and `verify-full` all give TLS that verifies the certificate chain and
+/// the host name, against the operating system's trust store or only the PEM file
+/// `sslrootcert=<path>`; `prefer` and every other value is an error. There is no connect
 /// timeout by default; add `connect_timeout=<seconds>` to the URL to bound it.
 pub async fn connect(database_url: &str) -> Result<Pool, DbError> {
     connect_sized(database_url, None).await
@@ -123,12 +127,19 @@ pub async fn connect(database_url: &str) -> Result<Pool, DbError> {
 /// default of the pool, four per CPU). A job worker needs one connection for each job it runs at
 /// the same time, so it sets the size from its concurrency.
 pub async fn connect_sized(database_url: &str, max_size: Option<usize>) -> Result<Pool, DbError> {
-    let mut config = deadpool_postgres::Config::new();
-    config.url = Some(database_url.to_owned());
+    let (config, tls) = tls::prepare(database_url)?;
+    let manager = deadpool_postgres::Manager::from_config(
+        config,
+        tls,
+        deadpool_postgres::ManagerConfig::default(),
+    );
+    let mut builder = Pool::builder(manager).runtime(Runtime::Tokio1);
     if let Some(max_size) = max_size {
-        config.pool = Some(deadpool_postgres::PoolConfig::new(max_size));
+        builder = builder.config(deadpool_postgres::PoolConfig::new(max_size));
     }
-    let pool = config.create_pool(Some(Runtime::Tokio1), NoTls)?;
+    let pool = builder
+        .build()
+        .map_err(deadpool_postgres::CreatePoolError::Build)?;
     drop(pool.get().await?);
     Ok(pool)
 }
