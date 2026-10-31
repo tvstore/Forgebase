@@ -6,6 +6,8 @@ The examples use a binary called `myapp` (your apps compiled together, see [the 
 
 ## What you deploy
 
+To run all of this on one VM with Docker, HTTPS and backups, follow the [deploy guide](deploy.md).
+
 - **One binary** with its apps. There is no plugin loading: to change the apps you build and deploy a new binary.
 - **The built desk**, a directory (`desk/dist` after `npm run build`), if you want the web interface. `serve` reads it from `FORGEBASE_DESK_DIR`.
 - **PostgreSQL 16 or newer**, one database per site.

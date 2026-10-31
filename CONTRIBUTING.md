@@ -66,6 +66,10 @@ cd desk && SCREENSHOTS=1 SCREENSHOT_DIR=/tmp/desk-shots npx playwright test scre
 
 If you already have a Chromium, skip the install and set `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chromium`. The test can be run again on the same database (it creates new orders each time). Stop the server and drop the scratch database afterwards.
 
+## Docker files
+
+The `Dockerfile`, `.dockerignore` and `deploy/` (compose, Caddyfile, `entrypoint.sh`) are described in the [deploy guide](docs/guide/deploy.md); CI builds the image only when they change (`docker build .`). Run `bash deploy/test-entrypoint.sh` to test the entrypoint locally (a fake binary, no Docker needed).
+
 ## PostgreSQL for tests
 
 The `forgebase-db`, `forgebase-http` and `forgebase` integration tests need a PostgreSQL 16 server and a superuser (or `CREATEDB`) URL in `FORGEBASE_TEST_DATABASE_URL`. They fail with a clear message when it is not set; they never skip. Each test creates its own `fb_test_*` database and drops it at the end. The `forgebase` tests run the built `forgebase` binary (`tests/cli.rs`) and a test binary with apps (`tests/app_binary.rs`) against such a database (they set `FORGEBASE_DATABASE_URL` for it themselves). `--all-features` turns on the `testing` feature of the `forgebase` crate (the helpers for the tests of apps, [ADR 0012](docs/adr/0012-app-model-and-public-api-boundary.md)); the crate's own tests enable it themselves, so a plain `cargo test` runs them too.

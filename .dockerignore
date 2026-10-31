@@ -1,0 +1,15 @@
+# Keep the build context small and the build reproducible. The image needs the Rust workspace
+# (crates/, examples/, Cargo.*, rust-toolchain.toml), desk/ and deploy/entrypoint.sh only.
+.git
+.github
+target
+**/target
+desk/node_modules
+desk/dist
+desk/test-results
+desk/playwright-report
+docs
+**/.env
+**/*.dump
+**/*.partial
+.claude

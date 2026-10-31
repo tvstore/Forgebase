@@ -36,7 +36,7 @@ cargo run -p sales -- job list                # id, name, status, attempts, run_
 cargo run -p sales -- doc list sales_order_log
 ```
 
-The commands (`doc`, `user`, `token`, ...) are those of the stock binary; see [the quick start](../../README.md#quick-start) for what to do with them. `FORGEBASE_DEV_INSECURE_COOKIES=1` is for plain-HTTP development only.
+The commands (`doc`, `user`, `token`, ...) are those of the stock binary; see [the quick start](../../docs/guide/getting-started.md#quick-start) for what to do with them. `FORGEBASE_DEV_INSECURE_COOKIES=1` is for plain-HTTP development only.
 
 ## Test it
 

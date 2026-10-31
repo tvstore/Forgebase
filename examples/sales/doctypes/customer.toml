@@ -1,4 +1,4 @@
-# A DocType of the `sales` example app (examples/sales). Used by the README quick start.
+# A DocType of the `sales` example app (examples/sales). Used by the quick start of the getting-started guide.
 # Format: docs/blueprint/architecture.md section 3 ("DocType file format").
 # Labels are the humanized field names ("Full Name", "Loyalty Points", ...) unless a field sets `label`.
 name = "customer"

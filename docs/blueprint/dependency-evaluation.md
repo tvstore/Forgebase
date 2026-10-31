@@ -410,6 +410,18 @@ From `cargo metadata` on stacks A and B (all targets), `Verified (local measurem
 
 Proposed `deny.toml` allow-list is in [maintenance-policy](maintenance-policy.md#cargo-deny).
 
+## Container images
+
+The Dockerfile and `deploy/compose.yaml` use base images. They are runtime and build images, not crate or npm dependencies, and they ship nothing into the Forgebase binary. Each is pinned by its multi-arch (amd64 and arm64) index digest and updated like the toolchain ([maintenance policy](maintenance-policy.md#container-images)). Licences are those of the images' contents; the images themselves are not redistributed by this repository.
+
+| Image | Use | Licence (of the software; verify per release) |
+|---|---|---|
+| `debian:bookworm-slim` | not used in the final image; listed because `postgres` and `rust` are Debian based | various free-software licences (Debian main) |
+| `rust:1.99.1-slim-bookworm` | build stage, the toolchain of `rust-toolchain.toml` | MIT OR Apache-2.0 (Rust), Debian licences |
+| `node:22-bookworm-slim` | build stage of the desk | MIT (Node.js) with bundled components under their own permissive licences |
+| `postgres:16-bookworm` | runtime base (the PostgreSQL 16 client tools `pg_dump` and `pg_restore`) and the database in `deploy/compose.yaml` | PostgreSQL Licence (permissive), Debian licences |
+| `caddy:2-alpine` | HTTPS reverse proxy in `deploy/compose.yaml` | Apache-2.0 (Caddy), Alpine licences |
+
 ## TLS note
 
 - **HTTP:** terminate TLS at a reverse proxy; the app then needs no TLS crate.

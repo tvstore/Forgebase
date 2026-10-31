@@ -6,6 +6,7 @@ Reads one changed path per line on stdin and prints `key=value` lines for $GITHU
   rust=true|false       a Rust job reads one of the paths (anything unknown counts as Rust)
   desk=true|false       a path under desk/ other than a Markdown file, or a DESK_ALSO path
   e2e=true|false        rust or desk
+  docker=true|false     Dockerfile, .dockerignore or deploy/ (all of deploy/ counts, Markdown included)
   docs_only=true|false  at least one path, and every path is documentation
   all=true|false        .github/ changed, or the event is schedule or workflow_dispatch
 
@@ -23,6 +24,7 @@ ALWAYS_ALL_EVENTS = {"schedule", "workflow_dispatch"}
 # include_str!, so a README there is code.
 RUST_PREFIXES = ("crates/", "examples/", ".cargo/")
 RUST_FILES = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml"}
+DOCKER_FILES = {"Dockerfile", ".dockerignore"}
 DOC_FILES = {"AGENTS.md", "CHANGELOG.md", "LICENSE"}
 # Files outside desk/ that the desk reads (desk/src/icons.test.ts imports the first one). They
 # stay Rust and also run the desk job. Add a path here when a desk file imports from outside desk/.
@@ -30,12 +32,16 @@ DESK_ALSO = {"crates/forgebase-core/src/doctype_icons.txt"}
 
 
 def classify_path(path):
-    """Return "all", "rust", "desk" or "docs" for one changed path."""
+    """Return "all", "rust", "docker", "desk" or "docs" for one changed path."""
     path = path.strip()
     if path.startswith("./"):
         path = path[2:]
     if path.startswith(".github/"):
         return "all"
+    # The image build copies the whole workspace, but only these paths make it run: the weekly run
+    # (schedule) covers the rest. deploy/ is not Rust: nothing under it is compiled.
+    if path in DOCKER_FILES or path.startswith("deploy/"):
+        return "docker"
     if path in RUST_FILES or path.startswith(RUST_PREFIXES):
         return "rust"
     if path.startswith("desk/"):
@@ -49,7 +55,7 @@ def classify_path(path):
 def classify(paths, event=""):
     """Return the outputs as a dict of bools."""
     if event in ALWAYS_ALL_EVENTS:
-        return {"rust": True, "desk": True, "e2e": True, "docs_only": False, "all": True}
+        return {"rust": True, "desk": True, "e2e": True, "docker": True, "docs_only": False, "all": True}
     kinds = [classify_path(p) for p in paths if p.strip()]
     rust = "rust" in kinds
     desk = "desk" in kinds or any(p.strip().removeprefix("./") in DESK_ALSO for p in paths)
@@ -57,6 +63,7 @@ def classify(paths, event=""):
         "rust": rust,
         "desk": desk,
         "e2e": rust or desk,
+        "docker": "docker" in kinds,
         "docs_only": bool(kinds) and all(k == "docs" for k in kinds),
         "all": "all" in kinds,
     }

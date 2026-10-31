@@ -14,6 +14,7 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 | UX | UX: Desk UX refresh |
 | M7 | Site management |
 | M8 | Workflow and reports (Done) |
+| R1/D1/D2 | Docs front page and Docker deploy (between M8 and M9) |
 | UX.4 | UX: Desk polish (runs between M8.1 and M8.2) |
 | UX.5 | UX: Corporate refinement, "soft neutral" (after M8.3, before M8.4) |
 | M9 | Integration |
@@ -164,6 +165,13 @@ UX.4 (the desk polish, owner decision U1) runs between M8.1 and M8.2, so that th
   - *Process:* CI green and an independent Opus review PASS per pull request are the conditions of [AGENTS.md section 10.3](../../AGENTS.md#103-standing-merge-authorization) and are recorded on #32, #34, #35, #37 and [#38](https://github.com/tvstore/Forgebase/pull/38).
   - *Docs:* [architecture, section 11](architecture.md#11-desk-reports-workflow) (workflow and reports Accepted and delivered), [ADR 0015](../adr/0015-workflow-states-and-transitions.md) and [ADR 0016](../adr/0016-query-reports-read-only-execution.md), the [security model](security-model.md), the [feature matrix](feature-matrix.md), the README, the [guide](../guide/workflow-and-reports.md), the [CHANGELOG](../../CHANGELOG.md) and this file.
 - **Non-goals:** script reports, Server Scripts.
+
+## R1/D1/D2 Docs front page and Docker deploy
+
+- **Status:** delivered by this pull request (owner decision of 2026-10-31, *"setuju R1, D1, D2"*; see [owner decisions](../owner-decisions.md#docs-front-page-and-deploy-2026-10-31-setuju-r1-d1-d2-information-session)). It runs between M8 and M9 and touches nothing under `crates/`.
+- **Scope:** the README as the documentation front page with the walkthroughs moved to `docs/guide/`; a `Dockerfile`, `deploy/` (compose and Caddy), the [deploy guide](../guide/deploy.md); single-container mode (`deploy/entrypoint.sh all`); the CI job `docker`.
+- **Exit criteria:** the image builds; a `docker run` smoke test (the login page, a login and `/api/v1/meta`, a graceful stop); the link check passes; independent review PASS.
+- **Non-goals:** Render + Neon (needs TLS to PostgreSQL, pending an owner decision); a registry push; Kubernetes.
 
 ## M9 Integration
 

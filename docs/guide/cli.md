@@ -1,0 +1,125 @@
+# The command-line tool
+
+Walkthrough of the `forgebase` commands (or the binary of your app) for users and tokens, background jobs and sites. The document commands (`doc`) are in [Getting started](getting-started.md#quick-start). Run `forgebase --help` for every option.
+
+## Users and tokens
+
+Passwords are read from the first line of **standard input**, never from an argument or an environment variable. API tokens are printed once as `key:secret`; only a digest is stored, so the secret cannot be shown again. Reading a password from stdin does not hide it: on a terminal it is echoed as you type, so use `read -s` (see below) or a pipe. These commands have no authentication of their own: whoever can run `forgebase` with the database URL can create users and tokens.
+
+```sh
+# Create a user with two roles (usernames: 1-140 ASCII letters, digits and _ . @ -; passwords: 8-1024 bytes)
+printf '%s\n' 'a long password' | cargo run -p sales -- user create ann --role Sales --role Accounts
+# Without echo on a terminal: read -s -r PW && printf '%s\n' "$PW" | cargo run -p sales -- user create ann
+cargo run -p sales -- user add-role ann Admin
+cargo run -p sales -- user remove-role ann Admin
+printf '%s\n' 'another password' | cargo run -p sales -- user set-password ann   # also ends all sessions
+cargo run -p sales -- user disable ann    # sessions and tokens stop working; `user enable` undoes it
+
+# An API token for a machine client: prints key:secret once
+cargo run -p sales -- token create ann
+cargo run -p sales -- token revoke <key>
+```
+
+Five consecutive failed logins for a username (each within 15 minutes of the previous one) lock it for 15 minutes; see [ADR 0010](../adr/0010-authentication-and-sessions.md) and the [security model](../blueprint/security-model.md).
+
+
+## Background jobs
+
+An app registers a job with `App::job`; a hook, another job or the command line enqueues it, and `forgebase worker` runs it. A job runs in **one database transaction together with its completion**; a failure is retried (5 attempts, 30 s doubling up to 1 h, 5 min timeout) and then the job is `dead`. Delivery is at-least-once, so effects outside the database must be safe to repeat. A hook's `ctx.enqueue(..)` is written in the same transaction as the document change (the transactional outbox), so the job exists if and only if the change is committed. Never put a secret in a payload: it is stored in clear text. Design: [ADR 0013](../adr/0013-jobs-scheduler-and-transactional-outbox.md).
+
+```rust
+use forgebase::{App, JobContext, JobFuture, JobHandler};
+
+struct Welcome;
+
+impl JobHandler for Welcome {
+    fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+        Box::pin(async move {
+            let name = ctx.payload()["customer"].as_str().unwrap_or_default().to_owned();
+            // The system context, as `job:crm.welcome`, inside this job's transaction.
+            let _customer = ctx.documents().get("customer", &name).await?;
+            Ok(())
+        })
+    }
+}
+
+pub fn app() -> App {
+    App::new("crm").job("welcome", Welcome) // the job is `crm.welcome`
+}
+// in a hook: ctx.enqueue("crm.welcome", forgebase::serde_json::json!({"customer": doc_name}))?;
+```
+
+```sh
+forgebase migrate                                   # creates the job table (migration 0005)
+forgebase worker --concurrency 4                    # runs jobs until Ctrl-C or SIGTERM
+forgebase job enqueue crm.welcome --payload '{"customer":"c-1"}'   # or --payload - for stdin
+forgebase job list --status dead                    # id, name, status, attempts, run_at, last error
+forgebase job show <id>                             # every field as JSON, the payload included
+forgebase job retry <id>                            # a dead job goes back to the queue
+```
+
+The first signal stops the worker from claiming and lets running jobs finish for 30 seconds (then they are given back, without counting an attempt); a second signal exits at once, and another worker recovers what was running when its lease expires. In an app's tests, `forgebase::testing::run_jobs(&binary, &db)` runs the jobs that are due. Two complete examples: `cargo run -p sales -- worker` runs the log and daily-summary jobs of [`examples/sales`](../../examples/sales/README.md) (and `cargo run -p sales_extension -- worker` those of both example apps), after `migrate`.
+
+### Scheduled jobs
+
+An app runs one of its own jobs on a schedule: every N minutes, every day at a time, or every week on a day at a time. **All times are UTC**; there is no cron and there are no time zones.
+
+```rust
+use forgebase::{App, Schedule, Weekday};
+
+App::new("crm")
+    .job("send_digest", SendDigest)
+    .schedule("send_digest", Schedule::daily_at(6, 30))
+    .job("weekly_report", WeeklyReport)
+    .schedule("weekly_report", Schedule::weekly_on(Weekday::Monday, 7, 0))
+```
+
+`Schedule::every_minutes(n)` (1 to 1440) ticks at the times where the minutes since the Unix epoch are divisible by `n`: every 15 gives :00, :15, :30 and :45. Run `forgebase migrate` after you add, change or remove a schedule (it stores the schedules the binary declares and **deletes the others**), and keep `forgebase worker` running: it enqueues each tick once, however many workers run, with the payload `{"scheduled_for": "<the tick, RFC 3339 UTC>"}` (use it for idempotency). Ticks missed while no worker ran are not caught up: one job runs, then the next future time. In tests, `forgebase::testing::run_schedules_at(&binary, &db, at)` enqueues what is due at `at`, and `run_jobs` runs it.
+
+The framework schedules its own clean-up in every binary (app name `forgebase`, reserved): finished jobs, done or dead, 7 days after they finished (daily at 03:00 UTC), stale login-failure rows and expired sessions (every 60 minutes). They need a running worker.
+
+## Sites
+
+One deployment can serve several **sites**, each with its own database (ADR 0014). A single-site setup needs nothing new: without a config file there is one site, `default`, from `FORGEBASE_DATABASE_URL`. For several sites, write a `forgebase.toml` (no secrets: the database URLs come from environment variables) and pass it with `--config forgebase.toml` or `FORGEBASE_CONFIG=forgebase.toml` (it is never searched for in the current directory):
+
+```toml
+[[sites]]
+name = "acme"
+hosts = ["acme.example.com", "acme.localhost"]   # chosen by the Host header, no port
+database_url_env = "ACME_DATABASE_URL"
+pool_size = 8                                    # optional
+apps = ["sales", "sales_extension"]              # optional: the apps installed on this site
+
+[[sites]]
+name = "beta"
+hosts = ["beta.example.com"]
+database_url_env = "BETA_DATABASE_URL"
+```
+
+```bash
+export ACME_DATABASE_URL=postgres://user:password@localhost:5432/acme
+export BETA_DATABASE_URL=postgres://user:password@localhost:5432/beta
+forgebase --config forgebase.toml site list                                           # sites, hosts, apps; never the URL
+forgebase --config forgebase.toml site create acme                                    # CREATE DATABASE, then migrate
+forgebase --config forgebase.toml migrate --site acme --doctypes examples/sales/doctypes
+forgebase --config forgebase.toml user create root --role Administrator --site acme   # password on stdin
+forgebase --config forgebase.toml serve --doctypes examples/sales/doctypes            # serves all sites by Host
+forgebase --config forgebase.toml worker --site acme --doctypes examples/sales/doctypes
+```
+
+`--site NAME` is required on every database command except `serve` when the file has several sites, and optional with one site. `serve` without `--site` serves all sites, one pool each; with `--site` only that site. A well-formed `Host` that no site owns is `404`, a malformed one `400`; `X-Forwarded-Host` is ignored, so the reverse proxy must pass the original `Host`. **There is one worker process per site** (`forgebase worker --site NAME`; the scheduler runs in it), and `migrate` migrates one site at a time. Running a deployment (reverse proxy, workers, upgrades, roles) is in the [operations guide](operations.md).
+
+**Apps per site.** `apps` lists the apps of the binary that are installed on a site; absent means all of them. The list must be closed under `depends_on` (a site that lists `sales_extension` must list `sales`: dependencies are never added for you), may be empty (only auth, users and the built-in jobs) and names only apps the binary has; every mistake is reported at once, naming the site. A site's registry has only its apps' DocTypes, hooks, jobs and schedules, so `migrate`, `doc`, `job enqueue`, the meta API, the resources and the worker of a site all see the same subset: a DocType of an app that is not installed is unknown (`404` over HTTP). The `--doctypes DIR` app `local` is in every site and depends on that site's apps. **Removing an app from a site's list keeps its tables and data** (there is no uninstall): `migrate` warns once per such app, its schedules are deleted, and its queued jobs stay queued (the worker does not claim names it does not know) until the app is installed again. **The kept rows of a removed app still hold their links:** a document of an installed app that they link to cannot be deleted (the error says it is linked from another document, without naming the DocType, which the site no longer knows) until the app is installed again and its rows are removed or changed.
+
+**`site list` and `site create`.** `forgebase site list` prints each site's name, hosts, apps and the **name** of its database variable (never the URL) and needs no database. `forgebase site create NAME` runs `CREATE DATABASE` for the database named in the site's URL, connecting to the maintenance database `postgres` of the same server (`--maintenance-db NAME` to use another), and then migrates it like `migrate --site NAME`. The role in the URL needs the `CREATEDB` privilege. It refuses, with exit 1, a database that exists already (run `migrate --site NAME` instead: an existing database is never migrated implicitly). If the migrate fails after the create, the database is kept: fix the cause and run `migrate --site NAME`. With an existing database and a role without `CREATEDB`, `site create` reports "permission denied" (PostgreSQL checks the privilege first). `site create NAME --empty` creates the database and does not migrate it (for a restore); it uses no apps.
+
+**Backup and restore.** They use the PostgreSQL client tools `pg_dump` and `pg_restore` (not bundled; the server's major version, on `PATH` or in `FORGEBASE_PG_BIN`). The connection reaches them through `PG*` environment variables, never on the command line.
+
+```bash
+forgebase --config forgebase.toml site backup acme --out acme.dump          # never overwrites; mode 0600
+forgebase --config forgebase.toml site create acme2 --empty                 # acme2: another site of the file; a new, empty database
+forgebase --config forgebase.toml site restore acme2 --from acme.dump       # only into an empty database; one transaction
+forgebase --config forgebase.toml migrate --site acme2 --doctypes examples/sales/doctypes   # if the binary is newer than the backup
+```
+
+A backup holds everything in the database, **password hashes, sessions and API token digests included**: protect the file. A restore refuses a database that is not empty (and `site create` without `--empty` migrates, so its database is not empty); it never migrates by itself. Details, scheduling and retention: [operations guide](operations.md#backups).

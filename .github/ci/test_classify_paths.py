@@ -18,8 +18,9 @@ def flags(paths, event="pull_request"):
     return cp.classify(paths, event)
 
 
-def expect(rust=False, desk=False, e2e=False, docs_only=False, all_=False):
-    return {"rust": rust, "desk": desk, "e2e": e2e, "docs_only": docs_only, "all": all_}
+def expect(rust=False, desk=False, e2e=False, docs_only=False, all_=False, docker=False):
+    return {"rust": rust, "desk": desk, "e2e": e2e, "docker": docker, "docs_only": docs_only,
+            "all": all_}
 
 
 class ClassifyTest(unittest.TestCase):
@@ -80,15 +81,31 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(flags(["./docs/a.md"]), expect(docs_only=True))
 
     def test_schedule_and_dispatch_run_everything(self):
-        everything = expect(rust=True, desk=True, e2e=True, all_=True)
+        everything = expect(rust=True, desk=True, e2e=True, all_=True, docker=True)
         self.assertEqual(flags([], "schedule"), everything)
         self.assertEqual(flags([], "workflow_dispatch"), everything)
         self.assertEqual(flags(["README.md"], "workflow_dispatch"), everything)
 
+    def test_docker_paths(self):
+        for path in ["Dockerfile", ".dockerignore", "deploy/compose.yaml", "deploy/entrypoint.sh",
+                     "deploy/.env.example", "deploy/README.md"]:
+            self.assertEqual(flags([path]), expect(docker=True), path)
+
+    def test_docker_with_other_paths(self):
+        self.assertEqual(flags(["Dockerfile", "docs/a.md"]), expect(docker=True))
+        self.assertEqual(flags(["deploy/compose.yaml", "crates/x/src/lib.rs"]),
+                         expect(rust=True, e2e=True, docker=True))
+
+    def test_similar_paths_are_not_docker(self):
+        # Only the exact file names and the deploy/ directory count.
+        self.assertEqual(flags(["docs/guide/deploy.md"]), expect(docs_only=True))
+        self.assertEqual(flags(["examples/deploy/x.rs"]), expect(rust=True, e2e=True))
+        self.assertEqual(flags(["desk/Dockerfile"]), expect(desk=True, e2e=True))
+
     def test_render(self):
         self.assertEqual(
             cp.render(flags(["README.md"])),
-            "rust=false\ndesk=false\ne2e=false\ndocs_only=true\nall=false\n",
+            "rust=false\ndesk=false\ne2e=false\ndocker=false\ndocs_only=true\nall=false\n",
         )
 
 
