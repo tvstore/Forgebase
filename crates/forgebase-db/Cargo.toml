@@ -23,6 +23,9 @@ thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

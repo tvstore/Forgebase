@@ -17,11 +17,12 @@
 //! [`create_api_token`], once.
 //!
 //! **Known limit: PostgreSQL logging.** Because `sha256()` runs in SQL, a plaintext session token,
-//! CSRF token or API secret reaches PostgreSQL as a bind parameter, and there is no TLS to
-//! PostgreSQL yet. PostgreSQL itself can log bind parameters (`log_statement = all`,
-//! `log_min_duration_statement`, statements that fail). Operators should set
-//! `log_parameter_max_length = 0` and `log_parameter_max_length_on_error = 0`, and keep the
-//! connection on a local or private network until TLS is supported (see ADR 0010).
+//! CSRF token or API secret reaches PostgreSQL as a bind parameter. PostgreSQL itself can log
+//! bind parameters (`log_statement = all`, `log_min_duration_statement`, statements that fail).
+//! Operators should set `log_parameter_max_length = 0` and `log_parameter_max_length_on_error = 0`
+//! (see ADR 0010). Over a network that is not private, connect with `sslmode=require` in the
+//! database URL (TLS with full verification, ADR 0018); without it the connection is not
+//! encrypted.
 //!
 //! **Rules.** A username is 1 to 140 characters, ASCII letters, digits and `_ . @ -`, and is
 //! case-sensitive (`Alice` and `alice` are two users). A role is 1 to 140 characters, not blank,
