@@ -183,7 +183,7 @@ The path in short: a Neon database, the first Administrator created from your ow
 
 ### 3.1 Create the Neon database
 
-1. Create a Neon project on the free plan (check Neon's current docs for the plan's limits and for how to get a connection string).
+1. Create a Neon project on the free plan (check Neon's current docs for the plan's limits and for how to get a connection string). **Choose PostgreSQL 16** as the version: the image's `pg_dump` and `pg_restore` are version 16 and must match the server's major version, and Neon's docs say whether the version of a project can be changed later (check Neon's docs; assume it cannot).
 2. Copy the connection string of the **direct** (non-pooled) connection: the host does **not** contain `-pooler`. In Neon's connection dialog, turn "Connection pooling" off.
 3. Make it a URL that ends with `?sslmode=require`:
 
@@ -235,7 +235,7 @@ If the service does not start, read Render's logs. A line that starts with `erro
 - **Free-hours and bandwidth limits** apply to the Render service (monthly instance hours) and to Neon (storage and compute hours); a service that runs out is suspended until the limit resets or you upgrade.
 - **Neon's free compute suspends** when idle, so the first query after a pause is slower (a second or more).
 - **The Rust build on Render's builder may be slow**, ten minutes or more, and a small builder can run out of memory (the same problem as the small VM above). If it fails, build the image on your computer and deploy it from a registry instead (check Render's docs for deploying a prebuilt image).
-- **Backups.** Neon's free plan has limited point-in-time history (check Neon's docs). To take your own backups, run `site backup` from your computer against the Neon URL (it needs the PostgreSQL 16 client tools; Neon's server major version must match them, check it in Neon's settings) and keep the file private.
+- **Backups.** Neon's free plan has limited point-in-time history (check Neon's docs). To take your own backups, run `site backup` from your computer against the Neon URL (it needs the PostgreSQL 16 client tools, and the Neon project must be PostgreSQL 16: see step 3.1, check Neon's docs) and keep the file private.
 
 ## 4. Security notes
 
