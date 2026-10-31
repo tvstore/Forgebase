@@ -41,7 +41,7 @@ Runs in CI (job `msrv-deny`; advisories also on the weekly schedule). Covers lic
 
 ## CI
 
-Status: **Accepted** (owner decision of 2026-10-30, "setuju C-1 sampai C-5"; cost control for the private repository, see [owner decisions](../owner-decisions.md)). The workflow is [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml).
+Status: **Accepted** (owner decision of 2026-10-30, "setuju C-1 sampai C-5"; cost control for the private repository, see [owner decisions](../owner-decisions.md); the repository has been public since 2026-10-31, and these controls are kept as good practice). The workflow is [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml).
 
 - **Triggers.** A pull request that is not a draft (`opened`, `synchronize`, `reopened`, `ready_for_review`), a weekly schedule (Monday) and `workflow_dispatch`. There is no run on push to main: a merge needs a green CI on the pull request head ([AGENTS.md section 10.3](../../AGENTS.md#103-standing-merge-authorization)). The weekly run and a dispatch run every job.
 - **Drafts.** A draft pull request runs no job. The working session opens pull requests as drafts, runs all checks locally during implementation and review, and marks the pull request ready only after the review reports PASS, so CI runs once (plus fix-ups). See [AGENTS.md section 10.2](../../AGENTS.md#102-roles-in-the-working-session).
