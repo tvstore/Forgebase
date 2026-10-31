@@ -2453,6 +2453,44 @@ fn a_secret_from_standard_input_is_used_and_not_printed_and_rotation_prints_once
         stderr(&empty)
     );
 
+    // A secret of less than 16 bytes is refused, by `add` and by `rotate-secret`, and changes nothing.
+    args[2] = "w3";
+    let short = db.forgebase_with_stdin(&args, Some("fifteen-bytes!!\n"));
+    assert_eq!(code(&short), Some(1));
+    assert!(
+        stderr(&short).contains("at least 16 bytes"),
+        "{}",
+        stderr(&short)
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_webhook")
+            .as_deref(),
+        Some("1")
+    );
+    let short = db.forgebase_with_stdin(
+        &["webhook", "rotate-secret", "w", "--secret-stdin"],
+        Some("too short\n"),
+    );
+    assert_eq!(code(&short), Some(1));
+    assert!(
+        stderr(&short).contains("at least 16 bytes"),
+        "{}",
+        stderr(&short)
+    );
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook").as_deref(),
+        Some("my own secret value")
+    );
+    let sixteen = db.forgebase_with_stdin(
+        &["webhook", "rotate-secret", "w", "--secret-stdin"],
+        Some("exactly-16-bytes\n"),
+    );
+    assert_eq!(code(&sixteen), Some(0), "{}", stderr(&sixteen));
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook").as_deref(),
+        Some("exactly-16-bytes")
+    );
+
     let rotated = db.forgebase(&["webhook", "rotate-secret", "w"]);
     assert_eq!(code(&rotated), Some(0), "{}", stderr(&rotated));
     let new = printed_secret(&stdout(&rotated));
@@ -2461,7 +2499,7 @@ fn a_secret_from_standard_input_is_used_and_not_printed_and_rotation_prints_once
         db.scalar("SELECT secret FROM fb_webhook").as_deref(),
         Some(new.as_str())
     );
-    assert!(!stdout(&rotated).contains("my own secret value"));
+    assert!(!stdout(&rotated).contains("exactly-16-bytes"));
 }
 
 #[test]

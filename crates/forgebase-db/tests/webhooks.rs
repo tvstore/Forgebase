@@ -183,16 +183,45 @@ async fn adding_checks_the_name_the_events_and_the_doctype() {
         &**client,
         &registry,
         &new("given", "note", leaked),
-        Some("my-own-secret"),
+        Some("my-own-secret-of-24-bytes"),
     )
     .await
     .expect("added");
-    assert_eq!(given, "my-own-secret");
+    assert_eq!(given, "my-own-secret-of-24-bytes");
 
     let refused = |error: DbError| match error {
         DbError::Webhook(message) => message,
         other => other.to_string(),
     };
+    // A given secret must have at least 16 bytes: 15 are refused, 16 pass; an empty one is its own error.
+    for short in ["", "a", "fifteen-bytes!!"] {
+        let error = webhooks::add(
+            &**client,
+            &registry,
+            &new("short", "note", leaked),
+            Some(short),
+        )
+        .await
+        .expect_err("too short");
+        let message = refused(error);
+        assert!(
+            message.contains(if short.is_empty() {
+                "empty"
+            } else {
+                "at least 16 bytes"
+            }),
+            "{message}"
+        );
+    }
+    webhooks::add(
+        &**client,
+        &registry,
+        &new("short", "note", leaked),
+        Some("sixteen-bytes!!!"),
+    )
+    .await
+    .expect("16 bytes are enough");
+    webhooks::remove(&**client, "short").await.unwrap();
     // The name is taken, or not a valid name.
     let error = webhooks::add(&**client, &registry, &new("good", "note", leaked), None)
         .await
@@ -255,7 +284,7 @@ async fn adding_checks_the_name_the_events_and_the_doctype() {
             .all(|w| w.enabled && !w.allow_private && !w.insecure_http)
     );
     let loaded = webhooks::get(&**client, "given").await.unwrap().unwrap();
-    assert_eq!(loaded.secret, "my-own-secret");
+    assert_eq!(loaded.secret, "my-own-secret-of-24-bytes");
     assert!(webhooks::get(&**client, "nobody").await.unwrap().is_none());
 }
 
@@ -292,6 +321,23 @@ async fn enable_disable_remove_and_rotate_report_a_missing_webhook() {
             .secret,
         new
     );
+    // A secret that is given must have at least 16 bytes; a refused one changes nothing.
+    let error = webhooks::rotate_secret(&**client, "one", Some("too-short"))
+        .await
+        .expect_err("too short");
+    assert!(error.to_string().contains("at least 16 bytes"), "{error}");
+    assert_eq!(
+        webhooks::get(&**client, "one")
+            .await
+            .unwrap()
+            .unwrap()
+            .secret,
+        new
+    );
+    let sixteen = webhooks::rotate_secret(&**client, "one", Some("exactly-16-bytes"))
+        .await
+        .unwrap();
+    assert_eq!(sixteen, "exactly-16-bytes");
     webhooks::remove(&**client, "one").await.unwrap();
     for result in [
         webhooks::set_enabled(&**client, "one", true).await,
@@ -634,6 +680,68 @@ async fn a_snapshot_over_the_job_payload_limit_is_sent_without_its_data() {
     assert_eq!(
         db.rows("SELECT count(*)::text FROM doc_note").await,
         [["1"]]
+    );
+}
+
+const STAMP: &str = r#"
+name = "stamp"
+label = "Stamp"
+[[fields]]
+name = "title"
+type = "data"
+required = true
+[[fields]]
+name = "at"
+type = "datetime"
+"#;
+
+/// M9.2 review, carry-over: a snapshot that cannot be written as JSON must not fail the write.
+/// PostgreSQL has datetimes before the year 0 (`0002-01-01 BC` is the year -1), which the `time`
+/// crate reads and RFC 3339 cannot write.
+#[tokio::test]
+async fn a_snapshot_that_cannot_be_serialised_is_sent_unavailable_and_the_write_commits() {
+    let db = TestDb::migrated().await;
+    let mut registry = registry(&[STAMP]);
+    assert!(registry.add_job(DELIVER_JOB));
+    db.sync(&registry).await.expect("sync");
+    hook(&db, &registry, "w", "stamp", &["insert", "update"]).await;
+    let mut client = db.pool.get().await.unwrap();
+    let ann = Caller::system("ann");
+    let stored = insert(&mut **client, &registry, "stamp", doc("one"), &ann)
+        .await
+        .expect("insert");
+    // A normal snapshot first: data present, not unavailable.
+    assert_eq!(
+        db.rows("SELECT coalesce(payload->>'unavailable', '-') || '/' || (payload->'data'->>'title') FROM fb_job")
+            .await,
+        [["-/one"]]
+    );
+    db.exec("UPDATE doc_stamp SET \"at\" = '0002-01-01 BC 00:00:00+00'")
+        .await;
+    let updated = update(
+        &mut **client,
+        &registry,
+        "stamp",
+        &stored.name,
+        1,
+        &title("two"),
+        &ann,
+    )
+    .await
+    .expect("the write is not refused because of the webhook");
+    assert_eq!(updated.version, 2);
+    let rows = db
+        .rows(
+            "SELECT payload->>'event' || '/' || coalesce(payload->>'unavailable', '-') || '/' \
+             || coalesce(payload->>'data', 'null') || '/' || coalesce(payload->>'truncated', '-') \
+             FROM fb_job ORDER BY id",
+        )
+        .await;
+    assert_eq!(rows[1], ["update/true/null/-"]);
+    assert_eq!(
+        db.rows("SELECT title FROM doc_stamp").await,
+        [["two"]],
+        "the update was committed"
     );
 }
 
