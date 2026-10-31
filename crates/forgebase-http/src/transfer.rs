@@ -44,7 +44,7 @@ use forgebase_db::{
 };
 use serde_json::{Map, Value as Json, json};
 
-use crate::error::{ApiError, capped};
+use crate::error::{ApiError, bounded, capped, cut_text};
 use crate::json::{JsonError, document_to_json, from_value, input_from_json};
 
 /// The file format of an import or export.
@@ -719,8 +719,15 @@ pub struct ImportSummary {
 
 impl ImportSummary {
     /// The summary as JSON: `{"dry_run", "mode", "rows", "inserted", "updated", "errors",
-    /// "error_count"}`.
+    /// "error_count"}`, within the total bound of an answer (about 64 KiB, see
+    /// `error.rs`): the HTTP route and the CLI print this, so neither can grow with the
+    /// file.
     pub fn to_json(&self) -> Json {
+        bounded(self.to_full_json())
+    }
+
+    /// The summary before the bound is applied.
+    fn to_full_json(&self) -> Json {
         let errors: Vec<Json> = self
             .errors
             .iter()
@@ -786,7 +793,7 @@ pub async fn run_import(
             name: p.name.as_deref().map(shorten),
             code: "validation_failed".to_owned(),
             message: "validation failed".to_owned(),
-            details: p.details,
+            details: capped(p.details),
         })
         .collect();
     let problems = errors.len() as u64;
@@ -797,8 +804,8 @@ pub async fn run_import(
             line: e.line,
             name: e.name.as_deref().map(shorten),
             code: code.to_owned(),
-            message,
-            details,
+            message: cut_text(&message),
+            details: capped(details),
         }
     }));
     errors.sort_by_key(|e| e.row);

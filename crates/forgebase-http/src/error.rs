@@ -28,9 +28,10 @@
 //! | `report_timeout` | 504 | a query report ran over its time limit (M8.4) |
 //! | `internal` | 500 | generic message; the real error goes to standard error |
 //!
-//! Every error body is bounded where it is built (`IntoResponse`): the message and each detail are cut to
-//! [`MAX_MESSAGE_CHARS`] characters and a list of details has at most 100 entries and an "and N more" entry,
-//! whatever the request echoed into it.
+//! Every error body, and every import summary, is bounded where it is built: the message, the details and
+//! the keys share a budget of [`MAX_ERROR_BODY_BYTES`] (64 KiB of JSON-escaped bytes), each string is cut to
+//! [`MAX_MESSAGE_CHARS`] characters and a list has at most 100 entries and an "and N more" entry. So a body is about
+//! 64 KiB plus the envelope at most, whatever the request echoed into it.
 //!
 //! Messages never contain passwords, tokens, secrets or the database URL. Database errors that
 //! are not the caller's fault are logged and replaced by a generic message.
@@ -191,57 +192,169 @@ impl ApiError {
     }
 }
 
-/// The longest message or detail an error response carries, in characters.
+/// The longest message, detail or key of an error body, in characters, `…` included.
 pub const MAX_MESSAGE_CHARS: usize = 512;
 
-/// `text` cut to [`MAX_MESSAGE_CHARS`] characters on a character boundary, with `…` if cut.
-fn cut(text: &str) -> String {
-    match text.char_indices().nth(MAX_MESSAGE_CHARS) {
-        None => text.to_owned(),
-        Some((end, _)) => format!("{}…", &text[..end]),
+/// The total of serialized (JSON-escaped) bytes that the message, the details and the keys and
+/// strings of an error body or an import summary may use: 64 KiB. The envelope and the numbers
+/// come on top, and so does one "and N more" entry per array, so the body is about 64 KiB plus
+/// a few KB, whatever the request.
+pub const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// What is left of the budget of one body.
+pub(crate) struct Budget(usize);
+
+impl Budget {
+    pub(crate) fn new() -> Self {
+        Self(MAX_ERROR_BODY_BYTES)
     }
+}
+
+/// The bytes a character takes in a JSON string, as `serde_json` writes it.
+fn escaped(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if c < '\u{20}' => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// `text` for a body: whole if it has at most [`MAX_MESSAGE_CHARS`] characters and fits the
+/// budget, else its first characters (at most 511, fewer if the budget is short) and `…`. The
+/// budget is charged the escaped bytes and the quotes. Reads at most 513 characters.
+fn cut(text: &str, budget: &mut Budget) -> String {
+    let room = budget.0.saturating_sub(2);
+    let (mut used, mut count, mut whole) = (0, 0, true);
+    for c in text.chars() {
+        if count >= MAX_MESSAGE_CHARS || used + escaped(c) > room {
+            whole = false;
+            break;
+        }
+        used += escaped(c);
+        count += 1;
+    }
+    if whole {
+        budget.0 = room.saturating_sub(used);
+        return text.to_owned();
+    }
+    let room = room.saturating_sub(3);
+    let (mut out, mut used) = (String::new(), 0);
+    for c in text.chars().take(MAX_MESSAGE_CHARS - 1) {
+        if used + escaped(c) > room {
+            break;
+        }
+        used += escaped(c);
+        out.push(c);
+    }
+    out.push('…');
+    budget.0 = room.saturating_sub(used);
+    out
+}
+
+/// A string cut to [`MAX_MESSAGE_CHARS`] (for the text of a report row and the like).
+pub(crate) fn cut_text(text: &str) -> String {
+    cut(text, &mut Budget::new())
+}
+
+/// "and N more", for an array that stops early.
+fn more(n: usize, budget: &mut Budget) -> Value {
+    let text = format!("and {n} more");
+    budget.0 = budget.0.saturating_sub(text.len() + 2);
+    Value::String(text)
+}
+
+/// Whether an array may take another entry: fewer than [`MAX_REPORTED_ERRORS`] so far and some
+/// budget left.
+fn room(taken: usize, budget: &Budget) -> bool {
+    taken < MAX_REPORTED_ERRORS && budget.0 >= 8
 }
 
 /// A list of problems bounded for a response: at most [`MAX_REPORTED_ERRORS`] entries and an
-/// "and N more" entry, each cut to [`MAX_MESSAGE_CHARS`].
-pub(crate) fn capped(mut problems: Vec<String>) -> Vec<String> {
-    if problems.len() > MAX_REPORTED_ERRORS {
-        let more = problems.len() - MAX_REPORTED_ERRORS;
-        problems.truncate(MAX_REPORTED_ERRORS);
-        problems.push(format!("and {more} more"));
+/// "and N more" entry, within the budget, each cut to [`MAX_MESSAGE_CHARS`].
+fn capped_in(problems: Vec<String>, budget: &mut Budget) -> Vec<String> {
+    let total = problems.len();
+    let mut out = Vec::new();
+    for problem in problems {
+        if !room(out.len(), budget) {
+            break;
+        }
+        out.push(cut(&problem, budget));
     }
-    problems.iter().map(|p| cut(p)).collect()
+    if out.len() < total {
+        let Value::String(text) = more(total - out.len(), budget) else {
+            unreachable!("`more` is a string")
+        };
+        out.push(text);
+    }
+    out
 }
 
-/// `details` as an object, bounded the same way: strings cut, arrays capped, recursively.
-fn bound(value: Value) -> Value {
+/// [`capped_in`] with a budget of its own, for the lists that a source builds.
+pub(crate) fn capped(problems: Vec<String>) -> Vec<String> {
+    capped_in(problems, &mut Budget::new())
+}
+
+/// `value` within the budget, in document order (the first entries are kept): strings and keys
+/// are cut, arrays take entries while the count and the budget last and end with "and N more".
+/// Numbers, booleans and null cost nothing but their keys, so the counts of a summary survive. Linear in what
+/// it keeps: the rest is only counted.
+fn bound_in(value: Value, budget: &mut Budget) -> Value {
     match value {
-        Value::String(text) if text.len() > MAX_MESSAGE_CHARS => Value::String(cut(&text)),
-        Value::Array(mut items) => {
-            let more = items.len().saturating_sub(MAX_REPORTED_ERRORS);
-            items.truncate(MAX_REPORTED_ERRORS);
-            let mut items: Vec<Value> = items.into_iter().map(bound).collect();
-            if more > 0 {
-                items.push(Value::String(format!("and {more} more")));
+        Value::String(text) => Value::String(cut(&text, budget)),
+        Value::Array(items) => {
+            let total = items.len();
+            let mut out = Vec::new();
+            for item in items {
+                if !room(out.len(), budget) {
+                    break;
+                }
+                out.push(bound_in(item, budget));
             }
-            Value::Array(items)
+            if out.len() < total {
+                out.push(more(total - out.len(), budget));
+            }
+            Value::Array(out)
         }
-        Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, bound(v))).collect()),
+        Value::Object(map) => {
+            // Numbers, booleans and null first (they are the counts of a summary and cost only
+            // their keys), then the rest in order; an entry that finds no room is left out.
+            let (scalars, rest): (Vec<_>, Vec<_>) = map.into_iter().partition(|(_, v)| {
+                !matches!(v, Value::String(_) | Value::Array(_) | Value::Object(_))
+            });
+            let mut out = serde_json::Map::new();
+            for (key, value) in scalars.into_iter().chain(rest) {
+                if !room(out.len(), budget) {
+                    break;
+                }
+                let key = cut(&key, budget);
+                out.insert(key, bound_in(value, budget));
+            }
+            Value::Object(out)
+        }
         other => other,
     }
 }
 
-/// The one place where an error becomes a response body, so **every** error response of the API
-/// is bounded whatever the request echoed into it: the message and each detail are cut to
-/// [`MAX_MESSAGE_CHARS`] characters and a list of details has at most [`MAX_REPORTED_ERRORS`]
-/// entries and an "and N more" line (arrays inside an object `details` too).
+/// [`bound_in`] with a budget of its own: the bound of an import summary that is answered as a
+/// success (a dry run lists the errors of its rows too).
+pub(crate) fn bounded(value: Value) -> Value {
+    bound_in(value, &mut Budget::new())
+}
+
+/// The one place where an error becomes a response body. The message, the details and the keys
+/// share one budget of [`MAX_ERROR_BODY_BYTES`] escaped bytes, each string is cut to
+/// [`MAX_MESSAGE_CHARS`] characters and a list keeps at most [`MAX_REPORTED_ERRORS`] entries
+/// (then "and N more"), so the body of an error is about 64 KiB at most plus the envelope,
+/// whatever the request echoed into it.
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut error = json!({"code": self.code, "message": cut(&self.message)});
+        let mut budget = Budget::new();
+        let message = cut(&self.message, &mut budget);
+        let mut error = json!({"code": self.code, "message": message});
         if let Some(details) = self.details_json {
-            error["details"] = bound(details);
+            error["details"] = bound_in(details, &mut budget);
         } else if !self.details.is_empty() {
-            error["details"] = json!(capped(self.details));
+            error["details"] = json!(capped_in(self.details, &mut budget));
         }
         let mut response = (self.status, Json(json!({ "error": error }))).into_response();
         if let Some(seconds) = self.retry_after {
@@ -376,72 +489,123 @@ impl From<QueryRejection> for ApiError {
 mod bound_tests {
     use super::*;
 
+    fn size(value: &Value) -> usize {
+        serde_json::to_string(value).unwrap().len()
+    }
+
     #[test]
-    fn a_long_message_is_cut_on_a_character_boundary() {
-        assert_eq!(cut("short"), "short");
+    fn a_long_message_is_511_characters_and_an_ellipsis() {
+        let mut budget = Budget::new();
+        assert_eq!(cut("short", &mut budget), "short");
+        let exactly = "é".repeat(MAX_MESSAGE_CHARS);
+        assert_eq!(cut(&exactly, &mut Budget::new()), exactly);
         let long = "é".repeat(5_000);
-        let cut = cut(&long);
-        assert_eq!(cut.chars().count(), MAX_MESSAGE_CHARS + 1);
+        let cut = cut(&long, &mut Budget::new());
+        assert_eq!(cut.chars().count(), MAX_MESSAGE_CHARS);
         assert!(cut.ends_with('…'));
+        assert_eq!(
+            cut.chars().filter(|c| *c == 'é').count(),
+            MAX_MESSAGE_CHARS - 1
+        );
+    }
+
+    #[test]
+    fn control_bytes_and_four_byte_characters_are_counted_as_they_are_serialized() {
+        let controls = "\u{1}".repeat(10_000);
+        let out = cut(&controls, &mut Budget::new());
+        assert_eq!(out.chars().count(), MAX_MESSAGE_CHARS);
+        assert!(size(&Value::String(out)) <= 6 * MAX_MESSAGE_CHARS + 8);
+        let wide = "😀".repeat(10_000);
+        let out = cut(&wide, &mut Budget::new());
+        assert_eq!(out.chars().count(), MAX_MESSAGE_CHARS);
+        // A short budget cuts earlier: 100 bytes is 1 quote pair, the ellipsis and 23 characters.
+        let mut small = Budget(100);
+        let out = cut(&controls, &mut small);
+        assert!(size(&Value::String(out)) <= 100, "the budget holds");
     }
 
     #[test]
     fn a_long_list_keeps_a_hundred_entries_and_counts_the_rest() {
-        let many: Vec<String> = (0..1_000_000)
-            .map(|i| format!("{i}{}", "x".repeat(2_000)))
-            .collect();
+        let many: Vec<String> = (0..1_000_000).map(|i| format!("{i}")).collect();
         let capped = capped(many);
         assert_eq!(capped.len(), MAX_REPORTED_ERRORS + 1);
         assert_eq!(capped.last().unwrap(), "and 999900 more");
-        assert!(
-            capped
-                .iter()
-                .all(|c| c.chars().count() <= MAX_MESSAGE_CHARS + 1)
-        );
-        let few = capped_vec(&["a", "b"]);
+        let few = super::capped(vec!["a".into(), "b".into()]);
         assert_eq!(few, ["a", "b"]);
-    }
-
-    fn capped_vec(items: &[&str]) -> Vec<String> {
-        capped(items.iter().map(|s| (*s).to_owned()).collect())
+        // Long entries run out of the budget before the count.
+        let long: Vec<String> = vec!["x".repeat(2_000); 1_000];
+        let capped = super::capped(long);
+        assert!(capped.len() <= MAX_REPORTED_ERRORS + 1);
+        assert!(capped.last().unwrap().starts_with("and "));
+        assert!(size(&json!(capped)) <= MAX_ERROR_BODY_BYTES + 100);
     }
 
     #[test]
-    fn an_object_has_its_arrays_capped_and_its_strings_cut_recursively() {
-        let long = "y".repeat(10_000);
+    fn nested_arrays_share_one_budget() {
+        let long = "𝄞".repeat(10_000);
         let value = json!({
             "count": 5,
             "name": long,
             "errors": (0..300).map(|i| json!({"row": i, "details": vec![long.clone(); 300]})).collect::<Vec<_>>(),
         });
-        let bounded = bound(value);
+        let bounded = bounded(value);
         assert_eq!(bounded["count"], 5);
-        assert!(bounded["name"].as_str().unwrap().chars().count() <= MAX_MESSAGE_CHARS + 1);
         let errors = bounded["errors"].as_array().unwrap();
-        assert_eq!(errors.len(), MAX_REPORTED_ERRORS + 1);
-        assert_eq!(errors[100], "and 200 more");
-        let details = errors[0]["details"].as_array().unwrap();
-        assert_eq!(details.len(), MAX_REPORTED_ERRORS + 1);
-        assert!(bounded.to_string().len() < 100_000_000);
+        assert!(errors.len() <= MAX_REPORTED_ERRORS + 1);
+        assert!(
+            size(&bounded) < MAX_ERROR_BODY_BYTES + 10_000,
+            "{} bytes",
+            size(&bounded)
+        );
+        // The first row is kept first.
+        assert_eq!(errors[0]["row"], 0);
     }
 
     #[test]
-    fn a_response_body_is_small_whatever_the_error_holds() {
-        let mut error = ApiError::validation(vec!["z".repeat(1_000_000); 1000]);
-        error.message = "m".repeat(1_000_000);
-        let response = error.into_response();
-        let (_, body) = response.into_parts();
-        let bytes = futures_body(body);
-        assert!(bytes < 100_000, "{bytes} bytes");
+    fn the_counts_of_a_summary_survive_an_exhausted_budget() {
+        let value = json!({
+            "errors": (0..100).map(|_| json!({"details": vec!["\u{1}".repeat(600); 100]})).collect::<Vec<_>>(),
+            "inserted": 7, "rows": 100, "error_count": 100, "dry_run": true,
+        });
+        let bounded = bounded(value);
+        assert_eq!(
+            (bounded["inserted"].clone(), bounded["rows"].clone()),
+            (json!(7), json!(100))
+        );
+        assert_eq!(bounded["dry_run"], true);
     }
 
-    fn futures_body(body: axum::body::Body) -> usize {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        runtime
-            .block_on(axum::body::to_bytes(body, usize::MAX))
-            .unwrap()
-            .len()
+    #[test]
+    fn keys_are_cut_and_counted() {
+        let mut map = serde_json::Map::new();
+        map.insert("k".repeat(100_000), json!(1));
+        let bounded = bounded(Value::Object(map));
+        let key = bounded.as_object().unwrap().keys().next().unwrap();
+        assert_eq!(key.chars().count(), MAX_MESSAGE_CHARS);
+    }
+
+    #[tokio::test]
+    async fn a_response_body_is_small_whatever_the_error_holds() {
+        let mut error = ApiError::validation(vec!["z".repeat(1_000_000); 1000]);
+        error.message = "m".repeat(1_000_000);
+        let (_, body) = error.into_response().into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        assert!(
+            bytes.len() < MAX_ERROR_BODY_BYTES + 2_000,
+            "{} bytes",
+            bytes.len()
+        );
+        let mut error = ApiError::import_failed(json!({
+            "error_count": 3,
+            "errors": (0..1000).map(|_| json!({"row": 1, "details": vec!["\u{1}".repeat(900); 500]})).collect::<Vec<_>>(),
+        }));
+        error.message = "m".into();
+        let (_, body) = error.into_response().into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        assert!(
+            bytes.len() < MAX_ERROR_BODY_BYTES + 5_000,
+            "{} bytes",
+            bytes.len()
+        );
     }
 }

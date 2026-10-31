@@ -1631,21 +1631,84 @@ async fn request_body_input_is_not_echoed_in_full_outside_import_and_export() {
 async fn every_error_response_is_small_whatever_the_request_echoed() {
     let env = env().await;
     let root = env.login("root").await;
+    // The answer to anything is under 100 KB (the budget is 64 KiB plus the envelope).
     let small = |what: &str, reply: &Reply| {
         assert!(
-            reply.text.len() < 16_000,
+            reply.text.len() < 100_000,
             "{what}: {} bytes",
             reply.text.len()
         );
     };
-    // A JSON import of one row with about a million unknown keys, top level and in a child row.
+    // A dry run answers 200 with the errors of its rows, an import 422.
+    let expected = |query: &str| {
+        if query.contains("dry_run") {
+            StatusCode::OK
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+    };
+    // A JSON import of one row with about a million unknown keys, top level and in a child row,
+    // as an import and as a dry run (the 200 summary lists the errors of its rows too).
     let keys: String = (0..1_000_000).map(|i| format!("\"k{i}\":1,")).collect();
-    let body = format!(r#"[{{{keys}"title":"a"}}]"#);
-    let reply = import(&env, &root, "?format=json", "application/json", &body).await;
-    small("import, top level", &reply);
-    let body = format!(r#"[{{"title":"a","lines":[{{{keys}"what":"x"}}]}}]"#);
-    let reply = import(&env, &root, "?format=json", "application/json", &body).await;
-    small("import, child row", &reply);
+    for (what, query) in [
+        ("import", "?format=json"),
+        ("dry run", "?format=json&dry_run=1"),
+    ] {
+        let body = format!(r#"[{{{keys}"title":"a"}}]"#);
+        let reply = import(&env, &root, query, "application/json", &body).await;
+        assert_eq!(
+            reply.status,
+            expected(query),
+            "{what}: {}",
+            reply.text.len()
+        );
+        small(&format!("{what}, top level"), &reply);
+        let body = format!(r#"[{{"title":"a","lines":[{{{keys}"what":"x"}}]}}]"#);
+        let reply = import(&env, &root, query, "application/json", &body).await;
+        assert_eq!(
+            reply.status,
+            expected(query),
+            "{what}: {}",
+            reply.text.len()
+        );
+        small(&format!("{what}, child row"), &reply);
+    }
+    // 100 rows with 1000 unknown keys each, and 100 rows with 101 keys of 4-byte characters.
+    let row = |key: &dyn Fn(usize) -> String, n: usize| {
+        let keys: String = (0..n).map(|i| format!("\"{}\":1,", key(i))).collect();
+        format!(r#"{{{keys}"title":"a"}}"#)
+    };
+    let plain = row(&|i| format!("k{i}"), 1000);
+    let wide = row(&|i| format!("{}{i}", "\u{1D11E}".repeat(40)), 101);
+    for (what, row) in [("1000 keys", plain), ("4-byte keys", wide)] {
+        let body = format!("[{}]", vec![row; 100].join(","));
+        for query in ["?format=json", "?format=json&dry_run=1"] {
+            let reply = import(&env, &root, query, "application/json", &body).await;
+            assert_eq!(
+                reply.status,
+                expected(query),
+                "{what}: {}",
+                reply.text.len()
+            );
+            small(&format!("100 rows of {what}{query}"), &reply);
+        }
+    }
+    // A CSV of 100 rows with 7 bad cells of 10 KB of control bytes each.
+    let junk = "\u{1}".repeat(10_000);
+    let line = format!("a,{}", [junk.as_str(); 7].join(","));
+    let csv = format!(
+        "title,qty,price,due,seen,done,tier,item\n{}",
+        vec![line; 100].join("\n")
+    );
+    for (query, status) in [
+        ("?format=csv", StatusCode::UNPROCESSABLE_ENTITY),
+        ("?format=csv&dry_run=1", StatusCode::OK),
+    ] {
+        let reply = import(&env, &root, query, "text/csv", &csv).await;
+        assert_eq!(reply.status, status, "{}", reply.text);
+        assert!(reply.text.len() > 10_000, "the errors are reported");
+        small(&format!("bad CSV cells{query}"), &reply);
+    }
     // The same through POST /resource, within its body limit.
     let keys: String = (0..60_000).map(|i| format!("\"k{i}\":1,")).collect();
     let body = format!(r#"{{{keys}"title":"a"}}"#);
