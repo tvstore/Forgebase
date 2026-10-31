@@ -9,7 +9,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
-repository = "https://github.com/agilma/Forgebase"
+repository = "https://github.com/tvstore/Forgebase"
 publish = false
 
 [workspace.lints.rust]

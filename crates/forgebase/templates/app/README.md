@@ -1,6 +1,6 @@
 # {{name}}
 
-A [Forgebase](https://github.com/agilma/Forgebase) app: the library (`src/lib.rs`, the function `app()`) and a binary that runs it (`src/main.rs`). Agents and contributors: read [AGENTS.md](AGENTS.md).
+A [Forgebase](https://github.com/tvstore/Forgebase) app: the library (`src/lib.rs`, the function `app()`) and a binary that runs it (`src/main.rs`). Agents and contributors: read [AGENTS.md](AGENTS.md).
 
 ## Build, test, run
 
@@ -40,6 +40,6 @@ FORGEBASE_DEV_INSECURE_COOKIES=1 cargo run -- serve         # http://127.0.0.1:8
 
 ## Forgebase dependency
 
-`Cargo.toml` points at a local Forgebase checkout (`path`). To use a git revision instead, replace both `forgebase` lines with `forgebase = { git = "https://github.com/agilma/Forgebase", rev = "<commit>" }` (and the same with `features = ["testing"]` under `[dev-dependencies]`). `Cargo.lock` was copied from that checkout when this crate was created, so you start with the versions Forgebase was tested with; commit it.
+`Cargo.toml` points at a local Forgebase checkout (`path`). To use a git revision instead, replace both `forgebase` lines with `forgebase = { git = "https://github.com/tvstore/Forgebase", rev = "<commit>" }` (and the same with `features = ["testing"]` under `[dev-dependencies]`). `Cargo.lock` was copied from that checkout when this crate was created, so you start with the versions Forgebase was tested with; commit it.
 
 The full guide is `docs/guide/first-app.md` in the Forgebase checkout.

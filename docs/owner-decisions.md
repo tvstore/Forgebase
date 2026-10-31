@@ -65,7 +65,7 @@ that you did. An owner-level decision ([AGENTS.md §10.4](../AGENTS.md#104-devia
 
 | Date | Instruction | Recorded in |
 |---|---|---|
-| 2026-10-28 | Four-stage workflow (Plan, Doing, Review, Confirmation) with approval gates. Agent separation. Git safety: no direct changes to `main`, no merge or release without approval, no force push, no deleting without permission. Do not claim the project is open source while the repository is private. Do not copy Frappe code. | [AGENTS.md](../AGENTS.md) §3–5 |
+| 2026-10-28 | Four-stage workflow (Plan, Doing, Review, Confirmation) with approval gates. Agent separation. Git safety: no direct changes to `main`, no merge or release without approval, no force push, no deleting without permission. Do not claim the project is open source while the repository is private (superseded 2026-10-31: the repository is public, see [Repository public](#repository-public-2026-10-31-information-session) below). Do not copy Frappe code. | [AGENTS.md](../AGENTS.md) §3–5 |
 | 2026-10-28 | Model Selection Policy: Opus plans and reviews, Sonnet implements, Sonnet or Haiku confirms, Fable is for escalation. | [AGENTS.md §9](../AGENTS.md#9-model-selection-policy), [ADR 0008](adr/0008-model-selection-policy.md) |
 | 2026-10-28/29 | Operating model: the information session holds plans and results, and a working session executes with standing merge authorization. Deviations follow PDCA. *"conversation ini hanya untuk information, hasil plan dan hasil task ... untuk pengerjaan, merge, dll PR, pindahkan di session working, dan allow otomatis, dan otomasi merge ... jika tidak sesuai plan, selalu PDCA"* | [AGENTS.md §10](../AGENTS.md#10-operating-model) |
 | 2026-10-29 | Results-only reporting in the information session. Android push notifications for results. *"hanya hasil yang kamu update jgn ada informasi menunggu kerjaan"*; *"jangan muncul kan tidak ada hasil baru"* | this file, §1.8 |
@@ -81,7 +81,7 @@ where its details live.
 | Decision | Recorded in |
 |---|---|
 | Approve the research and blueprint plan. Network access to the documentation sites was allowed. Frappe claims stay labelled *Source-indexed* or *Unverified* until they are read directly. | [feature matrix](blueprint/feature-matrix.md) |
-| Licence: keep **MIT**, intended to be open source. | [ADR 0007](adr/0007-license-mit.md), [LICENSE](../LICENSE) |
+| Licence: keep **MIT**, intended to be open source (superseded 2026-10-31: the repository is public and the project is open source under MIT, see [Repository public](#repository-public-2026-10-31-information-session)). | [ADR 0007](adr/0007-license-mit.md), [LICENSE](../LICENSE) |
 | Documents in English; communication with the owner in Indonesian. | [AGENTS.md §7](../AGENTS.md#7-communication-style) |
 | Research and decisions by Opus; writing documents by Sonnet. | [AGENTS.md §9](../AGENTS.md#9-model-selection-policy) |
 | Fix the optional review findings; accept ADRs 0002–0006 (modular monolith, PostgreSQL only, database access layer, and the others); re-verify Frappe later; open a pull request and start M0. | [ADR index](adr/README.md) |
@@ -275,3 +275,14 @@ The private repository hit GitHub's usage limit. The owner: *"maaf saya suruh ha
 | C-3: no run on push to main; the schedule is weekly; `workflow_dispatch` stays. | [maintenance policy](blueprint/maintenance-policy.md#ci), [`ci.yml`](../.github/workflows/ci.yml) |
 | C-4: path filters without a third-party action: a `changes` job and a tested classifier script; unknown paths count as Rust; a `docs` job checks links offline. | [maintenance policy](blueprint/maintenance-policy.md#ci), [`ci.yml`](../.github/workflows/ci.yml), [CONTRIBUTING](../CONTRIBUTING.md#local-checks) |
 | C-5: `msrv` and `deny` become one job, `msrv-deny`, with one cache. | [maintenance policy](blueprint/maintenance-policy.md#ci), [`ci.yml`](../.github/workflows/ci.yml) |
+
+### Repository public (2026-10-31; information session)
+
+The owner moved the repository and made it public: *"repo sudah saya ganti public"*. The owner keeps the `agilma` account for these sessions: *"saya tetap pakai agil"*.
+
+| Decision | Recorded in |
+|---|---|
+| The repository was transferred to `tvstore/Forgebase` and made **public**. Repository URLs in `Cargo.toml`, the new-app templates, the README and the docs were updated; older entries of this file keep their `agilma/Forgebase` links, which redirect. | [README](../README.md), [`Cargo.toml`](../Cargo.toml) |
+| Licence wording: the project is open source under the MIT licence and the repository is public since 2026-10-31. This supersedes the 2026-10-28 instruction not to claim the project is open source while the repository is private, and the "intended to be open source" licence row. | [AGENTS.md section 2](../AGENTS.md#2-core-engineering-principles), [ADR 0007](adr/0007-license-mit.md), [LICENSE](../LICENSE) |
+| The sessions keep the `agilma` account. | this file |
+| **Pause of 2026-10-30, cancelled 2026-10-31.** The owner had paused the project because of the billing block: *"oke project kita pending sampai awal bulan, jangan lupa kasih notifikasi di awal bulan waktu github actions reset"*. The transfer and the public decision cancel the pause: public repositories get free standard-runner minutes. | this file, CI cost section above |

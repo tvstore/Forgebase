@@ -6,7 +6,7 @@ An app is a Rust crate with three kinds of content: **DocTypes** (TOML files tha
 
 ## What you need
 
-- A Forgebase checkout (the repository is private; apps use it by path, see [the dependency](#the-forgebase-dependency)) and the Rust toolchain it needs (`rust-version` in its `Cargo.toml`).
+- A Forgebase checkout (the repository is public at <https://github.com/tvstore/Forgebase>; apps use it by path, see [the dependency](#the-forgebase-dependency)) and the Rust toolchain it needs (`rust-version` in its `Cargo.toml`).
 - A PostgreSQL 16 server. The tests need a superuser (or `CREATEDB`) URL; running the app needs an empty database.
 
 ## 1. Create the app
@@ -325,7 +325,7 @@ Apps depend on the `forgebase` crate **only**. `forgebase-core`, `forgebase-db` 
 
 ## The Forgebase dependency
 
-The generated `Cargo.toml` points at your checkout: `forgebase = { path = "<checkout>/crates/forgebase" }`. A relative `--forgebase-path` is written as an absolute path, because it is relative to where you ran the command, not to the new crate. To depend on a git revision instead, replace the two `forgebase` lines with `forgebase = { git = "https://github.com/agilma/Forgebase", rev = "<commit>" }` (the second one with `features = ["testing"]`); the repository is private, so that needs git access to it.
+The generated `Cargo.toml` points at your checkout: `forgebase = { path = "<checkout>/crates/forgebase" }`. A relative `--forgebase-path` is written as an absolute path, because it is relative to where you ran the command, not to the new crate. To depend on a git revision instead, replace the two `forgebase` lines with `forgebase = { git = "https://github.com/tvstore/Forgebase", rev = "<commit>" }` (the second one with `features = ["testing"]`).
 
 The app is its own Cargo workspace (`[workspace]` in its `Cargo.toml`), so a `Cargo.toml` in a parent directory does not take it over. `new-app` copies the checkout's `Cargo.lock` into the app, so your first build uses the dependency versions Forgebase is tested and license-checked with, not whatever is newest. Cargo drops the entries the app does not use and adds the app itself on first use, so the first command must not be `--locked`; after that it can be. Commit `Cargo.lock`. Updating dependencies later is your decision (`cargo update`).
 

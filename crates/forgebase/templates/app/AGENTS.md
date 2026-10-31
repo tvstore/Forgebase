@@ -1,6 +1,6 @@
 # AGENTS.md: {{name}}
 
-Instructions for every agent and human who changes this app. `{{name}}` is a [Forgebase](https://github.com/agilma/Forgebase) app: a Rust crate with DocTypes (TOML), hooks (Rust) and SQL migrations, compiled into one binary. Build for longevity, not complexity: the simplest change that meets the need wins, and nothing is added before it is needed.
+Instructions for every agent and human who changes this app. `{{name}}` is a [Forgebase](https://github.com/tvstore/Forgebase) app: a Rust crate with DocTypes (TOML), hooks (Rust) and SQL migrations, compiled into one binary. Build for longevity, not complexity: the simplest change that meets the need wins, and nothing is added before it is needed.
 
 ## Where things live
 

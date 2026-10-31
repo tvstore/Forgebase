@@ -6,7 +6,7 @@ Status: the Project Goal section is **Accepted (owner decision 2026-10-29)**; th
 
 Accepted (owner decision 2026-10-29).
 
-**Vision.** Forgebase is intended to be an open-source (MIT) Rust framework for business applications, with full-stack capabilities comparable to the Frappe Framework (backend, frontend/Desk, developer tools and runtime) that stays simple, secure, modular and maintainable. The repository is private for now; it is not open source yet.
+**Vision.** Forgebase is an open-source (MIT) Rust framework for business applications, with full-stack capabilities comparable to the Frappe Framework (backend, frontend/Desk, developer tools and runtime) that stays simple, secure, modular and maintainable. The repository is public since 2026-10-31.
 
 **Main goal.** Developers build, extend, customize and operate business apps without rebuilding the foundations: metadata, database, authentication, permissions, API, UI, workflow and reporting.
 
