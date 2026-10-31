@@ -28,8 +28,8 @@ env:
 jobs:
   # Which parts of the repository changed (C-4). Draft pull requests run nothing: the first job is
   # skipped and every job that needs it is skipped with it. A skipped job counts as a success for a
-  # required status check. (Branch protection is not available for this private repository on its
-  # plan, so no check is required by job name today; revisit if that changes.) The classification
+  # required status check. (Whether to require checks by job name, with branch protection, is the
+  # owner's choice; none is required today.) The classification
   # is .github/ci/classify-paths.py, unit-tested below. `schedule` and `workflow_dispatch` do not
   # diff: everything runs.
   changes:
@@ -40,6 +40,7 @@ jobs:
       rust: ${{ steps.classify.outputs.rust }}
       desk: ${{ steps.classify.outputs.desk }}
       e2e: ${{ steps.classify.outputs.e2e }}
+      docker: ${{ steps.classify.outputs.docker }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
       all: ${{ steps.classify.outputs.all }}
     steps:
@@ -69,8 +70,8 @@ jobs:
           python3 .github/ci/classify-paths.py --event "$EVENT" < "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/outputs.txt"
           # Fail closed: an empty or malformed result must fail the job, not skip every check.
           cat "$RUNNER_TEMP/outputs.txt"
-          [ "$(cut -d= -f1 "$RUNNER_TEMP/outputs.txt" | paste -sd,)" = "rust,desk,e2e,docs_only,all" ]
-          [ "$(grep -cE '^[a-z0-9_]+=(true|false)$' "$RUNNER_TEMP/outputs.txt")" = 5 ]
+          [ "$(cut -d= -f1 "$RUNNER_TEMP/outputs.txt" | paste -sd,)" = "rust,desk,e2e,docker,docs_only,all" ]
+          [ "$(grep -cE '^[a-z0-9_]+=(true|false)$' "$RUNNER_TEMP/outputs.txt")" = 6 ]
           cat "$RUNNER_TEMP/outputs.txt" >> "$GITHUB_OUTPUT"
 
   # Offline check of the relative links and anchors in the Markdown files (about 10 seconds).
@@ -83,6 +84,63 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 .github/ci/linkcheck.py
+  # The container image (D1, D2): builds the Dockerfile without pushing it anywhere and runs it once
+  # in single-container mode against a PostgreSQL service. Runs only when the Dockerfile,
+  # .dockerignore, deploy/ or .github/ change, and on the weekly and manual runs (which also catch a
+  # change in the crates or the desk that breaks the build). Docker is preinstalled on the runner.
+  docker:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forgebase
+          POSTGRES_PASSWORD: forgebase
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forgebase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image (no push)
+        run: docker build -t forgebase-sales .
+      # `all` mode on the host network (to reach the service on localhost): migrate on start, the
+      # desk and the login page, a login and an authenticated API call, then a graceful stop (the exit
+      # code must be 0, which needs both the server and the worker to stop on SIGTERM).
+      - name: Smoke test, single-container mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name fb --network host \
+            -e FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@localhost:5432/postgres \
+            -e FORGEBASE_MIGRATE_ON_START=1 \
+            -e FORGEBASE_ALLOWED_HOSTS=localhost \
+            -e FORGEBASE_DEV_INSECURE_COOKIES=1 \
+            forgebase-sales all
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://localhost:8000/desk/ && break
+            sleep 1
+          done
+          printf '%s\n' 'ci-smoke-password' | docker exec -i fb forgebase-app user create admin --role Administrator
+          curl -fsS http://localhost:8000/desk/ | grep -q '<title>Forgebase Desk'
+          curl -fsS -c "$RUNNER_TEMP/jar" -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"ci-smoke-password"}' http://localhost:8000/api/v1/login > /dev/null
+          curl -fsS -b "$RUNNER_TEMP/jar" http://localhost:8000/api/v1/meta > /dev/null
+          docker logs fb 2>&1 | grep -q '^worker: started'
+          docker stop fb
+          test "$(docker inspect fb --format '{{.State.ExitCode}}')" = 0
+      - name: Container logs
+        if: failure()
+        run: docker logs fb || true
+
   check:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
