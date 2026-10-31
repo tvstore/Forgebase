@@ -92,8 +92,13 @@ def verify(headers, body):
     # 4. De-duplicate on the delivery id: delivery is at least once.
     if delivery["delivery"] in seen:
         return None          # already handled: answer 200 and do nothing
-    seen.add(delivery["delivery"])
     return delivery
+
+
+def handled(delivery):
+    """Call this only after the work for the delivery has succeeded (or has been safely queued):
+    a delivery whose work failed must not be marked, so that its retry is processed."""
+    seen.add(delivery["delivery"])
 ```
 
 Rules that matter:
@@ -102,7 +107,8 @@ Rules that matter:
 - Compare with `hmac.compare_digest` (constant time), never `==`.
 - Check the timestamp; the timestamp is part of the signed text, so it cannot be changed without breaking the signature. Each retry has a fresh timestamp and signature, with the same delivery id.
 - Answer **2xx quickly** (the limit is 10 seconds for everything), and do the real work after answering. A slow or failing receiver is retried, and each retry is the same delivery.
-- De-duplicate on `X-Forgebase-Delivery` (also `delivery` in the body), and make the work safe to repeat.
+- De-duplicate on `X-Forgebase-Delivery` (also `delivery` in the body), and make the work safe to repeat. Record a delivery id as handled only **after** its work has succeeded; if you answer an error, the retry carries the same id and must not be skipped.
+- Migrations do not send webhooks: app SQL migrations and the workflow-state backfill of `migrate` write without the document operations.
 - After `webhook rotate-secret` the receiver must use the new secret. Switch both at the same time, or accept both for a while.
 
 A complete receiver is about twenty more lines with `http.server`; the recipe above is the part that matters.
