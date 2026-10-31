@@ -58,11 +58,15 @@ pub enum Right {
     Cancel,
     /// Amend a cancelled document (submittable DocTypes).
     Amend,
+    /// Download documents as a file (M9.3, ADR 0021). Needs `read` as well.
+    Export,
+    /// Upload a file of documents (M9.3, ADR 0021). Needs `create` (and `write` to upsert).
+    Import,
 }
 
 impl Right {
     /// Every right, in the order of the `[[permissions]]` keys.
-    pub const ALL: [Right; 7] = [
+    pub const ALL: [Right; 9] = [
         Right::Read,
         Right::Write,
         Right::Create,
@@ -70,6 +74,8 @@ impl Right {
         Right::Submit,
         Right::Cancel,
         Right::Amend,
+        Right::Export,
+        Right::Import,
     ];
 
     /// The key used in `[[permissions]]` and in messages: `read`, `write`, ...
@@ -82,6 +88,8 @@ impl Right {
             Right::Submit => "submit",
             Right::Cancel => "cancel",
             Right::Amend => "amend",
+            Right::Export => "export",
+            Right::Import => "import",
         }
     }
 }
@@ -111,6 +119,10 @@ pub struct PermissionRule {
     pub cancel: bool,
     /// May amend. Only allowed on a submittable DocType.
     pub amend: bool,
+    /// May export documents as a file (needs `read` too).
+    pub export: bool,
+    /// May import documents from a file (needs `create`, and `write` to upsert).
+    pub import: bool,
     /// The rights apply to documents whose `owner` is the caller only. (A create is always for
     /// a new document the caller owns, so `if_owner` does not restrict create.)
     pub if_owner: bool,
@@ -129,6 +141,8 @@ impl PermissionRule {
             submit: false,
             cancel: false,
             amend: false,
+            export: false,
+            import: false,
             if_owner: false,
         }
     }
@@ -143,6 +157,8 @@ impl PermissionRule {
             Right::Submit => self.submit,
             Right::Cancel => self.cancel,
             Right::Amend => self.amend,
+            Right::Export => self.export,
+            Right::Import => self.import,
         }
     }
 }
@@ -337,6 +353,8 @@ mod tests {
             Right::Submit => rule.submit = true,
             Right::Cancel => rule.cancel = true,
             Right::Amend => rule.amend = true,
+            Right::Export => rule.export = true,
+            Right::Import => rule.import = true,
         }
         rule
     }
@@ -475,7 +493,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "read", "write", "create", "delete", "submit", "cancel", "amend"
+                "read", "write", "create", "delete", "submit", "cancel", "amend", "export",
+                "import"
             ]
         );
         assert_eq!(Right::Amend.to_string(), "amend");

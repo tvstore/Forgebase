@@ -55,6 +55,7 @@ read = true
 write = true
 create = true
 submit = true
+export = true
 
 [[permissions]]
 role = "Sales Manager"
@@ -65,6 +66,7 @@ delete = true
 submit = true
 cancel = true
 amend = true
+export = true
 
 # The approval workflow (ADR 0015). The first state is the initial one. A transition needs one of its roles AND the right its move needs
 # (`write` for 0 to 0, `submit` for 0 to 1, `cancel` for 1 to 2): the roles below narrow the rules above, they never widen them.

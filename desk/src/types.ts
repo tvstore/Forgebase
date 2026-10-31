@@ -2,7 +2,7 @@
 
 export type Access = 'all' | 'own' | 'none';
 
-export type Right = 'read' | 'write' | 'create' | 'delete' | 'submit' | 'cancel' | 'amend';
+export type Right = 'read' | 'write' | 'create' | 'delete' | 'submit' | 'cancel' | 'amend' | 'export' | 'import';
 
 export type Rights = Record<Right, Access>;
 

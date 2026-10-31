@@ -96,12 +96,14 @@ async fn rights_are_all_own_or_none_from_the_one_evaluator() {
     assert_eq!(
         rights(&data, "bill"),
         json!({"read": "all", "write": "all", "create": "all", "delete": "all",
-               "submit": "all", "cancel": "all", "amend": "all"})
+               "submit": "all", "cancel": "all", "amend": "all",
+               "export": "all", "import": "all"})
     );
     assert_eq!(
         rights(&data, "note"),
         json!({"read": "all", "write": "all", "create": "all", "delete": "all",
-               "submit": "none", "cancel": "none", "amend": "none"})
+               "submit": "none", "cancel": "none", "amend": "none",
+               "export": "all", "import": "all"})
     );
     assert_eq!(entry(&data, "bill")["submittable"], true);
     assert_eq!(entry(&data, "bill")["label"], "Bill");
@@ -113,7 +115,8 @@ async fn rights_are_all_own_or_none_from_the_one_evaluator() {
     assert_eq!(
         rights(&data, "note"),
         json!({"read": "own", "write": "own", "create": "own", "delete": "own",
-               "submit": "none", "cancel": "none", "amend": "none"})
+               "submit": "none", "cancel": "none", "amend": "none",
+               "export": "none", "import": "none"})
     );
 
     let clerk = env.login("clerk").await;
@@ -121,7 +124,8 @@ async fn rights_are_all_own_or_none_from_the_one_evaluator() {
     assert_eq!(
         rights(&data, "item"),
         json!({"read": "all", "write": "none", "create": "all", "delete": "all",
-               "submit": "none", "cancel": "none", "amend": "none"})
+               "submit": "none", "cancel": "none", "amend": "none",
+               "export": "none", "import": "none"})
     );
 
     let reader = env.login("reader").await;
@@ -134,7 +138,8 @@ async fn rights_are_all_own_or_none_from_the_one_evaluator() {
     assert_eq!(
         rights(&data, "bill"),
         json!({"read": "all", "write": "none", "create": "none", "delete": "none",
-               "submit": "none", "cancel": "none", "amend": "none"})
+               "submit": "none", "cancel": "none", "amend": "none",
+               "export": "none", "import": "none"})
     );
 }
 

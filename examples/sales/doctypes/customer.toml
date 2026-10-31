@@ -60,9 +60,11 @@ target = "customer_group"
 
 # Who may do what (ADR 0011). The `forgebase doc` commands run as the trusted system context and ignore these rules;
 # they apply to real users (HTTP API, M3.3). A DocType without rules is closed to everyone except `Administrator`.
+# `export` (with `read`) and `import` (with `create`) are rights of their own (M9.3, ADR 0021): nobody has them until a rule grants them.
 [[permissions]]
 role = "Sales User"
 read = true
+export = true
 
 [[permissions]]
 role = "Sales Manager"
@@ -70,3 +72,5 @@ read = true
 write = true
 create = true
 delete = true
+export = true
+import = true
