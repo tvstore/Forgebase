@@ -167,15 +167,13 @@ impl std::ops::Deref for ReportConnection {
 
     fn deref(&self) -> &Client {
         // `object` is `Some` until `drop`.
-        let object = self.object.as_ref().expect("the connection is present");
-        &***object
+        self.object.as_ref().expect("the connection is present")
     }
 }
 
 impl std::ops::DerefMut for ReportConnection {
     fn deref_mut(&mut self) -> &mut Client {
-        let object = self.object.as_mut().expect("the connection is present");
-        &mut ***object
+        self.object.as_mut().expect("the connection is present")
     }
 }
 

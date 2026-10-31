@@ -34,14 +34,8 @@ fn assert_envelope(reply: &Reply, status: StatusCode, code: &str) {
 async fn every_kind_of_failure_uses_the_envelope() {
     let (env, s) = env_with_writer().await;
     let big = vec![b'a'; 10];
-    // Unknown routes, `method` is not implemented, wrong methods.
-    for uri in [
-        "/",
-        "/api",
-        "/api/v1",
-        "/api/v1/method/frappe.ping",
-        "/api/v1/resource",
-    ] {
+    // Unknown routes, wrong methods.
+    for uri in ["/", "/api", "/api/v1", "/api/v1/method", "/api/v1/resource"] {
         assert_envelope(
             &env.send(get(uri).session(&s)).await,
             StatusCode::NOT_FOUND,
@@ -53,6 +47,31 @@ async fn every_kind_of_failure_uses_the_envelope() {
             .await,
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
+    );
+    // The route of the app methods (M9.1) is POST only. This test environment has no dispatcher
+    // and no methods (they come with the `forgebase` crate): a call is the 404 of an unknown
+    // method, and without a credential it is the 401 first.
+    assert_envelope(
+        &env.send(get("/api/v1/method/frappe.ping").session(&s))
+            .await,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+    );
+    assert_envelope(
+        &env.send(post("/api/v1/method/frappe.ping").json(serde_json::json!({})))
+            .await,
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated",
+    );
+    assert_envelope(
+        &env.send(
+            post("/api/v1/method/frappe.ping")
+                .session(&s)
+                .json(serde_json::json!({})),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "not_found",
     );
     assert_envelope(
         &env.send(get("/api/v1/login")).await,

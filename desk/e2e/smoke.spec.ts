@@ -898,7 +898,8 @@ async function focusIndicator(target: Locator): Promise<{ outline: boolean; shad
       context.fillStyle = '#010203'; // sentinel: an unparsable colour leaves it in place
       context.fillStyle = color;
       context.fillRect(0, 0, 1, 1);
-      const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+      const data = context.getImageData(0, 0, 1, 1).data;
+      const [r = 0, g = 0, b = 0, a = 0] = Array.from(data);
       if (r === 1 && g === 2 && b === 3 && a === 255) throw new Error(`cannot read the colour ${color}`);
       return [r, g, b, a / 255];
     };
