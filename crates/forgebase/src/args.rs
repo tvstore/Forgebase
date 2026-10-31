@@ -55,6 +55,13 @@ pub enum Command {
     /// Create and revoke API tokens.
     #[command(subcommand)]
     Token(TokenCommand),
+    /// Manage the outgoing webhooks of a site (M9.2, ADR 0020): a webhook posts a signed JSON
+    /// snapshot of a document to a URL after it was inserted, updated, deleted, submitted,
+    /// cancelled or moved by a workflow transition. A document operation enqueues the delivery in
+    /// its own transaction, and `forgebase worker` sends it (so a site that has webhooks needs a
+    /// running worker). Secrets are printed once, by `add` and `rotate-secret`, and never again.
+    #[command(subcommand)]
+    Webhook(WebhookCommand),
     /// List the sites of the config file, create the database of a site, and back it up and
     /// restore it. `--site` is not used here: the commands take the site name as an argument.
     #[command(subcommand)]
@@ -126,12 +133,15 @@ impl Command {
                 empty: false,
                 ..
             }) => Some(doctypes),
+            // Only `webhook add` needs the DocTypes (to check the DocType of the webhook).
+            Command::Webhook(WebhookCommand::Add { doctypes, .. }) => Some(doctypes),
             Command::Site(
                 SiteCommand::Create { empty: true, .. }
                 | SiteCommand::Backup { .. }
                 | SiteCommand::Restore { .. }
                 | SiteCommand::List,
             )
+            | Command::Webhook(_)
             | Command::User(_)
             | Command::Token(_)
             | Command::Job(_)
@@ -151,6 +161,18 @@ impl Command {
             Command::NewApp { .. } => ["new-app", ""],
             Command::User(_) => ["user", ""],
             Command::Token(_) => ["token", ""],
+            Command::Webhook(webhook) => [
+                "webhook",
+                match webhook {
+                    WebhookCommand::Add { .. } => "add",
+                    WebhookCommand::List => "list",
+                    WebhookCommand::Disable { .. } => "disable",
+                    WebhookCommand::Enable { .. } => "enable",
+                    WebhookCommand::Remove { .. } => "remove",
+                    WebhookCommand::RotateSecret { .. } => "rotate-secret",
+                    WebhookCommand::Test { .. } => "test",
+                },
+            ],
             Command::Site(SiteCommand::List) => ["site", "list"],
             Command::Site(SiteCommand::Create { .. }) => ["site", "create"],
             Command::Site(SiteCommand::Backup { .. }) => ["site", "backup"],
@@ -344,6 +366,83 @@ pub enum TokenCommand {
     Revoke {
         /// The key (the part before the colon).
         key: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WebhookCommand {
+    /// Add a webhook and print its secret once. The secret signs every delivery
+    /// (`X-Forgebase-Signature`, HMAC-SHA256); store it now, it cannot be shown again. It is kept
+    /// in the site's database in plain text (the signature needs it), so anyone who can read
+    /// that database can read it. The URL must be `https://` and must not contain user info; the
+    /// DocType must exist and must not be a child DocType. At delivery time the host is
+    /// resolved and must not be a loopback, private, link-local or reserved address (see
+    /// --allow-private).
+    Add {
+        /// The webhook name: lower-case letters, digits and underscores, starting with a letter.
+        name: String,
+        /// The DocType whose documents trigger the webhook.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: String,
+        /// The events, comma separated: insert, update, delete, submit, cancel, transition. A
+        /// workflow transition that submits or cancels the document also fires `submit` or
+        /// `cancel`; an amendment fires `insert`.
+        #[arg(long, value_name = "EVENTS", value_delimiter = ',')]
+        events: Vec<String>,
+        /// The URL deliveries are posted to.
+        #[arg(long, value_name = "URL")]
+        url: String,
+        /// Allow the URL to resolve to a loopback, private, link-local or reserved address
+        /// (including the cloud metadata address). Off by default: it is the SSRF guard. Use it
+        /// only for a receiver inside your own network.
+        #[arg(long)]
+        allow_private: bool,
+        /// Allow `http://` instead of `https://`. For development only: the payload and its
+        /// signature travel unencrypted.
+        #[arg(long)]
+        insecure_http: bool,
+        /// Read the secret from the first line of standard input instead of generating 32 random
+        /// bytes. It is not printed back.
+        #[arg(long)]
+        secret_stdin: bool,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+    },
+    /// Print the webhooks as a table: name, DocType, events, the scheme, host and port of the
+    /// URL (never its path or query, which may hold a token), whether it is enabled and its two
+    /// flags. Never a secret.
+    List,
+    /// Stop a webhook: no new delivery is enqueued, and queued ones are dropped when they run.
+    Disable {
+        /// The webhook name.
+        name: String,
+    },
+    /// Enable a disabled webhook.
+    Enable {
+        /// The webhook name.
+        name: String,
+    },
+    /// Delete a webhook. Queued deliveries are dropped when they run.
+    Remove {
+        /// The webhook name.
+        name: String,
+    },
+    /// Give a webhook a new secret and print it once (or read it from standard input with
+    /// --secret-stdin). Deliveries signed with the old one are no longer valid for the receiver
+    /// once it switches: update the receiver first or accept both for a while.
+    RotateSecret {
+        /// The webhook name.
+        name: String,
+        /// Read the new secret from the first line of standard input.
+        #[arg(long)]
+        secret_stdin: bool,
+    },
+    /// Send one test delivery (`event` is `test`) now, signed and checked like a real one, without
+    /// the queue. Prints the HTTP status of the answer, or why the delivery was refused. Exit
+    /// code 0 for a 2xx answer, 1 otherwise. It works even if the webhook is disabled.
+    Test {
+        /// The webhook name.
+        name: String,
     },
 }
 
