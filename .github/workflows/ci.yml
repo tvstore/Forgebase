@@ -536,3 +536,32 @@ jobs:
       - name: Show the server log
         if: failure()
         run: tail -n 100 server.log
+
+  # The single required status check of the branch ruleset on main (owner decision of 2026-10-31,
+  # docs/blueprint/maintenance-policy.md, "CI"). It runs always, also when a job failed or was
+  # cancelled, and fails unless every job it needs finished with `success` or `skipped` (a skipped
+  # job is how path filtering and draft pull requests leave jobs out). Any other result, including
+  # one this script does not know, fails. A job added to this workflow must be added to `needs`
+  # here, or the ruleset does not guard it. On a draft pull request nothing else runs, so this job
+  # reports success without meaning anything; CI runs again when the pull request is marked ready.
+  ci-result:
+    if: always()
+    needs: [changes, docs, check, sites, msrv-deny, app-template, desk, e2e, docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          if not needs:
+              sys.exit("no job result to check")
+          bad = {name: job.get("result") for name, job in needs.items() if job.get("result") not in ("success", "skipped")}
+          for name, job in sorted(needs.items()):
+              print(f"{name}: {job.get('result')}")
+          if bad:
+              sys.exit(f"failed, cancelled or unknown: {bad}")
+          PY
