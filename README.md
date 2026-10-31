@@ -30,6 +30,7 @@ You describe a business entity (a customer, an order, an invoice) in a small TOM
 - **Backups**: `site backup` and `site restore` with the PostgreSQL client tools ([operations guide](docs/guide/operations.md#backups)).
 - **Reports**: SQL query reports that run by role in a read-only transaction ([reports](docs/guide/workflow-and-reports.md#3-query-reports)).
 - **Apps**: your DocTypes, hooks, jobs and migrations in a Rust crate that depends on the public API only ([first app](docs/guide/first-app.md)).
+- **Webhooks**: signed JSON deliveries of document events to other systems, sent after the commit, with an SSRF guard ([webhooks guide](docs/guide/webhooks.md)).
 
 ## Quick start in 5 minutes
 
@@ -68,12 +69,12 @@ All guides are indexed in [docs/README.md](docs/README.md). The main ones:
 
 - [Getting started](docs/guide/getting-started.md), [Your first app](docs/guide/first-app.md) and [the command-line tool](docs/guide/cli.md)
 - [HTTP API](docs/guide/http-api.md), [Desk](docs/guide/desk.md) and [Workflow, saved views and reports](docs/guide/workflow-and-reports.md)
-- [Operating Forgebase](docs/guide/operations.md) and [Deploy](docs/guide/deploy.md)
+- [Webhooks](docs/guide/webhooks.md), [Operating Forgebase](docs/guide/operations.md) and [Deploy](docs/guide/deploy.md)
 - The blueprint: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [security model](docs/blueprint/security-model.md), [dependency evaluation](docs/blueprint/dependency-evaluation.md) and the [ADRs](docs/adr/README.md)
 
 ## Status and roadmap
 
-Milestones M0 to M8 are done (documents, auth and permissions, the REST API, the desk, apps, jobs, multi-site, workflow and reports); M9, integration, is in progress (TLS to PostgreSQL and app method endpoints are done; webhooks, import and export and fixtures follow). The details and the roadmap are in [docs/blueprint/milestones.md](docs/blueprint/milestones.md); the full status is in [docs/README.md](docs/README.md#project-status). The repository is public and the project is open source.
+Milestones M0 to M8 are done (documents, auth and permissions, the REST API, the desk, apps, jobs, multi-site, workflow and reports); M9, integration, is in progress (TLS to PostgreSQL, app method endpoints and outgoing webhooks are done; import and export and fixtures follow). The details and the roadmap are in [docs/blueprint/milestones.md](docs/blueprint/milestones.md); the full status is in [docs/README.md](docs/README.md#project-status). The repository is public and the project is open source.
 
 ## Contributing
 

@@ -9,7 +9,7 @@
 //!
 //! Every document operation of this crate ([`crate::insert`], [`crate::update`], [`crate::delete`],
 //! [`crate::submit`], [`crate::cancel`], [`crate::amend`] and [`crate::transition`]) calls
-//! [`enqueue`] inside its own transaction, after the hooks and before the commit. So the call is
+//! `enqueue` inside its own transaction, after the hooks and before the commit. So the call is
 //! in the one place that every writer passes through (the HTTP API, the CLI, the `Documents` of
 //! jobs and methods, hooks that write), and a rolled-back operation enqueues nothing.
 //!

@@ -1,6 +1,6 @@
 # The command-line tool
 
-Walkthrough of the `forgebase` commands (or the binary of your app) for users and tokens, background jobs and sites. The document commands (`doc`) are in [Getting started](getting-started.md#quick-start). Run `forgebase --help` for every option.
+Walkthrough of the `forgebase` commands (or the binary of your app) for users and tokens, background jobs, webhooks and sites. The document commands (`doc`) are in [Getting started](getting-started.md#quick-start). Run `forgebase --help` for every option.
 
 ## Users and tokens
 
@@ -77,6 +77,42 @@ App::new("crm")
 `Schedule::every_minutes(n)` (1 to 1440) ticks at the times where the minutes since the Unix epoch are divisible by `n`: every 15 gives :00, :15, :30 and :45. Run `forgebase migrate` after you add, change or remove a schedule (it stores the schedules the binary declares and **deletes the others**), and keep `forgebase worker` running: it enqueues each tick once, however many workers run, with the payload `{"scheduled_for": "<the tick, RFC 3339 UTC>"}` (use it for idempotency). Ticks missed while no worker ran are not caught up: one job runs, then the next future time. In tests, `forgebase::testing::run_schedules_at(&binary, &db, at)` enqueues what is due at `at`, and `run_jobs` runs it.
 
 The framework schedules its own clean-up in every binary (app name `forgebase`, reserved): finished jobs, done or dead, 7 days after they finished (daily at 03:00 UTC), stale login-failure rows and expired sessions (every 60 minutes). They need a running worker.
+
+The framework's own job `forgebase.deliver_webhook` has no schedule: document operations enqueue it for the [webhooks](#webhook-commands-m92) of the site.
+
+## Webhook commands (M9.2)
+
+A webhook sends a signed JSON snapshot of a document to a URL after it was inserted, updated, deleted, submitted, cancelled or moved by a workflow transition ([ADR 0020](../adr/0020-outgoing-webhooks.md); the receiving side, the headers and a verification recipe are in the [webhooks guide](webhooks.md)). Webhooks belong to a **site** (they are rows of its database), so they take `--site` like the other database commands. The delivery is a job: **a site that has webhooks needs a running `forgebase worker`**.
+
+```sh
+# Add one. The secret is printed once; store it now.
+cargo run -p sales -- webhook add orders \
+  --doctype sales_order --events insert,submit \
+  --url https://hooks.example.com/forgebase/orders --site main
+# added webhook orders
+# secret: 3f9c...   (64 hex characters; it signs every delivery)
+
+cargo run -p sales -- webhook list
+# NAME    DOCTYPE      EVENTS         URL                          ENABLED  ALLOW_PRIVATE  INSECURE_HTTP
+# orders  sales_order  insert,submit  https://hooks.example.com:443  yes    no             no
+
+cargo run -p sales -- webhook test orders       # one signed test delivery, now, without the queue
+cargo run -p sales -- webhook disable orders    # no new deliveries; queued ones are dropped when they run
+cargo run -p sales -- webhook enable orders
+cargo run -p sales -- webhook rotate-secret orders   # prints a new secret once
+cargo run -p sales -- webhook remove orders
+```
+
+- **`add NAME --doctype D --events E1,E2 --url URL`.** The name follows the rules of a DocType name (lower-case letters, digits, underscores). The DocType must exist on the site and must not be a child DocType. The events are `insert`, `update`, `delete`, `submit`, `cancel` and `transition`; a workflow transition that submits or cancels the document also fires `submit` or `cancel`, and an amendment fires `insert`. The URL must be `https://`, have a host and **no user info** (`user:password@` is refused: put a token in the path or, better, verify the signature). Like the `doc` commands it needs `--doctypes DIR` when the binary has no apps. Every error repeats nothing of the URL.
+- **`--secret-stdin`** (on `add` and `rotate-secret`) reads the secret from the first line of standard input instead of generating one (32 random bytes as hex). It is not printed back. The secret is **stored in plain text** in the site's database, because the signature needs it: anyone who can read the database or a backup of it can read it.
+- **`--allow-private`** lets the URL resolve to a loopback, private, link-local or reserved address, **the cloud metadata address included**. Without it such a delivery is refused for good (the SSRF guard). Use it only for a receiver inside your own network, and know that it widens what the worker can reach.
+- **`--insecure-http`** allows `http://`, for development only: the payload and the signature travel unencrypted. `add` prints a warning and `list` shows the flag.
+- **`list`** prints the host of the URL (scheme, host and port) but never its path or query, which often hold a token, and never the secret.
+- **`test NAME`** sends one delivery with `event` `test` and the same signature, address check and time limit as a real one, **synchronously** and without the queue, and works for a disabled webhook. It prints `HTTP <status>` and exits 0 for a 2xx answer; for any other answer, a refused address or a network error it exits 1 and says why. Use it after `add` to check the receiver and the secret.
+- **`disable`, `enable`, `remove`** change the webhook at once. A delivery that is already in the queue finds the webhook gone or disabled when it runs, **completes without sending** and is logged.
+
+To see what happened to deliveries use the job commands: `forgebase job list --name forgebase.deliver_webhook` (a failing receiver shows `HTTP 500` or a connection error in `LAST_ERROR`, never the URL path), `job show ID` and `job retry ID` for a dead one (5 attempts, 30 s doubling up to 1 h).
+
 
 ## Sites
 
