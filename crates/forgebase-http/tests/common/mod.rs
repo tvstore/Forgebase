@@ -572,14 +572,36 @@ impl Env {
         Self::build_pooled(AppConfig::default(), &[], reports, Some(pool_size)).await
     }
 
+    /// The test DocTypes and those of `extra`, with these hooks (by DocType) and this config.
+    pub async fn with_hooks(
+        config: AppConfig,
+        extra: &[&str],
+        hooks: Vec<(&str, Arc<dyn DocTypeHooks>)>,
+    ) -> Self {
+        Self::build_all(config, extra, Vec::new(), None, hooks).await
+    }
+
     async fn build_pooled(
         config: AppConfig,
         extra: &[&str],
         reports: Vec<ReportDef>,
         pool_size: Option<usize>,
     ) -> Self {
+        Self::build_all(config, extra, reports, pool_size, Vec::new()).await
+    }
+
+    async fn build_all(
+        config: AppConfig,
+        extra: &[&str],
+        reports: Vec<ReportDef>,
+        pool_size: Option<usize>,
+        hooks: Vec<(&str, Arc<dyn DocTypeHooks>)>,
+    ) -> Self {
         let db = TestDb::migrated().await;
         let mut registry = registry_with(extra);
+        for (doctype, hook) in hooks {
+            registry.add_hooks(doctype, hook).expect("hooks");
+        }
         for report in reports {
             assert!(registry.add_report(report), "duplicate report");
         }
