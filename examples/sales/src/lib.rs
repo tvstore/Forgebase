@@ -255,7 +255,7 @@ impl JobHandler for LogOrderEvent {
                 // work is done.
                 return match documents.get("sales_order_log", &key).await {
                     Ok(Some(_)) => Ok(()),
-                    _ => Err(error),
+                    _ => Err(error.into()),
                 };
             }
             Ok(())
@@ -343,7 +343,7 @@ impl JobHandler for DailySummary {
                 // insert, in a savepoint): the summary exists, so the work is done.
                 return match documents.get("sales_daily_summary", &key).await {
                     Ok(Some(_)) => Ok(()),
-                    _ => Err(error),
+                    _ => Err(error.into()),
                 };
             }
             Ok(())

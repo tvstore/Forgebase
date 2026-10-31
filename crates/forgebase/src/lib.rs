@@ -116,7 +116,7 @@ pub mod testing;
 pub use app::{App, DocTypeFile, MigrationFile};
 pub use builder::Forgebase;
 pub use compose::StartupError;
-pub use documents::{Documents, FilterOp, ListQuery, StoredDocument};
+pub use documents::{DocError, Documents, FilterOp, ListQuery, StoredDocument};
 pub use jobs::{JobContext, JobError, JobFuture, JobHandler, JobOptions};
 pub use reports::{Column, Param, Report};
 pub use schedule::Schedule;

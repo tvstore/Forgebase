@@ -89,8 +89,8 @@ pub trait JobHandler: Send + Sync {
 /// Why a job failed. [`JobError::new`] is retried (until the attempts are used up);
 /// [`JobError::permanent`] goes straight to `dead`.
 ///
-/// Errors of [`Documents`] become a `JobError` like this: a database or connection error is
-/// **retryable** (the same call may well work later); a validation error, a permission error, a
+/// Errors of [`Documents`] ([`DocError`](crate::DocError)) become a `JobError` with `?`, like this:
+/// a database or connection error is **retryable** (the same call may well work later); a validation error, a permission error, a
 /// hook that rejected, a document that was not found, a version conflict, a unique violation and
 /// every other refusal is **permanent**, because it would fail again.
 #[derive(Debug, Clone, PartialEq, Eq)]

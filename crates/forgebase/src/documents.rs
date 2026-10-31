@@ -1,14 +1,18 @@
-//! [`Documents`]: what a job may do with documents, and the small types around it.
+//! [`Documents`]: what a job or a method may do with documents, [`DocError`], and the small
+//! types around them.
 //!
 //! A job runs as the trusted **system context** (`Caller::System`, no permission rules) with the
-//! actor `job:<app>.<job>`, which is recorded as `owner` / `modified_by` and given to hooks. Every
-//! call uses the same document functions as the CLI and the HTTP API, so validation, naming and
+//! actor `job:<app>.<job>`, which is recorded as `owner` / `modified_by` and given to hooks. A
+//! method (ADR 0019) runs as the **caller**: a `Caller::User` built from the authenticated
+//! request, so the permission evaluator of ADR 0011 decides every call. Either way every call
+//! uses the same document functions as the CLI and the HTTP API, so validation, naming and
 //! the lifecycle hooks run as usual; each write (and each enqueue) is one **savepoint** inside
-//! the job's transaction, so a refused write leaves the job's transaction usable and a refused
-//! or failed job rolls all of them back. Reads (`get`, `list`) run directly on the job's
-//! transaction: a failed read aborts it, so the attempt fails and is retried. Jobs enqueued by
-//! the hooks of these calls are written in the same transaction.
+//! the surrounding transaction, so a refused write leaves it usable and a refused or failed job
+//! or method rolls all of them back. Reads (`get`, `list`) run directly on the transaction: a
+//! failed read aborts it, so the attempt fails (a job is retried). Jobs enqueued by the hooks
+//! of these calls are written in the same transaction.
 
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -19,6 +23,56 @@ use forgebase_core::value::Value;
 use forgebase_db::{DbError, Transaction};
 
 use crate::jobs::JobError;
+
+/// Why a [`Documents`] call failed: the database function's own error, wrapped.
+///
+/// - In a **job**, `?` turns it into a [`JobError`] exactly as before: a database or connection
+///   error is retried, every refusal (validation, permission, hook veto, not found, version
+///   conflict, unique violation, an invalid list query) is permanent.
+/// - In a **method**, `?` turns it into a [`MethodError`](crate::MethodError) with the status
+///   and code the HTTP API gives the same error (`permission_denied` 403, `not_found` 404,
+///   `conflict` 409, `validation_failed` 422, ...); an internal or database error is a generic
+///   500 and nothing of it is sent to the client.
+///
+/// The [`Display`](fmt::Display) text is meant for the server's log and a job's `last_error`:
+/// it can name a constraint or a server message, so do not copy it into a message for users.
+#[derive(Debug)]
+pub struct DocError {
+    error: DbError,
+}
+
+impl DocError {
+    pub(crate) fn new(error: DbError) -> Self {
+        Self { error }
+    }
+
+    /// The database error, for the dispatcher of methods.
+    pub(crate) fn into_db(self) -> DbError {
+        self.error
+    }
+
+    /// Whether the same call may work if it is tried again later: a database or connection
+    /// error. A refusal (validation, permission, hook veto, not found, conflict, ...) is not
+    /// retryable.
+    pub fn is_retryable(&self) -> bool {
+        !JobError::from_db(&self.error).is_permanent()
+    }
+}
+
+impl fmt::Display for DocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&crate::error::describe_db(&self.error))
+    }
+}
+
+impl std::error::Error for DocError {}
+
+impl From<DocError> for JobError {
+    /// Retryable errors become [`JobError::new`], all others [`JobError::permanent`].
+    fn from(error: DocError) -> Self {
+        JobError::from_db(&error.error)
+    }
+}
 
 type Fut<'f, T> = Pin<Box<dyn Future<Output = Result<T, DbError>> + Send + 'f>>;
 
@@ -128,7 +182,7 @@ impl ListQuery {
         self
     }
 
-    fn to_db(&self) -> Result<forgebase_db::ListQuery, JobError> {
+    fn to_db(&self) -> Result<forgebase_db::ListQuery, DocError> {
         use forgebase_db::{Filter, FilterOp as Db, Sort};
         let mut filters = Vec::new();
         for (field, op, value) in &self.filters {
@@ -141,9 +195,9 @@ impl ListQuery {
                 (FilterOp::Ge, v) => Db::Ge(v.clone()),
                 (FilterOp::Like, Value::Text(pattern)) => Db::Like(pattern.clone()),
                 (FilterOp::Like, _) => {
-                    return Err(JobError::permanent(format!(
-                        "invalid list query: the `like` filter on `{field}` needs a text value"
-                    )));
+                    return Err(DocError::new(DbError::InvalidQuery(format!(
+                        "the `like` filter on `{field}` needs a text value"
+                    ))));
                 }
             };
             filters.push(Filter::new(field.clone(), op));
@@ -196,11 +250,18 @@ trait DocTx: Send {
         c: &'f Caller,
     ) -> Fut<'f, forgebase_db::StoredDocument>;
     fn delete<'f>(&'f mut self, r: &'f Registry, at: At<'f>, c: &'f Caller) -> Fut<'f, ()>;
-    fn transition<'f>(
+    fn step<'f>(
         &'f mut self,
         step: Step,
         r: &'f Registry,
         at: At<'f>,
+        c: &'f Caller,
+    ) -> Fut<'f, forgebase_db::StoredDocument>;
+    fn workflow<'f>(
+        &'f mut self,
+        r: &'f Registry,
+        at: At<'f>,
+        action: &'f str,
         c: &'f Caller,
     ) -> Fut<'f, forgebase_db::StoredDocument>;
 }
@@ -264,7 +325,18 @@ impl DocTx for Transaction<'_> {
             self, r, at.doctype, at.name, at.version, c,
         ))
     }
-    fn transition<'f>(
+    fn workflow<'f>(
+        &'f mut self,
+        r: &'f Registry,
+        at: At<'f>,
+        action: &'f str,
+        c: &'f Caller,
+    ) -> Fut<'f, forgebase_db::StoredDocument> {
+        Box::pin(forgebase_db::transition(
+            self, r, at.doctype, at.name, action, at.version, c,
+        ))
+    }
+    fn step<'f>(
         &'f mut self,
         step: Step,
         r: &'f Registry,
@@ -285,14 +357,19 @@ impl DocTx for Transaction<'_> {
     }
 }
 
-/// The documents a job can reach, as the system context. Get it from
-/// [`JobContext::documents`](crate::JobContext::documents). Every method returns
-/// `Result<_, JobError>`; see [`JobError`] for which database errors are retried and which end
-/// the job.
+/// The documents a job or a method can reach. Get it from
+/// [`JobContext::documents`](crate::JobContext::documents) (the system context) or
+/// [`MethodContext::documents`](crate::MethodContext::documents) (the caller). Every method
+/// returns `Result<_, DocError>`; see [`DocError`] for what a job and a method make of it.
 ///
 /// The arguments are those of the matching `forgebase doc` command: the DocType name, the
 /// document name, and for a change the `version` that was read (a document changed by someone
-/// else in between is a version conflict, which is permanent).
+/// else in between is a version conflict, which is not retryable).
+///
+/// Every call acts as the caller the handle was made with, through the same functions as the
+/// HTTP API, so the permission rules of ADR 0011 (`if_owner`, read rules on `get` and `list`,
+/// read-only fields, workflow roles) are the only decision. A job's handle is the system
+/// context, which no rule restricts.
 pub struct Documents<'a> {
     tx: &'a mut dyn DocTx,
     registry: &'a Registry,
@@ -312,31 +389,30 @@ impl<'a> Documents<'a> {
         }
     }
 
-    /// The document, or `None` when there is none with this name.
+    /// The document, or `None` when there is none with this name (or the caller may not read
+    /// it).
     pub async fn get(
         &mut self,
         doctype: &str,
         name: &str,
-    ) -> Result<Option<StoredDocument>, JobError> {
+    ) -> Result<Option<StoredDocument>, DocError> {
         let found = self.tx.get(self.registry, doctype, name, self.caller).await;
-        Ok(found
-            .map_err(|e| JobError::from_db(&e))?
-            .map(StoredDocument::new))
+        Ok(found.map_err(DocError::new)?.map(StoredDocument::new))
     }
 
-    /// A page of documents; their table rows are not listed.
+    /// A page of documents (only those the caller may read); their table rows are not listed.
     pub async fn list(
         &mut self,
         doctype: &str,
         query: &ListQuery,
-    ) -> Result<Vec<StoredDocument>, JobError> {
+    ) -> Result<Vec<StoredDocument>, DocError> {
         let query = query.to_db()?;
         let found = self
             .tx
             .list(self.registry, doctype, self.caller, &query)
             .await;
         Ok(found
-            .map_err(|e| JobError::from_db(&e))?
+            .map_err(DocError::new)?
             .into_iter()
             .map(StoredDocument::new)
             .collect())
@@ -347,14 +423,12 @@ impl<'a> Documents<'a> {
         &mut self,
         doctype: &str,
         document: Document,
-    ) -> Result<StoredDocument, JobError> {
+    ) -> Result<StoredDocument, DocError> {
         let stored = self
             .tx
             .insert(self.registry, doctype, document, self.caller)
             .await;
-        stored
-            .map(StoredDocument::new)
-            .map_err(|e| JobError::from_db(&e))
+        stored.map(StoredDocument::new).map_err(DocError::new)
     }
 
     /// Changes a document that is at `version`, and returns it as stored.
@@ -364,7 +438,7 @@ impl<'a> Documents<'a> {
         name: &str,
         version: i64,
         changes: Changes,
-    ) -> Result<StoredDocument, JobError> {
+    ) -> Result<StoredDocument, DocError> {
         let at = At {
             doctype,
             name,
@@ -374,9 +448,7 @@ impl<'a> Documents<'a> {
             .tx
             .update(self.registry, at, &changes, self.caller)
             .await;
-        stored
-            .map(StoredDocument::new)
-            .map_err(|e| JobError::from_db(&e))
+        stored.map(StoredDocument::new).map_err(DocError::new)
     }
 
     /// Deletes a document that is at `version`.
@@ -385,14 +457,14 @@ impl<'a> Documents<'a> {
         doctype: &str,
         name: &str,
         version: i64,
-    ) -> Result<(), JobError> {
+    ) -> Result<(), DocError> {
         let at = At {
             doctype,
             name,
             version,
         };
         let deleted = self.tx.delete(self.registry, at, self.caller).await;
-        deleted.map_err(|e| JobError::from_db(&e))
+        deleted.map_err(DocError::new)
     }
 
     /// Submits a draft of a submittable DocType and returns it.
@@ -401,8 +473,8 @@ impl<'a> Documents<'a> {
         doctype: &str,
         name: &str,
         version: i64,
-    ) -> Result<StoredDocument, JobError> {
-        self.transition(Step::Submit, doctype, name, version).await
+    ) -> Result<StoredDocument, DocError> {
+        self.step(Step::Submit, doctype, name, version).await
     }
 
     /// Cancels a submitted document and returns it.
@@ -411,8 +483,8 @@ impl<'a> Documents<'a> {
         doctype: &str,
         name: &str,
         version: i64,
-    ) -> Result<StoredDocument, JobError> {
-        self.transition(Step::Cancel, doctype, name, version).await
+    ) -> Result<StoredDocument, DocError> {
+        self.step(Step::Cancel, doctype, name, version).await
     }
 
     /// Amends a cancelled document: a new draft with a copy of its values, which is returned.
@@ -421,17 +493,20 @@ impl<'a> Documents<'a> {
         doctype: &str,
         name: &str,
         version: i64,
-    ) -> Result<StoredDocument, JobError> {
-        self.transition(Step::Amend, doctype, name, version).await
+    ) -> Result<StoredDocument, DocError> {
+        self.step(Step::Amend, doctype, name, version).await
     }
 
-    async fn transition(
+    /// Takes the workflow transition `action` of a document of a DocType with a workflow and
+    /// returns the document as stored (`forgebase doc transition`). The caller needs one of the
+    /// transition's roles and the right its docstatus move needs (ADR 0015).
+    pub async fn transition(
         &mut self,
-        step: Step,
         doctype: &str,
         name: &str,
+        action: &str,
         version: i64,
-    ) -> Result<StoredDocument, JobError> {
+    ) -> Result<StoredDocument, DocError> {
         let at = At {
             doctype,
             name,
@@ -439,10 +514,65 @@ impl<'a> Documents<'a> {
         };
         let stored = self
             .tx
-            .transition(step, self.registry, at, self.caller)
+            .workflow(self.registry, at, action, self.caller)
             .await;
-        stored
-            .map(StoredDocument::new)
-            .map_err(|e| JobError::from_db(&e))
+        stored.map(StoredDocument::new).map_err(DocError::new)
+    }
+
+    async fn step(
+        &mut self,
+        step: Step,
+        doctype: &str,
+        name: &str,
+        version: i64,
+    ) -> Result<StoredDocument, DocError> {
+        let at = At {
+            doctype,
+            name,
+            version,
+        };
+        let stored = self.tx.step(step, self.registry, at, self.caller).await;
+        stored.map(StoredDocument::new).map_err(DocError::new)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_doc_error_maps_to_a_job_error_as_the_database_error_did() {
+        let retryable = DocError::new(DbError::LockTimeout);
+        assert!(retryable.is_retryable());
+        let job = JobError::from(retryable);
+        assert!(!job.is_permanent());
+
+        for error in [
+            DbError::NoChanges,
+            DbError::Validation(vec![]),
+            DbError::NotFound {
+                doctype: "a".into(),
+                name: "b".into(),
+            },
+        ] {
+            let error = DocError::new(error);
+            assert!(!error.is_retryable(), "{error}");
+            let text = error.to_string();
+            let job = JobError::from(error);
+            assert!(job.is_permanent());
+            assert_eq!(job.message(), text);
+        }
+    }
+
+    #[test]
+    fn a_bad_like_filter_is_an_invalid_query_with_the_old_message() {
+        let query = ListQuery::new().filter("title", FilterOp::Like, Value::Int(1));
+        let error = query.to_db().expect_err("text only");
+        assert!(!error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "invalid list query: the `like` filter on `title` needs a text value"
+        );
+        assert!(matches!(error.into_db(), DbError::InvalidQuery(_)));
     }
 }
