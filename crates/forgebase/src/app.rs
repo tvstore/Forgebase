@@ -7,6 +7,7 @@ use std::sync::Arc;
 use forgebase_core::hooks::DocTypeHooks;
 
 use crate::jobs::{JobHandler, JobOptions};
+use crate::methods::Method;
 use crate::reports::Report;
 use crate::schedule::Schedule;
 
@@ -201,7 +202,8 @@ macro_rules! migrations {
 /// - register background jobs ([`App::job`]), which hooks, other jobs and the command line can
 ///   enqueue, and run them on a [`Schedule`] ([`App::schedule`]);
 /// - define query reports ([`App::report`]): SQL compiled into the binary, run read-only for the
-///   roles it names.
+///   roles it names;
+/// - define methods ([`App::method`]): functions a client calls over HTTP, as the caller.
 ///
 /// What it may not do: change the definition of another app's DocType (add fields to it, for
 /// example), run code outside the binary, or reach the database from a hook (a hook may
@@ -217,6 +219,7 @@ pub struct App {
     pub(crate) jobs: Vec<(String, Arc<dyn JobHandler>, JobOptions)>,
     pub(crate) schedules: Vec<(String, Schedule)>,
     pub(crate) reports: Vec<(String, Report)>,
+    pub(crate) methods: Vec<(String, Method)>,
 }
 
 impl fmt::Debug for App {
@@ -259,6 +262,14 @@ impl fmt::Debug for App {
                     .map(|(name, _)| name)
                     .collect::<Vec<_>>(),
             )
+            .field(
+                "methods",
+                &self
+                    .methods
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -278,6 +289,7 @@ impl App {
             jobs: Vec::new(),
             schedules: Vec::new(),
             reports: Vec::new(),
+            methods: Vec::new(),
         }
     }
 
@@ -374,6 +386,26 @@ impl App {
     /// whose parameters or columns do not fit what was declared.
     pub fn report(mut self, name: &str, report: Report) -> Self {
         self.reports.push((name.to_owned(), report));
+        self
+    }
+
+    /// Registers an app method: a function a client calls with
+    /// `POST /api/v1/method/<app>.<name>` and a JSON body, as the authenticated caller and in one
+    /// transaction (ADR 0019). `name` follows the rules of a DocType name and is unique within
+    /// the app; the method is known as `<app>.<name>`. The [`Method`] says who may call it:
+    /// exactly one of `.roles(&[..])` and `.any_user()`.
+    ///
+    /// ```ignore
+    /// App::new("sales")
+    ///     .method("order_summary", Method::new(OrderSummary).roles(&["Sales User", "Sales Manager"]))
+    ///     .method("ping", Method::new(Ping).any_user())
+    /// ```
+    ///
+    /// Everything wrong with a method (an invalid or duplicate name, no access given, both, an
+    /// empty role list) is a startup error, like the other mistakes of an app. A method of an
+    /// app that a site does not install does not exist on that site.
+    pub fn method(mut self, name: &str, method: Method) -> Self {
+        self.methods.push((name.to_owned(), method));
         self
     }
 

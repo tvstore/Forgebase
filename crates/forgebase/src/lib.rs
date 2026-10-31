@@ -103,6 +103,7 @@ mod documents;
 mod error;
 mod job_cmd;
 mod jobs;
+mod methods;
 mod new_app;
 mod report;
 mod reports;
@@ -118,6 +119,7 @@ pub use builder::Forgebase;
 pub use compose::StartupError;
 pub use documents::{DocError, Documents, FilterOp, ListQuery, StoredDocument};
 pub use jobs::{JobContext, JobError, JobFuture, JobHandler, JobOptions};
+pub use methods::{Method, MethodCaller, MethodContext, MethodError, MethodFuture, MethodHandler};
 pub use reports::{Column, Param, Report};
 pub use schedule::Schedule;
 

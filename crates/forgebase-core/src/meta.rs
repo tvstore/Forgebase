@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::document::DocStatus;
 use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
+use crate::method::MethodDef;
 use crate::permission::{self, PermissionRule, Right};
 use crate::report::ReportDef;
 use crate::series::{SeriesError, SeriesPattern};
@@ -1345,6 +1346,9 @@ pub struct Registry {
     jobs: BTreeSet<String>,
     /// The query reports (M8.4, ADR 0016) of the apps, by full name (`<app>.<name>`).
     reports: BTreeMap<String, ReportDef>,
+    /// The app methods (M9.1, ADR 0019) by full name (`<app>.<name>`). Names and access only: the
+    /// registry knows nothing about handlers.
+    methods: BTreeMap<String, MethodDef>,
 }
 
 impl fmt::Debug for Registry {
@@ -1361,6 +1365,7 @@ impl fmt::Debug for Registry {
             .field("hooks", &hook_counts)
             .field("jobs", &self.jobs)
             .field("reports", &self.reports.keys().collect::<Vec<_>>())
+            .field("methods", &self.methods.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -1408,6 +1413,29 @@ impl Registry {
     /// Every report, in full-name order.
     pub fn reports(&self) -> impl Iterator<Item = &ReportDef> {
         self.reports.values()
+    }
+
+    /// Records an app method under its full name (`<app>.<name>`). Returns `false`, and keeps the
+    /// method it has, when the name is already taken. The method is not checked here
+    /// ([`MethodDef::problems`]).
+    pub fn add_method(&mut self, method: MethodDef) -> bool {
+        match self.methods.entry(method.full_name()) {
+            std::collections::btree_map::Entry::Occupied(_) => false,
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(method);
+                true
+            }
+        }
+    }
+
+    /// The method with this full name (`<app>.<name>`).
+    pub fn method(&self, full_name: &str) -> Option<&MethodDef> {
+        self.methods.get(full_name)
+    }
+
+    /// Every method, in full-name order.
+    pub fn methods(&self) -> impl Iterator<Item = &MethodDef> {
+        self.methods.values()
     }
 
     /// Validates and adds a DocType. Fails with every definition problem found
@@ -1596,6 +1624,25 @@ impl fmt::Display for FieldType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn methods_are_registered_by_full_name_and_a_duplicate_is_refused() {
+        use crate::method::{MethodAccess, MethodDef};
+        let def = |access| MethodDef {
+            app: "sales".to_owned(),
+            name: "ping".to_owned(),
+            access,
+        };
+        let mut registry = Registry::new();
+        assert!(registry.method("sales.ping").is_none());
+        assert!(registry.add_method(def(MethodAccess::AnyUser)));
+        assert!(!registry.add_method(def(MethodAccess::Roles(vec!["A".to_owned()]))));
+        // The first one is kept.
+        let kept = registry.method("sales.ping").expect("method");
+        assert_eq!(kept.access, MethodAccess::AnyUser);
+        assert!(registry.method("ping").is_none());
+        assert_eq!(registry.methods().count(), 1);
+    }
 
     #[test]
     fn humanize_splits_on_underscores_and_capitalises() {

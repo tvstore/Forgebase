@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use forgebase_core::ident::validate_doctype_name;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType, Registry};
@@ -22,6 +23,7 @@ use crate::app::{App, MigrationFile};
 use crate::builtin;
 use crate::doctypes::read_dir;
 use crate::error::bullets;
+use crate::methods::{MethodHandler, Methods};
 use crate::worker::JobDef;
 
 /// The name of the app that the `--doctypes` directory forms.
@@ -85,6 +87,9 @@ pub(crate) struct Composed {
     pub jobs: BTreeMap<String, JobDef>,
     /// The schedules of all apps and the built-in ones, by full job name (valid ones only).
     pub schedules: BTreeMap<String, Spec>,
+    /// The handlers of the methods of all apps by full name; the registry has the names and
+    /// access.
+    pub methods: Methods,
     /// The registered apps (not `local`) in app order.
     apps: Vec<AppInfo>,
 }
@@ -227,6 +232,7 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
     }
     // Jobs do not depend on the DocType files, so their problems are reported with the others.
     let jobs = check_jobs(apps, &mut registry, &mut errors);
+    let methods = check_methods(apps, &mut registry, &mut errors);
     let schedules = check_schedules(apps, &mut errors);
 
     if !errors.is_empty() {
@@ -236,6 +242,7 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
         registry,
         jobs,
         schedules,
+        methods: Methods::new(methods),
         apps: apps
             .iter()
             .map(|a| AppInfo {
@@ -577,6 +584,40 @@ fn check_jobs(
         }
     }
     jobs
+}
+
+/// Checks the methods and registers the valid ones: names and access in the registry, the
+/// handlers in the result, by full name. Same rules as the reports and jobs: a valid name, unique
+/// within the app, and exactly one way of giving access.
+fn check_methods(
+    apps: &[App],
+    registry: &mut Registry,
+    errors: &mut StartupError,
+) -> BTreeMap<String, Arc<dyn MethodHandler>> {
+    let mut handlers: BTreeMap<String, Arc<dyn MethodHandler>> = BTreeMap::new();
+    for app in apps {
+        let app_name = &app.name;
+        let mut seen = BTreeSet::new();
+        for (name, method) in &app.methods {
+            if !seen.insert(name.as_str()) {
+                errors.apps.push(format!(
+                    "app `{app_name}`: method `{name}` is registered more than once"
+                ));
+                continue;
+            }
+            let (def, problems) = method.definition(app_name, name);
+            for problem in &problems {
+                errors
+                    .apps
+                    .push(format!("app `{app_name}`: method `{name}`: {problem}"));
+            }
+            // The same full name from two apps with the same name is reported as a duplicate app.
+            if problems.is_empty() && registry.add_method(def.clone()) {
+                handlers.insert(def.full_name(), Arc::clone(&method.handler));
+            }
+        }
+    }
+    handlers
 }
 
 /// Checks the schedules of the apps and adds the built-in ones. A schedule must name a job the

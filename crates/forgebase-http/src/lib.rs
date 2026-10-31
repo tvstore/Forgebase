@@ -52,8 +52,9 @@
 //! | `GET /summary/{doctype}?group_by=FIELD&aggregates=sum:amount,...&filters=...` (M8.3) | 200 `{"data": {"groups": [{"key", "count", "values"}], "truncated"}}`, at most 500 groups, over the documents the caller may read |
 //! | `GET /report` (M8.4) | 200 `{"data": [{"name", "app", "label", "params": [{"name", "label", "kind", "required", "default", "doctype"?, "options"?}], "columns": [{"name", "label", "kind", "doctype"?}]}]}`: the query reports the caller may run (by role), by label; never the SQL |
 //! | `POST /report/{app}.{name}` body `{"params"?: {..}}` (M8.4; `?link_titles=1`) | 200 `{"data": {"columns", "rows": [[..]], "truncated"}}` (plus `link_titles`); 404 for a report that does not exist or that the caller may not run, 422 for the parameters (`details` per parameter), 504 `report_timeout` |
+//! | `POST /method/{app}.{method}` body: a JSON object, optional (M9.1, ADR 0019) | 200 `{"data": <what the handler returned>}`; an empty body is `{}`, a body that is not a JSON object 400, another content type 415, over the limit 413, query parameters 400 `invalid_query`; **404** for a method that does not exist, is not installed on the site or that the caller may not call (by role; one answer for all three); 400 or 422 `method_error` (the app's message), the document API's own status and code for a document error (403 `permission_denied`, 404, 409, 422, ...), 500 `internal` with no detail; one transaction, rolled back on every error |
 //!
-//! Anything else is 404 (`/api/v1/method` is not implemented), a wrong method is 405.
+//! Anything else is 404, a wrong method is 405.
 //!
 //! # The desk
 //!
@@ -66,6 +67,7 @@ mod desk;
 mod error;
 pub mod json;
 mod meta;
+mod methods;
 mod reports;
 mod routes;
 mod views;
@@ -88,6 +90,7 @@ use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 use crate::error::ApiError;
+pub use crate::methods::{BoxFuture, MethodDispatch, MethodFailure};
 
 /// Settings of the HTTP API.
 #[derive(Debug, Clone)]
@@ -135,11 +138,33 @@ struct Inner {
     registry: Arc<Registry>,
     config: AppConfig,
     logins: Semaphore,
+    /// Runs app methods (M9.1); `None` when the binary has none (every method call is a 404).
+    methods: Option<Arc<dyn MethodDispatch>>,
 }
 
 impl AppState {
     /// Creates the state. The registry must be the one the database schema was synced with.
     pub fn new(pool: Pool, registry: Arc<Registry>, config: AppConfig) -> Self {
+        Self::build(pool, registry, config, None)
+    }
+
+    /// Like [`AppState::new`], with the dispatcher that runs the app methods of the registry
+    /// (ADR 0019). Without one, `POST /api/v1/method/..` is always `404 not_found`.
+    pub fn with_methods(
+        pool: Pool,
+        registry: Arc<Registry>,
+        config: AppConfig,
+        methods: Arc<dyn MethodDispatch>,
+    ) -> Self {
+        Self::build(pool, registry, config, Some(methods))
+    }
+
+    fn build(
+        pool: Pool,
+        registry: Arc<Registry>,
+        config: AppConfig,
+        methods: Option<Arc<dyn MethodDispatch>>,
+    ) -> Self {
         let logins = Semaphore::new(login_permits(
             config.max_concurrent_logins,
             pool.status().max_size,
@@ -150,6 +175,7 @@ impl AppState {
                 registry,
                 config,
                 logins,
+                methods,
             }),
         }
     }
@@ -169,6 +195,18 @@ impl AppState {
 
     pub(crate) fn registry(&self) -> &Registry {
         &self.inner.registry
+    }
+
+    pub(crate) fn registry_arc(&self) -> &Arc<Registry> {
+        &self.inner.registry
+    }
+
+    pub(crate) fn pool(&self) -> &Pool {
+        &self.inner.pool
+    }
+
+    pub(crate) fn methods(&self) -> Option<&dyn MethodDispatch> {
+        self.inner.methods.as_deref()
     }
 
     pub(crate) fn config(&self) -> &AppConfig {
@@ -343,7 +381,8 @@ fn site_router(state: AppState) -> Router {
         )
         .route("/api/v1/summary/{doctype}", get(views::summary))
         .route("/api/v1/report", get(reports::list))
-        .route("/api/v1/report/{name}", post(reports::run));
+        .route("/api/v1/report/{name}", post(reports::run))
+        .route("/api/v1/method/{name}", post(methods::call));
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {
         router = router
