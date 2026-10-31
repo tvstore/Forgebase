@@ -49,13 +49,20 @@ FROM postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d
 # server's certificate against the operating system's roots (a Neon database needs this). The build
 # stage has the Debian bundle (the `ca-certificates` package, as of its pinned digest), so it is
 # copied: the final stage then needs no network at build time.
+# The base also ships Debian's "snakeoil" test certificate in /etc/ssl/certs, whose private key is
+# public (the Debian `ssl-cert` package ships it to everyone). It must never be a
+# trusted root, so both files and the dangling hash link are removed, and SSL_CERT_FILE makes the
+# root loader (rustls-native-certs, and libpq) read the bundle only, not the whole directory.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-RUN useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin forgebase \
+RUN rm -f /etc/ssl/certs/ssl-cert-snakeoil.pem /etc/ssl/private/ssl-cert-snakeoil.key \
+    && find /etc/ssl/certs -xtype l -delete \
+    && useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin forgebase \
     && install -d -o forgebase -g forgebase /app /backups
 COPY --from=build /forgebase-app /usr/local/bin/forgebase-app
 COPY --from=desk /desk/dist /app/desk
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
-ENV FORGEBASE_DESK_DIR=/app/desk \
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    FORGEBASE_DESK_DIR=/app/desk \
     FORGEBASE_PG_BIN=/usr/lib/postgresql/16/bin
 USER 10001:10001
 EXPOSE 8000
