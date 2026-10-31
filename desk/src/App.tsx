@@ -6,6 +6,7 @@ import { Logo } from './components/Logo';
 import { ToastProvider } from './components/Toast';
 import { Form } from './pages/Form';
 import { Home } from './pages/Home';
+import { Import } from './pages/Import';
 import { List } from './pages/List';
 import { Login } from './pages/Login';
 import { Report } from './pages/Report';
@@ -193,6 +194,8 @@ function Page({
           username={username}
         />
       );
+    case 'import':
+      return <Import key={route.doctype} doctype={route.doctype} />;
     case 'report':
       return <Report key={route.report} name={route.report} params={route.params} reports={reports} />;
     case 'login': // being redirected to the home page

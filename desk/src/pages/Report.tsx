@@ -2,7 +2,11 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 
 import { isAddressable } from '../access';
-import { ApiError, runReport } from '../api';
+import { ApiError, exportReport, runReport } from '../api';
+import { ExportMenu } from '../components/ExportMenu';
+import { useToast } from '../components/Toast';
+import { saveDownload } from '../download';
+import type { FileFormat } from '../transfer';
 import { EmptyState } from '../components/EmptyState';
 import { FieldControl } from '../components/FieldControl';
 import { PageHeader } from '../components/PageHeader';
@@ -100,6 +104,8 @@ function ReportView({ report, params }: { report: ReportMeta; params: URLSearchP
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [sort, setSort] = useState<SortState>(null);
   const [attempt, setAttempt] = useState(0);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const toast = useToast();
   const idBase = useId();
   const alertRef = useRef<HTMLDivElement>(null);
 
@@ -165,6 +171,19 @@ function ReportView({ report, params }: { report: ReportMeta; params: URLSearchP
     [result, sort],
   );
 
+  /** Runs the report again as a file with the parameters of the result on screen, then saves it. */
+  const exportAs = async (format: FileFormat) => {
+    if (!request.ok) return;
+    setExportError(null);
+    try {
+      const file = await exportReport(report.name, request.params, format);
+      saveDownload(file.blob, file.filename);
+      toast(file.truncated ? 'Exported. The report stopped at its row limit.' : 'Exported');
+    } catch (e) {
+      setExportError(message(e));
+    }
+  };
+
   const setValue = (field: string, value: FormValue) => {
     setValues((v) => ({ ...v, [field]: value }));
     setErrors((e) => (field in e ? Object.fromEntries(Object.entries(e).filter(([k]) => k !== field)) : e));
@@ -191,7 +210,15 @@ function ReportView({ report, params }: { report: ReportMeta; params: URLSearchP
 
   return (
     <div className="page">
-      <PageHeader title={<h1>{report.label}</h1>} meta={<p className="subtitle">{appLabel(report.app)}</p>} />
+      <PageHeader
+        title={<h1>{report.label}</h1>}
+        meta={<p className="subtitle">{appLabel(report.app)}</p>}
+        actions={
+          result !== null && request.ok ? (
+            <ExportMenu heading="Export this result" onPick={(format) => void exportAs(format)} note="Runs the report again with these parameters." />
+          ) : null
+        }
+      />
       <p className="visually-hidden" role="status" aria-live="polite">
         {live}
       </p>
@@ -253,6 +280,12 @@ function ReportView({ report, params }: { report: ReportMeta; params: URLSearchP
           </div>
         </section>
       </form>
+
+      {exportError !== null ? (
+        <p role="alert" className="alert">
+          {exportError}
+        </p>
+      ) : null}
 
       {failure ? (
         <div role="alert" tabIndex={-1} ref={alertRef} className="alert">

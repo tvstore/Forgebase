@@ -49,7 +49,7 @@ export function Layout({ username, route, doctypes, reports, onLogout, children 
 
   // A new page closes the drawer (state is adjusted while rendering, not in an effect).
   const pageKey =
-    route.name === 'list' || route.name === 'new' || route.name === 'form'
+    route.name === 'list' || route.name === 'new' || route.name === 'form' || route.name === 'import'
       ? `${route.name}/${route.doctype}`
       : route.name === 'report'
         ? `report/${route.report}`

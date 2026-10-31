@@ -1,5 +1,5 @@
 // A tiny hash router: `#/login`, `#/`, `#/list/<doctype>?...`, `#/new/<doctype>`,
-// `#/form/<doctype>/<name>` and `#/report/<app>.<name>?...`. State that belongs in the address (paging, sort, filters) is in the
+// `#/form/<doctype>/<name>`, `#/import/<doctype>` and `#/report/<app>.<name>?...`. State that belongs in the address (paging, sort, filters) is in the
 // query part, so the back button and copied links work.
 
 import { useSyncExternalStore } from 'react';
@@ -10,6 +10,8 @@ export type Route =
   | { name: 'list'; doctype: string; params: URLSearchParams }
   | { name: 'new'; doctype: string }
   | { name: 'form'; doctype: string; docName: string }
+  /** The import page of a DocType (M9.3): upload, validate, import. */
+  | { name: 'import'; doctype: string }
   /** A query report (M8.4): `report` is `<app>.<name>`, the query holds the parameters. */
   | { name: 'report'; report: string; params: URLSearchParams }
   | { name: 'notfound' };
@@ -53,6 +55,10 @@ export function parseHash(hash: string): Route {
     const doctype = decode(first);
     return doctype === null ? { name: 'notfound' } : { name: 'new', doctype };
   }
+  if (kind === 'import' && first !== undefined && second === undefined) {
+    const doctype = decode(first);
+    return doctype === null ? { name: 'notfound' } : { name: 'import', doctype };
+  }
   if (kind === 'form' && first !== undefined && second !== undefined) {
     const doctype = decode(first);
     const docName = decode(second);
@@ -66,6 +72,7 @@ export function parseHash(hash: string): Route {
 export const loginHref = (): string => '#/login';
 export const homeHref = (): string => '#/';
 export const newHref = (doctype: string): string => `#/new/${encodeURIComponent(doctype)}`;
+export const importHref = (doctype: string): string => `#/import/${encodeURIComponent(doctype)}`;
 export const formHref = (doctype: string, name: string): string =>
   `#/form/${encodeURIComponent(doctype)}/${encodeURIComponent(name)}`;
 

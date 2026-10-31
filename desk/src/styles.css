@@ -715,6 +715,11 @@
     @apply rounded-control border-0 bg-transparent px-3 py-2 text-left text-ui text-ink-soft transition-colors duration-150 hover:bg-fill;
   }
 
+  /* An export format is a link, drawn like the buttons of the other menus. */
+  a.menu-item {
+    @apply block no-underline;
+  }
+
   .menu-item[aria-disabled='true'] {
     @apply cursor-not-allowed opacity-60;
   }
@@ -1070,6 +1075,25 @@
 
   .list-card .empty {
     @apply rounded-none border-0;
+  }
+
+  /* ---------- Import (M9.3) ---------- */
+
+  .import-hint {
+    @apply mb-4;
+  }
+
+  .import-headline {
+    @apply m-0 px-5 pb-3 text-small font-medium text-danger;
+  }
+
+  .import-ok {
+    @apply m-0;
+  }
+
+  /* A row error is a sentence: it wraps inside its cell (the table scrolls in its own box). */
+  .import-message {
+    @apply min-w-64 break-words whitespace-normal;
   }
 
   /* ---------- Reports (M8.4) ---------- */

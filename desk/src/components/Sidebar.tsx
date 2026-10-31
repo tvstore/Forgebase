@@ -21,7 +21,8 @@ interface Props {
  * user may run. The current one is marked.
  */
 export function Sidebar({ id, open, doctypes, reports, route, onNavigate }: Props) {
-  const current = route.name === 'list' || route.name === 'new' || route.name === 'form' ? route.doctype : null;
+  const current =
+    route.name === 'list' || route.name === 'new' || route.name === 'form' || route.name === 'import' ? route.doctype : null;
   return (
     <nav
       id={id}

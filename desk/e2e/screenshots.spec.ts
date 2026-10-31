@@ -10,7 +10,8 @@
 // waiting for approval with its actions, the confirmation, an approved one with its history, and the list with
 // the state badges) on the e2e-only DocType purchase_request. M8.3 adds the Views menu, the Save view dialog, the
 // Summary panel and the Columns menu (views-menu, save-view-dialog, summary-panel, columns-menu). M8.4 adds the
-// report page (report-params, report-result, report-empty). The PNGs are not committed.
+// report page (report-params, report-result, report-empty). M9.3 adds the Export menu of a list and the Import page
+// (export-menu, import-errors, import-done). The PNGs are not committed.
 
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -419,4 +420,77 @@ test('screenshots of saved views, the summary and the columns', async ({ page })
   await expect(page.getByRole('table', { name: 'Purchase Request by Status' })).toBeVisible();
   await noSideScroll(page, 'summary panel at 320');
   await snap(page, `${DIR}/summary-panel-320.png`);
+});
+
+test('screenshots of the Export menu and the Import page (M9.3)', async ({ page }) => {
+  test.setTimeout(120_000);
+  // A fresh Import page: through the home page, so that the page is mounted again (and, with a
+  // reload first, the toasts of the step before are gone).
+  const openImport = async () => {
+    await page.goto('/desk/#/');
+    await page.reload();
+    await page.goto('/desk/#/import/customer');
+    await expect(page.getByRole('heading', { name: 'Import Customer', level: 1 })).toBeVisible();
+  };
+  const tag = `Shot${Date.now().toString(36)}`;
+  const file = (rows: string[]) =>
+    ['email,full_name,tier,loyalty_points', ...rows, ''].join('\r\n');
+  const bad = file([
+    `${tag}-1@example.com,${tag} One,gold,10`,
+    `${tag}-2@example.com,,silver,`,
+    `${tag}-3@example.com,${tag} Three,platinum,3`,
+    `${tag}-4@example.com,${tag} Four,gold,many`,
+  ]);
+  const good = file([
+    `${tag}-1@example.com,${tag} One,gold,10`,
+    `${tag}-2@example.com,${tag} Two,silver,`,
+    `${tag}-3@example.com,${tag} Three,standard,3`,
+  ]);
+
+  await login(page, 'e2e_manager');
+  for (const width of WIDTHS) {
+    await page.setViewportSize({ width, height: 800 });
+
+    // The list with the Export menu open (a reload first: no toast of the step before).
+    await page.goto('/desk/#/');
+    await page.reload();
+    await page.goto('/desk/#/list/customer');
+    await expect(page.getByRole('heading', { name: 'Customer', level: 1 })).toBeVisible();
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Export', exact: true }).click();
+    await expect(page.getByRole('link', { name: 'CSV', exact: true })).toBeVisible();
+    await noSideScroll(page, `export menu at ${width}`);
+    await snap(page, `${DIR}/export-menu-${width}.png`);
+    await page.keyboard.press('Escape');
+
+    // The Import page after a validation with errors (a missing name, a value that is not an
+    // option, a number that is not one).
+    await openImport();
+    await page.getByLabel('File', { exact: true }).setInputFiles({ name: 'customers.csv', mimeType: 'text/csv', buffer: Buffer.from(bad) });
+    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'rows have errors' })).toBeVisible();
+    await noSideScroll(page, `import errors at ${width}`);
+    await snap(page, `${DIR}/import-errors-${width}.png`);
+
+    // ... and after the import of a file without errors. Each width imports its own customers.
+    const stamp = `${width}`;
+    await openImport();
+    await page.getByLabel('File', { exact: true }).setInputFiles({
+      name: 'customers.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from(good.replaceAll(`${tag}-`, `${tag}-${stamp}-`)),
+    });
+    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    await expect(page.getByText('No errors. 3 rows: 3 new.')).toBeVisible();
+    await page.getByRole('button', { name: 'Import', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Import finished' })).toBeVisible();
+    await noSideScroll(page, `import done at ${width}`);
+    await snap(page, `${DIR}/import-done-${width}.png`);
+  }
+  await page.setViewportSize({ width: 320, height: 800 });
+  await openImport();
+  await page.getByLabel('File', { exact: true }).setInputFiles({ name: 'customers.csv', mimeType: 'text/csv', buffer: Buffer.from(bad) });
+  await page.getByRole('button', { name: 'Validate', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'rows have errors' })).toBeVisible();
+  await noSideScroll(page, 'import errors at 320');
 });

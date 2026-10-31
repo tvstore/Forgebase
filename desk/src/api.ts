@@ -8,6 +8,8 @@ import { isAddressable } from './access';
 import { parseLinkTitles } from './linkTitles';
 import type { LinkTitles } from './linkTitles';
 import type { ReportMeta, ReportResult } from './reports';
+import { filenameFromDisposition, importContentType, parseSummary } from './transfer';
+import type { FileFormat, ImportMode, ImportSummary } from './transfer';
 import type { SummaryResult } from './summary';
 import type { DocTypeMeta, DocTypeSummary, DocumentRow, SessionInfo } from './types';
 import type { SavedView, ViewDefinition } from './views';
@@ -19,13 +21,16 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: string[];
+  /** The `details` as the server sent them (an object for `import_failed` and `export_too_large`). */
+  readonly rawDetails: unknown;
 
-  constructor(status: number, code: string, message: string, details: string[] = []) {
+  constructor(status: number, code: string, message: string, details: string[] = [], rawDetails: unknown = undefined) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.rawDetails = rawDetails;
   }
 }
 
@@ -52,6 +57,18 @@ interface Options {
   retried?: boolean;
   /** Returns the whole answer (`data` and the keys beside it) instead of `data` only. */
   envelope?: boolean;
+  /** A body that is not JSON: sent as it is with this content type (an import file). */
+  file?: { body: Blob; contentType: string };
+  /** The answer is a file: returned as a {@link Download}. */
+  download?: boolean;
+}
+
+/** A file the server answered with (an export). */
+export interface Download {
+  blob: Blob;
+  filename: string;
+  /** The result was cut at the report's row limit (`X-Forgebase-Truncated`). */
+  truncated: boolean;
 }
 
 async function parse(response: Response): Promise<unknown> {
@@ -69,7 +86,7 @@ function toError(status: number, payload: unknown): ApiError {
     const details = Array.isArray(error.details)
       ? error.details.filter((d): d is string => typeof d === 'string')
       : [];
-    return new ApiError(status, error.code, error.message, details);
+    return new ApiError(status, error.code, error.message, details, error.details);
   }
   return new ApiError(status, 'unexpected', `unexpected response (HTTP ${status})`);
 }
@@ -93,8 +110,9 @@ async function refreshCsrf(): Promise<void> {
 }
 
 async function request<T>(method: string, path: string, options: Options = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: options.download ? '*/*' : 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (options.file) headers['Content-Type'] = options.file.contentType;
   // Only changing requests carry the token; a GET never needs it.
   if (method !== 'GET' && csrfToken !== null) headers[CSRF_HEADER] = csrfToken;
   // The server rotates the token only for this header, which a navigation or an <img> of
@@ -105,8 +123,16 @@ async function request<T>(method: string, path: string, options: Options = {}): 
     method,
     headers,
     credentials: 'same-origin',
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: options.file ? options.file.body : options.body === undefined ? undefined : JSON.stringify(options.body),
   });
+  if (response.ok && options.download) {
+    const download: Download = {
+      blob: await response.blob(),
+      filename: filenameFromDisposition(response.headers.get('Content-Disposition'), 'export'),
+      truncated: response.headers.get('X-Forgebase-Truncated') === 'true',
+    };
+    return download as T;
+  }
   const payload = await parse(response);
 
   if (response.ok) return options.envelope ? (payload as T) : ((payload as { data: T } | undefined)?.data as T);
@@ -385,4 +411,51 @@ export async function runReport(name: string, params: Record<string, unknown>): 
     truncated: answer?.data?.truncated === true,
     titles: parseLinkTitles(answer?.link_titles),
   };
+}
+
+/**
+ * Runs a report and returns the result as a file (`POST /api/v1/report/<name>/export`, M9.3):
+ * the same parameters as {@link runReport}, with the CSRF token like every POST. The caller saves
+ * the blob (see `saveDownload`).
+ */
+export function exportReport(name: string, params: Record<string, unknown>, format: FileFormat): Promise<Download> {
+  return request<Download>('POST', `/api/v1/report/${encodeURIComponent(name)}/export?format=${format}`, {
+    body: { params },
+    download: true,
+  });
+}
+
+/** What an import came to: the summary of a 200, or of a 422 `import_failed`. */
+export interface ImportAnswer {
+  summary: ImportSummary;
+  /** False for the 422 `import_failed`: at least one row failed and nothing was imported. */
+  ok: boolean;
+}
+
+/**
+ * Sends a file to `POST /api/v1/import/<doctype>`. With `dryRun` nothing is ever kept. A 422
+ * `import_failed` is not thrown: its details are the summary with the row errors, returned with
+ * `ok: false`. Any other error (the file cannot be used at all, a right is missing) is thrown.
+ */
+export async function importFile(
+  doctype: string,
+  file: Blob,
+  options: { format: FileFormat; mode: ImportMode; dryRun: boolean },
+): Promise<ImportAnswer> {
+  const query = new URLSearchParams({ format: options.format, mode: options.mode });
+  if (options.dryRun) query.set('dry_run', '1');
+  try {
+    const data = await request<unknown>('POST', `/api/v1/import/${encodeURIComponent(doctype)}?${query.toString()}`, {
+      file: { body: file, contentType: importContentType(options.format) },
+    });
+    const summary = parseSummary(data);
+    if (summary === null) throw new ApiError(200, 'unexpected', 'unexpected answer to the import');
+    return { summary, ok: true };
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'import_failed') {
+      const summary = parseSummary(e.rawDetails);
+      if (summary !== null) return { summary, ok: false };
+    }
+    throw e;
+  }
 }

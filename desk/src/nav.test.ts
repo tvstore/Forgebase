@@ -64,6 +64,14 @@ describe('breadcrumbs', () => {
     expect(breadcrumbs(parseHash('#/new/thing'), list).map((c) => c.label)).toEqual([OTHER_APP, 'Thing', 'New']);
   });
 
+  it('is App / DocType / Import for the import page', () => {
+    expect(breadcrumbs(parseHash('#/import/sales_order'), list)).toEqual([
+      { label: 'Sales', href: '#/' },
+      { label: 'Sales Order', href: '#/list/sales_order' },
+      { label: 'Import' },
+    ]);
+  });
+
   it('is Reports / the report for a report, with its name until the reports are known', () => {
     const reports = [{ name: 'sales.by_customer', label: 'Sales by customer' }];
     expect(breadcrumbs(parseHash('#/report/sales.by_customer?from=2026-10-01'), list, reports)).toEqual([
