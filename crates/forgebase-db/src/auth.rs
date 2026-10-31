@@ -231,7 +231,7 @@ fn check_password(password: &str) -> Result<(), AuthError> {
 // ---------------------------------------------------------------------------------------------
 
 /// `bytes` random bytes as lowercase hex.
-fn random_hex(bytes: usize) -> Result<String, AuthError> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String, AuthError> {
     let mut buffer = vec![0u8; bytes];
     getrandom::fill(&mut buffer).map_err(|_| AuthError::Random)?;
     let mut text = String::with_capacity(bytes * 2);

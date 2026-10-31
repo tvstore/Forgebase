@@ -18,7 +18,7 @@ use tokio_postgres::{Client, GenericClient};
 use crate::document::{
     Pipeline, StoredDocument, Target, as_document, cancel_tail, check_actor, check_not_locked,
     document_doctype, get, lock_current, read_grant, require_status, run_hooks, submit_tail,
-    update_tail, write_jobs,
+    update_tail, write_jobs, write_webhooks,
 };
 use crate::error::DbError;
 use crate::ident::quote_ident;
@@ -97,6 +97,12 @@ pub async fn transition(
     )
     .await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    // A transition that submits or cancels the document is also that event.
+    let events: &[&str] = match entry.docstatus_event {
+        Some(event) => &["transition", event],
+        None => &["transition"],
+    };
+    write_webhooks(&tx, registry, doctype, events, &stored, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -106,6 +112,8 @@ struct Logged {
     action: String,
     from: String,
     to: String,
+    /// `submit` or `cancel` when the transition moved the document's docstatus to 1 or 2.
+    docstatus_event: Option<&'static str>,
 }
 
 async fn transition_in(
@@ -211,6 +219,11 @@ async fn transition_in(
         action: action.to_owned(),
         from: transition.from.clone(),
         to: transition.to.clone(),
+        docstatus_event: match movement {
+            Move::Submit => Some("submit"),
+            Move::Cancel => Some("cancel"),
+            Move::Edit | Move::EditSubmitted => None,
+        },
     };
     Ok((stored, logged))
 }

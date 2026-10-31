@@ -267,13 +267,28 @@ pub(crate) fn prepare(url: &str) -> Result<(Config, MakeRustlsConnect), TlsError
             load_roots(source)?
         }
     };
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let client = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| err(format!("cannot set up TLS: {e}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let client = client_config(roots).map_err(err)?;
     Ok((config, MakeRustlsConnect::new(client)))
+}
+
+/// The rustls client configuration of the framework: the `ring` provider, TLS 1.2 and 1.3, the
+/// given roots, no client certificate. The connections to PostgreSQL and the outgoing webhooks
+/// (M9.2, ADR 0020) are made with it, so there is one TLS stack to audit.
+pub fn client_config(roots: RootCertStore) -> Result<rustls::ClientConfig, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("cannot set up TLS: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth())
+}
+
+/// [`client_config`] with the operating system's trust store as roots (the same loading as
+/// `sslmode=require` without `sslrootcert`; it honours `SSL_CERT_FILE` and `SSL_CERT_DIR`). The
+/// error says what to install when the store is empty.
+pub fn native_client_config() -> Result<rustls::ClientConfig, String> {
+    let roots = load_roots(&RootCerts::System).map_err(|e| e.to_string())?;
+    client_config(roots)
 }
 
 /// TLS needs a host name to verify, and is not offered over a Unix socket. Used for the
