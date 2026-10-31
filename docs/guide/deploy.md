@@ -167,7 +167,7 @@ docker run -d --name forgebase --restart unless-stopped -p 8000:8000 \
 
 How it behaves (`deploy/entrypoint.sh`):
 
-- It starts `serve` and `worker`, forwards every SIGTERM or SIGINT it receives to both (one signal makes them stop gracefully; a second one makes them exit at once), waits for both and exits with 0 after a requested stop. If one process exits on its own, it sends the other one SIGTERM and exits with the first one's status (also when a signal arrives meanwhile), so the container restarts (`restart: unless-stopped`) as a unit.
+- It starts `serve` and `worker`, forwards every SIGTERM or SIGINT it receives to both (one signal makes them stop gracefully; a second one makes them exit at once), waits for both and exits with 0 after a requested stop, unless a process fails while stopping (then with its status; 143 is possible after a forced double stop). If one process exits on its own, it sends the other one SIGTERM and exits with the first one's status (also when a signal arrives meanwhile), so the container restarts (`restart: unless-stopped`) as a unit.
 - `FORGEBASE_MIGRATE_ON_START=1` runs `migrate` before `serve` or `all` start (default **off**). A failed migration stops the container with a non-zero exit code. It is convenient on a host without a shell, but two containers that start together both migrate; use it with one instance only.
 - `FORGEBASE_LISTEN`, if unset, is `0.0.0.0:$PORT` when `PORT` is set (Render and similar hosts) and `0.0.0.0:8000` otherwise.
 - In `all` mode the script is PID 1 and reaps its children itself, so `--init` is not needed; in the other modes the binary is PID 1 (compose sets `init: true`; with `docker run`, `--init` is optional).
