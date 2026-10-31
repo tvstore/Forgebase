@@ -155,7 +155,7 @@ mod tests {
         let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 9 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n  0009 saved_views\n"
+                "framework migrations: 10 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n  0009 saved_views\n  0010 webhooks\n"
             ),
             "{text}"
         );
@@ -177,7 +177,7 @@ mod tests {
             workflow_warnings: vec![],
         };
         let text = migrate_report(&report, true, 0);
-        assert!(text.contains("9 pending"), "{text}");
+        assert!(text.contains("10 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 
