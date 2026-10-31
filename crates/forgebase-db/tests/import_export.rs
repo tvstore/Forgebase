@@ -122,7 +122,7 @@ impl DocTypeHooks for Rules {
         }
         ctx.enqueue(
             "app.audit",
-            json!({"title": doc.values.get("title").is_some()}),
+            json!({"title": doc.values.contains_key("title")}),
         )
     }
 }

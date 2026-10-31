@@ -281,6 +281,39 @@ async fn attempt(
             .await
             .map(drop),
         Right::Create => unreachable!("handled above"),
+        // Rights of a file, not of one document (the matrix of the combinations is in
+        // `tests/import_export.rs`): here only that the evaluator's answer reaches the caller.
+        Right::Export => {
+            let tx = forgebase_db::begin_export(client).await?;
+            let query = forgebase_db::ExportQuery {
+                doctype: "ticket",
+                filters: &[],
+                sort: &[],
+                limit: 1_000,
+                with_tables: false,
+            };
+            forgebase_db::Export::start(&tx, reg, caller, &query)
+                .await
+                .map(drop)
+        }
+        Right::Import => {
+            let row = forgebase_db::ImportRow {
+                row: 1,
+                values: [("title".to_owned(), text("n"))].into(),
+                ..forgebase_db::ImportRow::default()
+            };
+            forgebase_db::import(
+                client,
+                reg,
+                "ticket",
+                caller,
+                &[row],
+                forgebase_db::ImportMode::Insert,
+                false,
+            )
+            .await
+            .map(drop)
+        }
     }
 }
 

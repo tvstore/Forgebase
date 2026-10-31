@@ -178,7 +178,7 @@ async fn stream_export<C>(
     C: std::ops::DerefMut,
     C::Target: std::ops::DerefMut<Target = forgebase_db::Client>,
 {
-    let tx = match begin_export(&mut **client).await {
+    let tx = match begin_export(&mut client).await {
         Ok(tx) => tx,
         Err(error) => {
             let _ = started.send(Err(error));
