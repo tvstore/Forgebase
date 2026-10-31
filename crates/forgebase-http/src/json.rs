@@ -44,7 +44,7 @@ pub enum JsonError {
     #[error("the data must be a JSON object")]
     NotAnObject,
     /// A value does not fit its field.
-    #[error("field `{field}`: {problem}")]
+    #[error("field `{}`: {problem}", forgebase_core::shorten(.field))]
     Field {
         /// The field name.
         field: String,
@@ -194,10 +194,15 @@ pub(crate) fn to_value(
             _ => Err(expected("an integer")),
         },
         FieldType::Decimal { .. } => match json {
-            Json::String(s) => s
-                .parse::<Decimal>()
-                .map(Value::Decimal)
-                .map_err(|e| bad(name, format!("`{s}` is not a decimal number: {e}"))),
+            Json::String(s) => s.parse::<Decimal>().map(Value::Decimal).map_err(|e| {
+                bad(
+                    name,
+                    format!(
+                        "`{}` is not a decimal number: {e}",
+                        forgebase_core::shorten(s)
+                    ),
+                )
+            }),
             Json::Number(_) => Err(bad(
                 name,
                 "a decimal must be a JSON string such as \"12.50\", not a number",
@@ -211,9 +216,15 @@ pub(crate) fn to_value(
         FieldType::Date => {
             let s = json.as_str().ok_or_else(|| expected("a date string"))?;
             let format = date_format().map_err(|e| bad(name, e.to_string()))?;
-            Date::parse(s, &format)
-                .map(Value::Date)
-                .map_err(|_| bad(name, format!("`{s}` is not a date in the form YYYY-MM-DD")))
+            Date::parse(s, &format).map(Value::Date).map_err(|_| {
+                bad(
+                    name,
+                    format!(
+                        "`{}` is not a date in the form YYYY-MM-DD",
+                        forgebase_core::shorten(s)
+                    ),
+                )
+            })
         }
         FieldType::Table { .. } => Err(bad(
             name,
@@ -229,7 +240,8 @@ pub(crate) fn to_value(
                     bad(
                         name,
                         format!(
-                            "`{s}` is not an RFC 3339 date and time, e.g. 2024-03-15T10:20:30Z"
+                            "`{}` is not an RFC 3339 date and time, e.g. 2024-03-15T10:20:30Z",
+                            forgebase_core::shorten(s)
                         ),
                     )
                 })

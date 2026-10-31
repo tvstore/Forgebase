@@ -112,6 +112,27 @@ create = true
 import = true
 "#;
 
+/// A DocType without a workflow whose own field is called `workflow_state`.
+const STATEFUL: &str = r#"
+name = "stateful"
+label = "Stateful"
+[[fields]]
+name = "title"
+type = "data"
+[[fields]]
+name = "workflow_state"
+type = "data"
+[[permissions]]
+role = "Exporter"
+read = true
+export = true
+[[permissions]]
+role = "Importer"
+read = true
+create = true
+import = true
+"#;
+
 const PARCEL_LINE: &str = r#"
 name = "parcel_line"
 label = "Parcel Line"
@@ -141,7 +162,7 @@ impl DocTypeHooks for Rules {
 async fn env_with(config: AppConfig) -> Env {
     let env = Env::with_hooks(
         config,
-        &[PARCEL, PARCEL_LINE, TAG],
+        &[PARCEL, PARCEL_LINE, TAG, STATEFUL],
         vec![("parcel", Arc::new(Rules))],
     )
     .await;
@@ -1357,7 +1378,8 @@ async fn a_csv_with_the_standard_columns_of_an_export_imports() {
     let env = env().await;
     let importer = env.login("importer").await;
     let root = env.login("root").await;
-    let file = "title,owner,modified_at,version,docstatus,workflow_state\r\nfrom export,ann,2026-01-01T00:00:00Z,4,0,\r\n";
+    let file =
+        "title,owner,modified_at,version,docstatus\r\nfrom export,ann,2026-01-01T00:00:00Z,4,0\r\n";
     let reply = import(&env, &importer, "?format=csv", "text/csv", file).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
     assert_eq!(titles(&env, &root).await, ["from export"]);
@@ -1382,4 +1404,83 @@ async fn child_rows_count_toward_the_row_limit() {
     let reply = import(&env, &importer, "?format=json", "application/json", body).await;
     assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(reply.code(), "import_too_large");
+}
+
+#[tokio::test]
+async fn a_field_called_workflow_state_on_a_doctype_without_a_workflow_is_kept() {
+    let env = env().await;
+    let root = env.login("root").await;
+    env.admin_insert(
+        &root,
+        "stateful",
+        json!({"title": "a", "workflow_state": "open"}),
+    )
+    .await;
+    // The export carries the value, in CSV and in JSON.
+    let reply = env
+        .send(get("/api/v1/export/stateful?fields=title,workflow_state").session(&root))
+        .await;
+    assert_eq!(
+        csv_rows(&reply.text),
+        [["title", "workflow_state"], ["a", "open"]]
+    );
+    let reply = env
+        .send(get("/api/v1/export/stateful?format=json").session(&root))
+        .await;
+    assert_eq!(reply.json()[0]["workflow_state"], "open");
+    // The import sets it, from CSV and from JSON.
+    let importer = env.login("importer").await;
+    let csv = "title,workflow_state\r\nb,closed\r\n";
+    let reply = env
+        .send(
+            post("/api/v1/import/stateful?format=csv")
+                .session(&importer)
+                .raw("text/csv", csv.as_bytes()),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    let body = r#"[{"title":"c","workflow_state":"waiting"}]"#;
+    let reply = env
+        .send(
+            post("/api/v1/import/stateful?format=json")
+                .session(&importer)
+                .raw("application/json", body.as_bytes()),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    let listed = env
+        .send(get("/api/v1/resource/stateful?sort=title").session(&root))
+        .await
+        .data();
+    let states: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["workflow_state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["open", "closed", "waiting"]);
+}
+
+#[tokio::test]
+async fn an_echoed_value_is_shortened_whatever_the_size_of_the_input() {
+    let env = env().await;
+    let importer = env.login("importer").await;
+    let junk = "\u{1}".repeat(4 * 1024 * 1024);
+    // A header, and cells of an integer, a date and a select field, each of 4 MiB of control bytes.
+    let cases = [
+        format!("{junk}\r\nx\r\n"),
+        format!("title,qty,due,tier\r\na,{junk},{junk},{junk}\r\n"),
+    ];
+    for file in cases {
+        let started = std::time::Instant::now();
+        let reply = import(&env, &importer, "?format=csv", "text/csv", &file).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(reply.text.len() < 16_000, "{} bytes", reply.text.len());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+    // JSON values and keys.
+    let body = json!([{"title": "a", "due": junk, "price": junk, "tier": junk, junk.clone(): 1}])
+        .to_string();
+    let reply = import(&env, &importer, "?format=json", "application/json", &body).await;
+    assert!(reply.text.len() < 16_000, "{} bytes", reply.text.len());
 }

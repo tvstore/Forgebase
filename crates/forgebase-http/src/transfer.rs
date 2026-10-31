@@ -35,6 +35,7 @@ use std::collections::BTreeSet;
 
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
 use forgebase_core::permission::Caller;
+use forgebase_core::shorten;
 use forgebase_core::value::Value;
 use forgebase_db::{
     DbError, GenericClient, ImportMode, ImportRow, MAX_REPORTED_ERRORS, StoredDocument,
@@ -151,6 +152,8 @@ pub struct Exporter {
     /// JSON: the keys to keep, or `None` for the whole document.
     keep: Option<Vec<String>>,
     wrote: bool,
+    /// The DocType has a workflow: only then is `workflow_state` a standard column.
+    workflow: bool,
 }
 
 /// The standard columns a `fields` list may name, besides the fields of the DocType.
@@ -187,6 +190,7 @@ impl Exporter {
                 columns,
                 keep: None,
                 wrote: false,
+                workflow: doctype.workflow.is_some(),
             });
         };
         if fields.is_empty() {
@@ -195,7 +199,7 @@ impl Exporter {
         let mut seen = BTreeSet::new();
         for field in fields {
             if !seen.insert(field.as_str()) {
-                return Err(bad(format!("`{field}` is listed twice")));
+                return Err(bad(format!("`{}` is listed twice", shorten(field))));
             }
             match doctype.field(field).map(|f| &f.field_type) {
                 _ if standard_column(doctype, field) => {}
@@ -207,7 +211,8 @@ impl Exporter {
                 Some(_) => {}
                 None => {
                     return Err(bad(format!(
-                        "unknown field `{field}` for DocType `{}`",
+                        "unknown field `{}` for DocType `{}`",
+                        shorten(field),
                         doctype.name
                     )));
                 }
@@ -219,12 +224,14 @@ impl Exporter {
                 columns: fields.to_vec(),
                 keep: None,
                 wrote: false,
+                workflow: doctype.workflow.is_some(),
             },
             Format::Json => Self {
                 format,
                 columns: Vec::new(),
                 keep: Some(fields.to_vec()),
                 wrote: false,
+                workflow: doctype.workflow.is_some(),
             },
         })
     }
@@ -259,7 +266,10 @@ impl Exporter {
                 Format::Csv => {
                     let mut cells = Vec::with_capacity(self.columns.len());
                     for column in &self.columns {
-                        cells.push(csv_cell(column, &standard_or_field(document, column))?);
+                        cells.push(csv_cell(
+                            column,
+                            &standard_or_field(document, column, self.workflow),
+                        )?);
                     }
                     push_csv_record(&mut out, &cells);
                 }
@@ -290,7 +300,7 @@ impl Exporter {
 }
 
 /// The value of a column of a document: a standard column or a field (Null when absent).
-fn standard_or_field(document: &StoredDocument, key: &str) -> Value {
+fn standard_or_field(document: &StoredDocument, key: &str, workflow: bool) -> Value {
     match key {
         "name" => Value::Text(document.name.clone()),
         "owner" => Value::Text(document.owner.clone()),
@@ -301,7 +311,7 @@ fn standard_or_field(document: &StoredDocument, key: &str) -> Value {
         "docstatus" => document
             .docstatus
             .map_or(Value::Null, |s| Value::Int(i64::from(s.as_i16()))),
-        "workflow_state" => document
+        "workflow_state" if workflow => document
             .workflow_state
             .clone()
             .map_or(Value::Null, Value::Text),
@@ -354,8 +364,9 @@ pub enum FileError {
     },
 }
 
-/// Keeps at most [`MAX_REPORTED_ERRORS`] problems and ends the list with "and N more", so a
-/// crafted file cannot make the answer (or the memory behind it) grow with its size.
+/// Keeps at most [`MAX_REPORTED_ERRORS`] problems and ends the list with "and N more", so the
+/// number of problems does not grow with the file. Each problem is short too, because what it
+/// repeats of the input goes through `shorten` (about 64 characters).
 fn capped(mut problems: Vec<String>) -> Vec<String> {
     if problems.len() > MAX_REPORTED_ERRORS {
         let more = problems.len() - MAX_REPORTED_ERRORS;
@@ -381,6 +392,13 @@ const STANDARD_KEYS: [&str; 9] = [
     "amended_from",
     "workflow_state",
 ];
+
+/// Whether `key` is a standard key of an exported document that import ignores: the keys of
+/// [`STANDARD_KEYS`], except that `workflow_state` is one only for a DocType with a workflow (on
+/// another it may be a field of the DocType's own, which import must keep).
+fn is_standard_key(doctype: &DocType, key: &str) -> bool {
+    STANDARD_KEYS.contains(&key) && (key != "workflow_state" || doctype.workflow.is_some())
+}
 
 /// Reads `body` as a file of `format` for `doctype`. At most `max_rows` data rows. See the module
 /// documentation for what is refused for the whole file ([`FileError`]) and what per row.
@@ -447,7 +465,9 @@ fn parse_json(
             continue;
         };
         for key in STANDARD_KEYS {
-            object.remove(key);
+            if is_standard_key(doctype, key) {
+                object.remove(key);
+            }
         }
         let name = match object.remove("name") {
             None | Some(Json::Null) => None,
@@ -534,13 +554,13 @@ fn parse_csv(
     let mut columns: Vec<Column<'_>> = Vec::with_capacity(headers.len());
     for header in &headers {
         if !seen.insert(header.to_owned()) {
-            problems.push(format!("duplicate column `{header}`"));
+            problems.push(format!("duplicate column `{}`", shorten(header)));
         }
         if header == "name" {
             columns.push(Column::Name);
             continue;
         }
-        if STANDARD_KEYS.contains(&header) {
+        if is_standard_key(doctype, header) {
             columns.push(Column::Ignored);
             continue;
         }
@@ -550,7 +570,8 @@ fn parse_csv(
             )),
             Some(field_type) => columns.push(Column::Field(field_type)),
             None => problems.push(format!(
-                "unknown column `{header}` for DocType `{}`",
+                "unknown column `{}` for DocType `{}`",
+                shorten(header),
                 doctype.name
             )),
         }
@@ -646,13 +667,18 @@ fn cell_value(name: &str, field_type: &FieldType, cell: &str) -> Result<Value, J
             let text = cell.trim();
             Json::from(
                 text.parse::<i64>()
-                    .map_err(|_| bad(format!("`{text}` is not an integer")))?,
+                    .map_err(|_| bad(format!("`{}` is not an integer", shorten(text))))?,
             )
         }
         FieldType::Check => match cell.trim().to_ascii_lowercase().as_str() {
             "true" | "1" => Json::Bool(true),
             "false" | "0" => Json::Bool(false),
-            other => return Err(bad(format!("`{other}` is not true, false, 1 or 0"))),
+            other => {
+                return Err(bad(format!(
+                    "`{}` is not true, false, 1 or 0",
+                    shorten(other)
+                )));
+            }
         },
         FieldType::Decimal { .. } | FieldType::Date | FieldType::Datetime => {
             Json::String(cell.trim().to_owned())
@@ -1098,7 +1124,7 @@ target = "thing_line"
 
     #[test]
     fn csv_ignores_the_standard_columns_of_an_export() {
-        let parsed = csv("name,owner,modified_at,version,title,docstatus,workflow_state\nN,ann,2026-01-01T00:00:00Z,3,Hello,0,Draft\n").unwrap();
+        let parsed = csv("name,owner,modified_at,version,title,docstatus\nN,ann,2026-01-01T00:00:00Z,3,Hello,0\n").unwrap();
         assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
         let row = &parsed.rows[0];
         assert_eq!(row.name.as_deref(), Some("N"));
