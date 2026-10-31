@@ -88,6 +88,24 @@ The workflow itself (`Workflow`, `WorkflowState`, `Transition` and the rest of `
 
 The definition types (`ReportDef` and the rest of `forgebase-core::report`) and the execution (`forgebase-db::reports`) are **not** re-exported. `Value`, `Decimal` and `Date` (already public) are what `Param::default_value` takes.
 
+### Public surface update (M9.1)
+
+[ADR 0019](0019-app-method-endpoints.md) (the M9 plan, owner decisions of 2026-10-30) adds these items and makes one breaking change. Nothing else becomes public.
+
+| Item | Purpose |
+|---|---|
+| `Method` (`new(handler)`, `roles(&[..])`, `any_user()`; no public fields) | A method and who may call it: exactly one of the two access calls is required, or it is a startup error. |
+| `MethodHandler` (`call(&self, &mut MethodContext) -> MethodFuture`) and `MethodFuture<'a>` | What a method does; a boxed future like `JobHandler`. |
+| `MethodContext` (`name`, `caller`, `body`, `documents`, `enqueue`; `#[non_exhaustive]`) | What a running method knows and may do, in its transaction. `documents()` acts as the caller; `enqueue` writes a job in the same transaction. |
+| `MethodCaller` (`username`, `roles`, `has_role`) | The user who called, read-only. The system context is not reachable from a method. |
+| `MethodError` (`bad_request(msg)`, `unprocessable(msg)`, `From<DocError>`) | Why a method failed; every error rolls the transaction back. |
+| `DocError` (`is_retryable`, `Display`, `From<DocError> for JobError`) | The error of every `Documents` method. |
+| `Documents::transition(doctype, name, action, version)` | A workflow action, for jobs and methods. |
+| `App::method(name, Method)` | Registers a method, known as `<app>.<name>`. |
+| `testing`: `TestDb::create_token`, `HttpClient::with_token`, `HttpClient::without_csrf`, `HttpClient::post_raw` (feature `testing`) | For the tests of methods: an API token client, a cookie client without the CSRF header, and a raw body. |
+
+**Breaking change.** The methods of `Documents` return `Result<_, DocError>` instead of `Result<_, JobError>`. `?` into a `JobError` works unchanged, with the same retry rule; code that stored or matched the `JobError` of a `Documents` call converts with `.into()`, or uses `DocError::is_retryable` where it called `JobError::is_permanent`.
+
 ## Implementation details (M5.1)
 
 These were chosen while implementing M5.1; they are to be reviewed with that change, not owner decisions.

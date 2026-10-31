@@ -64,3 +64,10 @@ These choices were made while implementing M8.4 and are reviewed with that chang
 - No CSV export and no charts (owner decision 9); an export is M9.3.
 - A report SQL error that the check cannot see (a runtime cast failure, a value out of range) is a 500 with the cause in the server log.
 - The desk loads the list of reports once after login; a role change shows after the next login.
+
+## Amendment (2026-10-31, M9.1): a report's connection is not pooled again
+
+Decision 4 makes the report's *transaction* read-only and rolls it back, which undoes a session-level `set_config` and a temporary table, but **not** a session advisory lock (`pg_advisory_lock`), a prepared statement or `LISTEN`: those belong to the session, and the next request that took the pooled connection would have inherited them. A report's SQL is trusted code, so this was a hardening and not a hole; it is closed anyway (owner decision 8, review of M8.4).
+
+`POST /api/v1/report/{app}.{name}` now runs on a `ReportConnection` (`forgebase-db`) that is **closed when it is dropped instead of returned to the pool**, so no session state can reach another request, whatever kind of state it is. The alternative, `RESET ALL` + `pg_advisory_unlock_all()` + `UNLISTEN *` after the transaction, has to list every kind of state and would miss the next one; `DISCARD ALL` would also drop the prepared statements the pool caches. The cost is a new connection (and TLS handshake) for the next checkout after a report, which is acceptable for a call that is heavier than a document read. The tests hold a pool of one connection and check that the lock and the setting are gone on the next checkout. The check at `migrate` is unchanged (it prepares and rolls back inside one transaction and keeps no session state).
+

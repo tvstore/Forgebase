@@ -54,4 +54,30 @@ TOKEN=$(cargo run -q -p sales -- token create root)    # prints key:secret once
 curl -s -H "Authorization: token $TOKEN" http://localhost:8000/api/v1/resource/customer
 ```
 
-Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one. The route table, the request pipeline, the codes and the limits are in the [architecture](../blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) and the [security model](../blueprint/security-model.md#the-http-layer-implemented-in-m33). `/api/v1/method` (custom endpoints) is not implemented.
+Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one. The route table, the request pipeline, the codes and the limits are in the [architecture](../blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) and the [security model](../blueprint/security-model.md#the-http-layer-implemented-in-m33).
+
+## App methods
+
+An app can register its own endpoints ([first app, section 8](first-app.md#8-app-methods), [ADR 0019](../adr/0019-app-method-endpoints.md)): `POST /api/v1/method/<app>.<method>` with a JSON object body (an empty body is `{}`) answers `200 {"data": ..}`. The caller must be logged in (a cookie with the CSRF header, or an API token) and have a role of the method, or the method must be declared `any_user`; **there are no guest methods**. The call runs as that user in one transaction. The `sales` example has no method yet (M9.5 adds one); this is a call to the `sales.orders_of` method of the first-app guide, after the login of the first example above:
+
+```sh
+curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"customer": "ann@example.com"}' http://localhost:8000/api/v1/method/sales.orders_of
+# a token call: no cookie and no CSRF header
+curl -s -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"customer": "ann@example.com"}' http://localhost:8000/api/v1/method/sales.orders_of
+```
+
+| Status | When |
+|---|---|
+| 200 | `{"data": <what the method returned>}` |
+| 400 | the body is not a JSON object (`bad_request`), a query parameter was sent (`invalid_query`), or the method refused (`method_error`, with the app's message) |
+| 401, 403 `csrf_failed` | no valid credential, or a cookie call without the CSRF header |
+| 404 | the method does not exist, its app is not installed on the site, **or you may not call it**: one answer, so names are not revealed |
+| 405 | any HTTP method but `POST` |
+| 409, 403 `permission_denied`, 422 | an error of a document the method touched, with the status and code of the document API; 422 `method_error` is the method's own refusal |
+| 413, 415 | the body is over the limit, or not `application/json` when it is not empty |
+| 500 | a failure inside the method or the server: a generic message, the cause is in the server log |
+
+Whatever the method did in the transaction is rolled back on every error.
+

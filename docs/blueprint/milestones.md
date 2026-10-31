@@ -17,7 +17,7 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 | R1/D1/D2 | Docs front page and Docker deploy (between M8 and M9) |
 | UX.4 | UX: Desk polish (runs between M8.1 and M8.2) |
 | UX.5 | UX: Corporate refinement, "soft neutral" (after M8.3, before M8.4) |
-| M9 | Integration |
+| M9 | Integration (In progress) |
 | M10 | Customization |
 | Later | Items that each need their own plan |
 
@@ -179,8 +179,13 @@ UX.4 (the desk polish, owner decision U1) runs between M8.1 and M8.2, so that th
   - **Scope:** `sslmode` and `sslrootcert` in the database URL for every connection and for `site backup` and `site restore`; the one new dependency `tokio-postgres-rustls` with rustls and `ring`; tests against a PostgreSQL 16 with TLS and a throwaway CA, in CI and locally; the Render + Neon path in the [deploy guide](../guide/deploy.md#3-render--neon-free-path); the CI job `ci-result` (see [the maintenance policy](maintenance-policy.md#ci)). No new bootstrap feature: the first Administrator is created with `user create` against the Neon URL.
   - **Exit criteria:** `require` with the right CA connects and a wrong CA fails; `prefer` is refused; migrate, the pool, `site create`, `site backup` and `site restore` work over TLS; `cargo tree -i aws-lc-rs`, `openssl-sys` and `webpki-roots` are empty; `cargo deny` and the MSRV check pass; independent review PASS.
   - **Numbering:** M9.0 takes ADR 0018, so the M9 ADRs shift by one: the methods ADR (M9.1) is 0019 and the webhooks ADR (M9.2) is 0020. The planned references to 0018 and 0019 in older text are to be read that way.
-- **Scope:** `/api/v1/method` for registered endpoints, webhooks through the outbox, import/export, fixtures. Capability 6.
-- **Exit criteria:** (to be set in the M9 plan) including authorization tests for every method endpoint.
+- **M9.1 App method endpoints and a documents handle as the caller** (ADR 0019): **delivered by this pull request** (owner decisions 1, 2 and 11 of the M9 plan, 2026-10-30, *"setuju semua rencana mu"*; see [owner decisions](../owner-decisions.md#m91-app-method-endpoints-2026-10-31-working-session) and [ADR 0019](../adr/0019-app-method-endpoints.md)).
+  - **Scope:** `App::method`, `Method` (`roles` or `any_user`), `MethodHandler`, `MethodContext` (caller, body, documents as the caller, enqueue), `MethodError` and `DocError`; `POST /api/v1/method/{app}.{method}` with one transaction per call; the registry carries names and access, `forgebase-http` takes an injected dispatcher; `Documents::transition`. Breaking change: the methods of `Documents` return `DocError` (`?` into `JobError` is unchanged). Carry-overs: a report's connection is closed instead of pooled again ([ADR 0016](../adr/0016-query-reports-read-only-execution.md#amendment-2026-10-31-m91-a-reports-connection-is-not-pooled-again)), the multi-statement report test, the sales example hardening, the desk focus check for `oklab()`/`color-mix()` colours, and the M9.0 review items.
+  - **Exit criteria:** authorization tests for methods (no session, CSRF, token, wrong role, right role, Administrator, `any_user`, unknown, not installed, wrong HTTP method); permission enforcement inside the handler (`if_owner`, refused writes, workflow roles); rollback on error and on a panic, jobs enqueued only with the commit; the body and error rules; startup validation; jobs unchanged; independent review PASS. Evidence: `crates/forgebase/tests/methods.rs`, the `http_per_site` scenario of `crates/forgebase/tests/site_apps.rs`, `crates/forgebase-db/tests/reports.rs` and `crates/forgebase-http/tests/reports.rs` for the report connection.
+  - **Non-goals:** GraphQL, RPC by dotted path, guest endpoints, inbound webhooks (use a method and an API token), a handler time limit.
+- **Remaining:** M9.2 webhooks (ADR 0020), M9.3 import and export, M9.4 fixtures, M9.5 the example apps (touches no file under `crates/`).
+- **Scope:** `/api/v1/method` for registered endpoints (M9.1, done), webhooks through the outbox, import/export, fixtures. Capability 6.
+- **Exit criteria:** (to be set per sub-milestone in the M9 plan) including authorization tests for every method endpoint.
 - **Non-goals:** GraphQL, RPC by dotted path.
 
 ## M10 Customization
