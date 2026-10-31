@@ -775,3 +775,31 @@ pub fn assert_doctypes_listed(app: &App, manifest_dir: &str, dir: &str) {
         full.display()
     );
 }
+
+/// Sets, for the whole test process, how outgoing webhooks (M9.2, ADR 0020) reach `https://`
+/// receivers: the PEM certificate of the test CA they trust (in place of the operating system's
+/// roots) and the time limit of one delivery (in place of 10 seconds). Call it at the start of
+/// every test that sends webhooks over TLS or times a receiver out: the first call wins and
+/// later ones are ignored, so tests that run in parallel agree. It does not change the other
+/// rules: the address check, the signature and the redirect rule stay as they are.
+///
+/// # Panics
+///
+/// If `ca_pem` holds no certificate.
+pub fn webhook_test_settings(ca_pem: &str, timeout: Duration) {
+    use rustls::RootCertStore;
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    let certs = CertificateDer::pem_slice_iter(ca_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("a PEM certificate");
+    let mut roots = RootCertStore::empty();
+    let (added, _) = roots.add_parsable_certificates(certs);
+    assert!(added > 0, "ca_pem holds no usable certificate");
+    let tls = forgebase_db::tls::client_config(roots).expect("a TLS configuration");
+    let _ = crate::webhook_client::TEST_SETTINGS.set(crate::webhook_client::TestSettings {
+        tls: Arc::new(tls),
+        timeout,
+    });
+}

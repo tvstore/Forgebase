@@ -109,6 +109,8 @@ mod report;
 mod reports;
 mod run;
 mod schedule;
+mod webhook_client;
+mod webhook_cmd;
 mod worker;
 
 #[cfg(feature = "testing")]
