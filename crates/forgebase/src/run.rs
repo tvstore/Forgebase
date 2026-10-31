@@ -16,8 +16,8 @@ use forgebase_http::{AppConfig, AppState, Sites};
 
 use crate::app::App;
 use crate::args::{
-    ActorArg, Cli, Command, DocCommand, DocTypesDir, SiteCommand, TokenCommand, UserCommand,
-    VersionArg, WebhookCommand,
+    ActorArg, Cli, Command, DataCommand, DocCommand, DocTypesDir, SiteCommand, TokenCommand,
+    UserCommand, VersionArg, WebhookCommand,
 };
 use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
@@ -87,6 +87,19 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             let (registry, operation) = prepare(command, site, apps)?;
             let ctx = site.context(Arc::new(registry), None).await?;
             execute(&ctx, operation).await
+        }
+        Command::Data(command) => {
+            let (DataCommand::Export {
+                doctype, doctypes, ..
+            }
+            | DataCommand::Import {
+                doctype, doctypes, ..
+            }) = &command;
+            let (registry, found) = find_doctype(site, apps, doctypes, doctype)?;
+            // The file is read and checked before the database is opened.
+            let prepared = crate::data_cmd::prepare(command, &registry, &found)?;
+            let ctx = site.context(Arc::new(registry), None).await?;
+            crate::data_cmd::execute(&ctx, prepared).await
         }
         Command::User(command) => {
             let registry = site_registry(site, apps)?;

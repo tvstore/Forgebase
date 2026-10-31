@@ -19,7 +19,10 @@
 //! | `invalid_query` | 400 | a filter, sort, limit or offset cannot be used |
 //! | `invalid_host` | 400 | |
 //! | `payload_too_large` | 413 | |
-//! | `unsupported_media_type` | 415 | the body is not `application/json` |
+//! | `export_too_large`, `import_too_large` | 422 | an export would have more rows than the limit (`details`: `count`, `limit`); an import file has more rows than the limit (`details`: `limit`) (M9.3) |
+//! | `invalid_import` | 422 | the import file cannot be used at all: not UTF-8, bad syntax, an unknown, duplicate or table column; `details` lists the problems (M9.3) |
+//! | `import_failed` | 422 | at least one row of an import has an error, so nothing was imported; `details` is the summary with the per-row errors (M9.3) |
+//! | `unsupported_media_type` | 415 | the body is not `application/json` (for an import: not the type of its format) |
 //! | `too_many_logins` | 503 | login concurrency bound; `Retry-After` is set |
 //! | `method_error` | 400 or 422 | an app method refused the call; the message is the app's, written for users (M9.1) |
 //! | `report_timeout` | 504 | a query report ran over its time limit (M8.4) |
@@ -48,6 +51,8 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     details: Vec<String>,
+    /// Structured details (an object), instead of the list of strings.
+    details_json: Option<serde_json::Value>,
     retry_after: Option<u32>,
 }
 
@@ -58,8 +63,63 @@ impl ApiError {
             code,
             message: message.into(),
             details: Vec::new(),
+            details_json: None,
             retry_after: None,
         }
+    }
+
+    /// The code, the message and the list of details, for an error that is reported inside
+    /// another answer (a row of an import).
+    pub(crate) fn into_parts(self) -> (&'static str, String, Vec<String>) {
+        (self.code, self.message, self.details)
+    }
+
+    /// 422 `export_too_large`: the filters match more rows than the limit.
+    pub(crate) fn export_too_large(count: u64, limit: u64) -> Self {
+        let mut error = Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "export_too_large",
+            format!(
+                "the export would have {count} rows, over the limit of {limit}; narrow the filters"
+            ),
+        );
+        error.details_json = Some(json!({"count": count, "limit": limit}));
+        error
+    }
+
+    /// 422 `import_too_large`: more rows than the limit; nothing ran.
+    pub(crate) fn import_too_large(limit: usize) -> Self {
+        let mut error = Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "import_too_large",
+            format!("the file has more than {limit} rows; split it"),
+        );
+        error.details_json = Some(json!({"limit": limit}));
+        error
+    }
+
+    /// 422 `invalid_import`: the file cannot be imported at all (unknown column, bad syntax).
+    pub(crate) fn invalid_import(problems: Vec<String>) -> Self {
+        let mut error = Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_import",
+            "the file cannot be imported",
+        );
+        error.details = problems;
+        error
+    }
+
+    /// 422 `import_failed`: at least one row has an error, so nothing was imported. `summary` is
+    /// the summary of the import, as in the success answer.
+    pub(crate) fn import_failed(summary: serde_json::Value) -> Self {
+        let count = summary["error_count"].as_u64().unwrap_or(0);
+        let mut error = Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "import_failed",
+            format!("{count} row(s) have errors; nothing was imported"),
+        );
+        error.details_json = Some(summary);
+        error
     }
 
     /// The one 401: the same for a missing, invalid, expired or revoked credential.
@@ -130,7 +190,9 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut error = json!({"code": self.code, "message": self.message});
-        if !self.details.is_empty() {
+        if let Some(details) = self.details_json {
+            error["details"] = details;
+        } else if !self.details.is_empty() {
             error["details"] = json!(self.details);
         }
         let mut response = (self.status, Json(json!({ "error": error }))).into_response();
@@ -176,6 +238,7 @@ impl From<DbError> for ApiError {
             DbError::NoWorkflow { .. } => Self::new(S::CONFLICT, "no_workflow", text),
             DbError::UnknownTransition { .. } => Self::new(S::CONFLICT, "unknown_transition", text),
             DbError::InvalidQuery(_) => Self::invalid_query(text),
+            DbError::ExportTooLarge { count, limit } => Self::export_too_large(count, limit),
             DbError::NoChanges => Self::bad_request(text),
             DbError::Conflict { .. } | DbError::ChangedWhileReading { .. } => {
                 Self::new(S::CONFLICT, "conflict", text)

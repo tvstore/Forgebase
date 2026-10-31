@@ -296,8 +296,27 @@ fn build(
     let mut binds = Binds::default();
     let conditions = conditions(doctype, owner, &query.filters, &mut binds)?;
 
+    let order = order_keys(doctype, &query.sort)?;
+
+    let mut sql = format!("SELECT {} FROM {table}", select_list(doctype));
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" ORDER BY ");
+    sql.push_str(&order.join(", "));
+    let limit = binds.add(Value::Int(i64::from(limit)), "bigint");
+    let offset = binds.add(Value::Int(offset), "bigint");
+    sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+    Ok((sql, binds.0))
+}
+
+/// The `ORDER BY` keys of a sort: one per sort key, then `name` ascending (unique, so the order
+/// is total). A Link column sorts by the target's `name`.
+fn order_keys(doctype: &DocType, sorts: &[Sort]) -> Result<Vec<String>, DbError> {
+    let table = quote_ident(&table_name(&doctype.name));
     let mut order = Vec::new();
-    for sort in &query.sort {
+    for sort in sorts {
         let col = column(doctype, &sort.field)?;
         let key = match &col.field_type {
             // A Link column holds the target's id; order by what the user sees, its name.
@@ -314,18 +333,33 @@ fn build(
         ));
     }
     order.push(format!("{table}.\"name\" ASC"));
+    Ok(order)
+}
 
-    let mut sql = format!("SELECT {} FROM {table}", select_list(doctype));
-    if !conditions.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&conditions.join(" AND "));
-    }
-    sql.push_str(" ORDER BY ");
-    sql.push_str(&order.join(", "));
-    let limit = binds.add(Value::Int(i64::from(limit)), "bigint");
-    let offset = binds.add(Value::Int(offset), "bigint");
-    sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
-    Ok((sql, binds.0))
+/// The statements of an export (M9.3): the rows (filters and sort, no page) and their count,
+/// which share one list of bound values. Built from the same conditions and sort as [`list`].
+pub(crate) fn build_export(
+    doctype: &DocType,
+    owner: Option<&str>,
+    filters: &[Filter],
+    sort: &[Sort],
+) -> Result<(String, String, Vec<Value>), DbError> {
+    let table = quote_ident(&table_name(&doctype.name));
+    let mut binds = Binds::default();
+    let conditions = conditions(doctype, owner, filters, &mut binds)?;
+    let order = order_keys(doctype, sort)?;
+    let filter = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let rows = format!(
+        "SELECT {} FROM {table}{filter} ORDER BY {}",
+        select_list(doctype),
+        order.join(", ")
+    );
+    let count = format!("SELECT count(*) FROM {table}{filter}");
+    Ok((rows, count, binds.0))
 }
 
 /// The SQL condition of one filter; values are bound.

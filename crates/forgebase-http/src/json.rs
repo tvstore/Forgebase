@@ -167,7 +167,11 @@ fn to_rows(
     Ok(rows)
 }
 
-fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, JsonError> {
+pub(crate) fn to_value(
+    name: &str,
+    field_type: &FieldType,
+    json: &Json,
+) -> Result<Value, JsonError> {
     if json.is_null() {
         return Ok(Value::Null);
     }

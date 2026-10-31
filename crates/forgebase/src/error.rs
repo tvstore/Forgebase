@@ -52,6 +52,9 @@ pub enum CliError {
     /// message says why. Never contains the secret, nor the path or query of the URL.
     #[error("{0}")]
     Webhook(String),
+    /// An import or export cannot be done, or an import had row errors; the message says why.
+    #[error("{0}")]
+    Transfer(String),
     /// The `--data` JSON cannot be used.
     #[error("{0}")]
     Json(#[from] JsonError),

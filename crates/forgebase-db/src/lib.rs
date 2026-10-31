@@ -64,7 +64,9 @@ mod backup;
 mod database;
 mod document;
 mod error;
+mod export;
 mod ident;
+mod import;
 pub mod jobs;
 pub mod json;
 mod link_titles;
@@ -89,8 +91,10 @@ pub use database::{DEFAULT_MAINTENANCE_DB, create_database, recorded_apps};
 pub use deadpool_postgres::Pool;
 pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
 pub use error::DbError;
+pub use export::{Export, ExportQuery, PAGE_ROWS, begin_export};
 pub use forgebase_core::permission::Caller;
 pub use ident::quote_ident;
+pub use import::{ImportError, ImportMode, ImportOutcome, ImportRow, MAX_REPORTED_ERRORS, import};
 pub use link_titles::{LinkTitles, link_titles};
 pub use list::{
     DEFAULT_LIMIT, Filter, FilterOp, ListQuery, MAX_IN_VALUES, MAX_LIMIT, Sort, column_type, list,
