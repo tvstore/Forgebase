@@ -405,6 +405,30 @@ Owner decision of 2026-10-31, *"setuju ci-result dan setuju M9.0"* ([ADR 0018](.
 - **MSRV:** `cargo +1.97 check --workspace --all-targets --all-features --locked` passes.
 - **TLS is not behind a cargo feature** (the older "Proposed" text said it would be): one code path is easier to keep correct than two builds, and the stack is shared with M9.2.
 
+### 14. Outgoing webhooks (M9.2)
+
+Owner decision 6 of the M9 plan, 2026-10-30 (*"setuju semua rencana mu"*; [ADR 0020](../adr/0020-outgoing-webhooks.md)): **`hyper-util` (client) + `hyper-rustls` (`ring`) + `rustls-native-certs`**. `rustls-native-certs` and the `ring` TLS stack came with M9.0 ([section 13](#13-tls-to-postgresql-m90)). Rejected: `reqwest` 0.13 (its default rustls pulls `aws-lc-rs`, which builds a C library with CMake; the other feature set pulls `webpki-roots`, CDLA-Permissive-2.0) and `ureq` 3 (about 46 new crates).
+
+| Crate | Version | Licence | How |
+|---|---|---|---|
+| **`hyper-rustls`** | 0.27.10 | Apache-2.0 OR ISC OR MIT | **new direct dependency** of `forgebase` (workspace, `default-features = false`, features `http1`, `tls12`, `ring`; **not** `aws-lc-rs`, `native-tokio`, `webpki-tokio` or `http2`: the roots come from `forgebase_db::tls`, which is the code of ADR 0018). MSRV 1.85. |
+| `try-lock` 0.2.5 | | MIT | new transitive crate (`want`) |
+| `want` 0.3.2 | | MIT | new transitive crate (`hyper-util`'s legacy client, pulled in by the `client-legacy` feature) |
+| `hyper-util` | 0.1.21 | MIT | already in the tree (axum); now a **direct** dependency of `forgebase` with `default-features = false` and features `client-legacy`, `http1`, `tokio` |
+| `http-body-util` | 0.1.5 | MIT | already in the tree; now direct (reads and discards the response body up to 64 KiB) |
+| `hmac` 0.13.0, `sha2` 0.11.1 | | MIT OR Apache-2.0 | already in the tree (PostgreSQL SCRAM); now direct (the signature). The same single versions: **no second `sha2` or `hmac`**. |
+| `rustls` | 0.23.46 | Apache-2.0 OR ISC OR MIT | now also a direct dependency of `forgebase` (the test seam takes a root store); still **one** version |
+| `axum`, `tower` | 0.8.9, 0.5.3 | MIT | were optional in `forgebase` (feature `testing`); now unconditional there. The client builds its requests with `axum::http` (no direct `http` or `hyper` dependency is added) and implements `tower::Service` for the pinned resolver. Both are compiled for `forgebase-http` already. |
+
+`Verified (local measurement)`, 2026-10-31, from `Cargo.lock`, `cargo tree` and `cargo deny`:
+
+- **The lockfile grows from 209 to 212 package entries (+3):** `hyper-rustls`, `try-lock` and `want` (the plan expected about 15; M9.0 had already added `rustls`, `ring`, `tokio-rustls` and the root-store crates).
+- **Absent from the tree:** `cargo tree --workspace --all-features --locked -i aws-lc-rs`, `-i openssl-sys` and `-i webpki-roots` each report that the package is not in the graph.
+- **One `rustls`:** `Cargo.lock` has a single `rustls` entry (0.23.46), shared by `tokio-postgres-rustls`, `hyper-rustls` and `forgebase-db`.
+- **Licences:** `cargo deny --locked check` passes with the existing allow-list (`MIT`, `Apache-2.0`, `ISC` cover the new crates); `deny.toml` is unchanged.
+- **MSRV:** `cargo +1.97 check --workspace --all-targets --all-features --locked` passes (`hyper-rustls` 0.27.10 declares 1.85).
+- **Test tooling:** the TLS tests need the `openssl` command-line tool (to make a throwaway CA); it is not a dependency of the build. CI images have it.
+
 ## Recommended baseline
 
 Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 0005); everything else is Proposed.
@@ -423,7 +447,8 @@ Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 
 | Auth | argon2 + opaque DB-backed sessions | tower-sessions with own store |
 | Jobs | custom Postgres SKIP LOCKED queue | apalis (if sqlx, after maturing) |
 | Config | toml + serde + env overlay | figment |
-| TLS | none in app, TLS terminated at a reverse proxy (Accepted, ADR 0005); rustls+ring for Postgres through `tokio-postgres-rustls` (Accepted 2026-10-31, [ADR 0018](../adr/0018-postgres-tls.md), not behind a feature) | native-tls |
+| TLS | none in app, TLS terminated at a reverse proxy (Accepted, ADR 0005); rustls+ring for Postgres through `tokio-postgres-rustls` (Accepted 2026-10-31, [ADR 0018](../adr/0018-postgres-tls.md), not behind a feature) and for outgoing webhooks through `hyper-rustls` (Accepted, [ADR 0020](../adr/0020-outgoing-webhooks.md), [section 14](#14-outgoing-webhooks-m92)) | native-tls |
+| Outgoing HTTP | `hyper-util` legacy client + `hyper-rustls` (ring), for webhooks only (Accepted, owner decision 6 of the M9 plan) | reqwest (pulls aws-lc-rs), ureq |
 | Frontend | React + TypeScript (Accepted, ADR 0002) + Vite + Vitest, no UI, router or data library (Accepted 2026-10-29, M4.1) | Vue/Svelte/Solid, htmx (not evaluated) |
 
 Approximate core-stack weight: 136 packages (A) vs 179 (B); excludes TLS, sessions and sha2.

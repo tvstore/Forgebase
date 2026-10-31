@@ -626,7 +626,9 @@ fn check_methods(
 fn check_schedules(apps: &[App], errors: &mut StartupError) -> BTreeMap<String, Spec> {
     let mut schedules = BTreeMap::new();
     for (def, spec) in builtin::builtin() {
-        schedules.insert(def.name, spec);
+        if let Some(spec) = spec {
+            schedules.insert(def.name, spec);
+        }
     }
     for app in apps {
         let app_name = &app.name;

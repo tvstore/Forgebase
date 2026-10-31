@@ -22,13 +22,19 @@ path = "src/main.rs"
 # an in-process HTTP client, a guard for the embedded DocType list). Apps enable it in their
 # `[dev-dependencies]` only.
 [features]
-testing = ["dep:axum", "dep:tower"]
+testing = []
 
 [dependencies]
 forgebase-core.workspace = true
 forgebase-db.workspace = true
 forgebase-http.workspace = true
-axum = { workspace = true, optional = true }
+hmac.workspace = true
+http-body-util.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+sha2.workspace = true
+axum.workspace = true
 clap.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
@@ -36,7 +42,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing", "formatting"] }
 toml.workspace = true
-tower = { workspace = true, optional = true }
+tower.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 
 [dev-dependencies]

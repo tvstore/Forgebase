@@ -17,7 +17,7 @@ use forgebase_http::{AppConfig, AppState, Sites};
 use crate::app::App;
 use crate::args::{
     ActorArg, Cli, Command, DocCommand, DocTypesDir, SiteCommand, TokenCommand, UserCommand,
-    VersionArg,
+    VersionArg, WebhookCommand,
 };
 use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
@@ -26,6 +26,7 @@ use crate::error::CliError;
 use crate::job_cmd::{job, read_payload};
 use crate::new_app::new_app;
 use crate::report::migrate_report;
+use crate::webhook_cmd::{read_secret, webhook};
 use crate::worker::{Worker, WorkerConfig, run_worker, worker_id};
 use forgebase_http::json::{
     Input, document_to_json, documents_to_json, parse_filters, parse_input, parse_sort,
@@ -97,6 +98,19 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
         Command::Token(command) => {
             let ctx = site.context(site_registry(site, apps)?, None).await?;
             token(&ctx, command).await
+        }
+        Command::Webhook(command) => {
+            // `add` checks the DocType against the `--doctypes` directory too.
+            let registry = match &command {
+                WebhookCommand::Add { doctypes, .. } => {
+                    Arc::new(site_composed(site, apps, doctypes)?.registry)
+                }
+                _ => site_registry(site, apps)?,
+            };
+            // Standard input is read before the database is opened.
+            let secret = read_secret(&command)?;
+            let ctx = site.context(registry, None).await?;
+            webhook(&ctx, command, secret).await
         }
         Command::Worker {
             doctypes,
@@ -947,7 +961,7 @@ async fn token(site: &SiteContext, command: TokenCommand) -> Result<(), CliError
 
 /// The first line of standard input without its line ending. At most 4096 bytes are read, far
 /// more than the longest valid password, so a runaway input cannot fill memory.
-fn read_password() -> Result<String, CliError> {
+pub(crate) fn read_password() -> Result<String, CliError> {
     let mut line = String::new();
     std::io::stdin()
         .lock()

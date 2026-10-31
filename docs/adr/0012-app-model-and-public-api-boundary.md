@@ -106,6 +106,16 @@ The definition types (`ReportDef` and the rest of `forgebase-core::report`) and 
 
 **Breaking change.** The methods of `Documents` return `Result<_, DocError>` instead of `Result<_, JobError>`. `?` into a `JobError` works unchanged, with the same retry rule; code that stored or matched the `JobError` of a `Documents` call converts with `.into()`, or uses `DocError::is_retryable` where it called `JobError::is_permanent`.
 
+### Public surface update (M9.2)
+
+[ADR 0020](0020-outgoing-webhooks.md) adds one item and nothing else becomes public. The webhook commands are part of the command-line tool, which has no compatibility promise beyond its documented behaviour.
+
+| Item | Purpose |
+|---|---|
+| `testing::webhook_test_settings(ca_pem, timeout)` (feature `testing`) | For the tests of an app that sends webhooks: the PEM certificate of the test CA that outgoing webhooks trust over `https://`, and the time limit of one delivery. Set once for the process; the first call wins. |
+
+The `forgebase` crate now depends on `axum` and `tower` without the `testing` feature (they were optional); both were already compiled in through `forgebase-http`.
+
 ## Implementation details (M5.1)
 
 These were chosen while implementing M5.1; they are to be reviewed with that change, not owner decisions.

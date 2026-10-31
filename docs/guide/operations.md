@@ -160,7 +160,7 @@ TimeoutStopSec=45
 WantedBy=multi-user.target
 ```
 
-A unit for `serve` is the same without `%i` and `--site`. The worker does not migrate: run `migrate` first.
+A unit for `serve` is the same without `%i` and `--site`. The worker does not migrate: run `migrate` first. The worker also sends the **webhooks** of its site ([webhooks guide](webhooks.md)): it opens the outgoing connections, so it needs the network access to the receivers and the operating system's CA certificates (the Docker image has them), and a site with webhooks has no deliveries without one.
 
 ## Upgrading
 

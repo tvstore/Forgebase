@@ -446,7 +446,7 @@ fn commands_touch_only_the_database_of_their_site() {
     let output = pair.run(&["migrate", "--site", "a", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let migrations = "SELECT count(*)::text FROM fb_migration";
-    assert_eq!(pair.a.scalar(migrations).as_deref(), Some("9"));
+    assert_eq!(pair.a.scalar(migrations).as_deref(), Some("10"));
     assert_eq!(
         pair.b.scalar("SELECT to_regclass('fb_migration')::text"),
         None
@@ -457,7 +457,7 @@ fn commands_touch_only_the_database_of_their_site() {
     );
     let output = pair.run(&["migrate", "--site", "b", "--doctypes", DOCTYPES]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
-    assert_eq!(pair.b.scalar(migrations).as_deref(), Some("9"));
+    assert_eq!(pair.b.scalar(migrations).as_deref(), Some("10"));
 
     let customer = r#"{"email":"ann@example.com","full_name":"Ann"}"#;
     let output = pair.run(&[
@@ -793,4 +793,55 @@ fn a_worker_claims_only_from_the_database_of_its_site() {
         Some("0")
     );
     assert!(!log.contains(&ids[1]), "{log}");
+}
+
+#[test]
+fn a_webhook_of_one_site_enqueues_nothing_on_the_other() {
+    // M9.2: a webhook is a row of the site's own database, so it belongs to that site alone.
+    let pair = Pair::new();
+    pair.set_up();
+    let added = pair.run(&[
+        "webhook",
+        "add",
+        "orders",
+        "--doctype",
+        "customer",
+        "--events",
+        "insert",
+        "--url",
+        "https://example.com/x",
+        "--site",
+        "a",
+        "--doctypes",
+        DOCTYPES,
+    ]);
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    // The other site has no such webhook.
+    let listed_b = pair.run(&["webhook", "list", "--site", "b"]);
+    assert_eq!(code(&listed_b), Some(0), "{}", stderr(&listed_b));
+    assert_eq!(
+        stdout(&listed_b).lines().count(),
+        1,
+        "only the header: {}",
+        stdout(&listed_b)
+    );
+    assert!(stdout(&pair.run(&["webhook", "list", "--site", "a"])).contains("orders"));
+
+    for site in ["a", "b"] {
+        let inserted = pair.run(&[
+            "doc",
+            "insert",
+            "customer",
+            "--site",
+            site,
+            "--doctypes",
+            DOCTYPES,
+            "--data",
+            r#"{"email":"x@example.com","full_name":"X"}"#,
+        ]);
+        assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+    }
+    let jobs = "SELECT count(*)::text FROM fb_job WHERE name = 'forgebase.deliver_webhook'";
+    assert_eq!(pair.a.scalar(jobs).as_deref(), Some("1"));
+    assert_eq!(pair.b.scalar(jobs).as_deref(), Some("0"));
 }

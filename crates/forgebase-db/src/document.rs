@@ -208,6 +208,7 @@ pub async fn insert(
     let jobs = EnqueuedJobs::new();
     let stored = insert_in(&tx, registry, doctype, doc, caller, None, &jobs).await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    write_webhooks(&tx, registry, doctype, &["insert"], &stored, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -473,6 +474,7 @@ pub async fn update(
     )
     .await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    write_webhooks(&tx, registry, doctype, &["update"], &stored, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -883,6 +885,7 @@ pub async fn submit(
     )
     .await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    write_webhooks(&tx, registry, doctype, &["submit"], &stored, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -1012,6 +1015,7 @@ pub async fn cancel(
     )
     .await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    write_webhooks(&tx, registry, doctype, &["cancel"], &stored, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -1174,6 +1178,8 @@ pub async fn amend(
     )
     .await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    // The amendment is a new document: its event is `insert`.
+    write_webhooks(&tx, registry, doctype, &["insert"], &stored, caller).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -1276,7 +1282,7 @@ pub async fn delete(
     let doctype = document_doctype(registry, doctype)?;
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
-    delete_in(
+    let deleted = delete_in(
         &tx,
         registry,
         doctype,
@@ -1287,6 +1293,7 @@ pub async fn delete(
     )
     .await?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    write_webhooks(&tx, registry, doctype, &["delete"], &deleted, caller).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1299,7 +1306,7 @@ async fn delete_in(
     expected_version: i64,
     caller: &Caller,
     jobs: &EnqueuedJobs,
-) -> Result<(), DbError> {
+) -> Result<StoredDocument, DbError> {
     let grant = grant(doctype, caller, Right::Delete)?;
     // `FOR UPDATE` makes concurrent linkers (`FOR KEY SHARE`) wait, so `before_delete` hooks do
     // not run for a delete that a new link would then refuse.
@@ -1359,7 +1366,8 @@ async fn delete_in(
             &[&doctype.name, &name],
         )
         .await?;
-    Ok(())
+    // The document as it was, for the webhooks.
+    Ok(current)
 }
 
 /// Writes the jobs the hooks of this operation enqueued, in the operation's transaction (the
@@ -1373,6 +1381,27 @@ pub(crate) async fn write_jobs(
     caller: &Caller,
 ) -> Result<(), DbError> {
     crate::jobs::enqueue_collected(client, registry, jobs.take(), caller.name()).await
+}
+
+/// Enqueues the webhook deliveries of the operation (M9.2, ADR 0020) in its transaction: the
+/// last step before the commit, so a failed or rolled-back operation enqueues none.
+pub(crate) async fn write_webhooks(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    events: &[&str],
+    stored: &StoredDocument,
+    caller: &Caller,
+) -> Result<(), DbError> {
+    crate::webhooks::enqueue(
+        client,
+        registry,
+        events,
+        stored,
+        &doctype.name,
+        caller.name(),
+    )
+    .await
 }
 
 /// Calls `call` for every hook set registered for the DocType, in registration order, and stops

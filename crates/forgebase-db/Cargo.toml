@@ -20,7 +20,7 @@ getrandom.workspace = true
 rust_decimal = { workspace = true, features = ["db-tokio-postgres"] }
 serde_json.workspace = true
 thiserror.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true

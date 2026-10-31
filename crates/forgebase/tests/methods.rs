@@ -9,8 +9,9 @@
 use forgebase::serde_json::{Value as Json, json};
 use forgebase::testing::{HttpClient, Reply, TestDb, run_jobs};
 use forgebase::{
-    App, Changes, DocTypeFile, Document, Forgebase, JobContext, JobError, JobFuture, JobHandler,
-    JobOptions, ListQuery, Method, MethodContext, MethodError, MethodFuture, MethodHandler, Value,
+    App, Changes, DocTypeFile, Document, FilterOp, Forgebase, JobContext, JobError, JobFuture,
+    JobHandler, JobOptions, ListQuery, Method, MethodContext, MethodError, MethodFuture,
+    MethodHandler, Value,
 };
 
 const NOTE: &str = r#"
@@ -120,6 +121,10 @@ enum Behavior {
     AddThenConflict,
     /// A refused insert (no `code`) is handled, then a note is inserted.
     RefusedThenAdd,
+    /// Update the note `code` at the body's `version`: `qty` becomes 7.
+    UpdateNote,
+    /// Insert a note, ignore a read that the server refuses, insert another note.
+    SwallowedRead,
     /// Insert the ticket `code`.
     AddTicket,
     /// Take the workflow action "Close" on the ticket `name` at `version`.
@@ -187,6 +192,22 @@ impl MethodHandler for Shop {
                     docs.insert("note", doc(&code)).await?;
                     Ok(json!({"refused": true}))
                 }
+                Behavior::UpdateNote => {
+                    let version = ctx.body()["version"].as_i64().unwrap_or_default();
+                    let changes = Changes {
+                        values: [("qty".to_owned(), Value::Int(7))].into(),
+                        ..Changes::default()
+                    };
+                    let stored = ctx
+                        .documents()
+                        .update("note", &code, version, changes)
+                        .await?;
+                    Ok(json!({"version": stored.version()}))
+                }
+                Behavior::SwallowedRead => {
+                    swallowed_read(&mut ctx.documents(), &code).await?;
+                    Ok(json!({"swallowed": true}))
+                }
                 Behavior::AddTicket => {
                     let stored = ctx.documents().insert("ticket", doc(&code)).await?;
                     Ok(json!({"name": stored.name(), "version": stored.version()}))
@@ -213,6 +234,38 @@ impl MethodHandler for Shop {
                     Ok(Json::Null)
                 }
             }
+        })
+    }
+}
+
+/// Inserts the note `<code>-1`, makes a read that PostgreSQL itself refuses (a `like` pattern
+/// that ends with the escape character) and **ignores the error**, then inserts `<code>-2`.
+async fn swallowed_read(
+    docs: &mut forgebase::Documents<'_>,
+    code: &str,
+) -> Result<(), forgebase::DocError> {
+    docs.insert("note", doc(&format!("{code}-1"))).await?;
+    // PostgreSQL raises the error when the match reaches the trailing backslash, which it does
+    // for the row that was just inserted (a pattern that fails on its first characters never
+    // gets there).
+    let pattern = format!("{code}-%\\");
+    let refused = ListQuery::new().filter("code", FilterOp::Like, text(&pattern));
+    assert!(
+        docs.list("note", &refused).await.is_err(),
+        "the server refuses the pattern"
+    );
+    docs.insert("note", doc(&format!("{code}-2"))).await?;
+    Ok(())
+}
+
+/// `shop.swallow`: the same through the documents handle of a job.
+struct Swallow;
+
+impl JobHandler for Swallow {
+    fn run<'a>(&'a self, ctx: &'a mut JobContext<'_>) -> JobFuture<'a> {
+        Box::pin(async move {
+            swallowed_read(&mut ctx.documents(), "job").await?;
+            Ok::<(), JobError>(())
         })
     }
 }
@@ -271,6 +324,8 @@ fn shop() -> App {
             "refused_then_add",
             m(Behavior::RefusedThenAdd).roles(&writers),
         )
+        .method("update_note", m(Behavior::UpdateNote).roles(&writers))
+        .method("swallowed_read", m(Behavior::SwallowedRead).roles(&writers))
         .method("add_ticket", m(Behavior::AddTicket).roles(&["Agent"]))
         .method(
             "close_ticket",
@@ -283,6 +338,7 @@ fn shop() -> App {
         )
         .job_with("log", Log(false), JobOptions::new())
         .job_with("bad", Log(true), JobOptions::new())
+        .job_with("swallow", Swallow, JobOptions::new())
 }
 
 fn binary() -> Forgebase {
@@ -456,6 +512,83 @@ async fn a_write_without_the_right_is_permission_denied() {
     assert_eq!(reply.status, 403, "{:?}", reply.body);
     assert_eq!(reply.error_code(), Some("permission_denied"));
     assert!(codes(&db).await.is_empty());
+    db.cleanup().await;
+}
+
+/// M9.1 review, carry-over: an update that the caller may not make is refused with the document
+/// API's status, and the row is untouched.
+#[tokio::test]
+async fn an_update_without_the_right_or_of_a_note_that_is_not_hers_is_refused() {
+    let db = ready().await;
+    let (ann, bob, ada, boss) = (
+        login(&db, "ann").await,
+        login(&db, "bob").await,
+        login(&db, "ada").await,
+        login(&db, "boss").await,
+    );
+    assert_eq!(
+        bob.post(&call("add_note"), json!({"code": "b1"}))
+            .await
+            .status,
+        200
+    );
+    let row =
+        || db.rows("SELECT version::text, coalesce(qty::text, '-'), modified_by FROM doc_note");
+    let before = row().await;
+    assert_eq!(before, [["1", "-", "bob"]]);
+
+    // The auditor reads but has no write right: 403 permission_denied.
+    let denied = ada
+        .post(&call("update_note"), json!({"code": "b1", "version": 1}))
+        .await;
+    assert_eq!(denied.status, 403, "{:?}", denied.body);
+    assert_eq!(denied.error_code(), Some("permission_denied"));
+    assert_eq!(row().await, before);
+
+    // A clerk may write only her own notes (`if_owner`): another clerk's note is not found.
+    let hidden = ann
+        .post(&call("update_note"), json!({"code": "b1", "version": 1}))
+        .await;
+    assert_eq!(hidden.status, 404, "{:?}", hidden.body);
+    assert_eq!(hidden.error_code(), Some("not_found"));
+    assert_eq!(row().await, before);
+
+    // The owner and the boss can.
+    let own = bob
+        .post(&call("update_note"), json!({"code": "b1", "version": 1}))
+        .await;
+    assert_eq!(own.status, 200, "{:?}", own.body);
+    let all = boss
+        .post(&call("update_note"), json!({"code": "b1", "version": 2}))
+        .await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(row().await, [["3", "7", "boss"]]);
+    db.cleanup().await;
+}
+
+/// M9.1 review, carry-over: a read that PostgreSQL refuses and the handler ignores must not lose
+/// the handler's other writes. Reads run in a savepoint, like writes.
+#[tokio::test]
+async fn a_read_the_server_refuses_and_the_handler_ignores_loses_nothing() {
+    let db = ready().await;
+    let ann = login(&db, "ann").await;
+    let reply = ann
+        .post(&call("swallowed_read"), json!({"code": "n"}))
+        .await;
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    assert_eq!(reply.data(), &json!({"swallowed": true}));
+    // Both writes, the one before the failed read and the one after it, were committed.
+    assert_eq!(codes(&db).await, ["n-1", "n-2"]);
+
+    // The same through the documents handle of a job.
+    db.exec(
+        "INSERT INTO fb_job (id, name, payload, status, enqueued_by) \
+         VALUES (gen_random_uuid(), 'shop.swallow', '{}', 'queued', 'test')",
+    )
+    .await;
+    let run = run_jobs(&binary(), &db).await;
+    assert_eq!((run.done(), run.retried(), run.dead()), (1, 0, 0));
+    assert_eq!(codes(&db).await, ["job-1", "job-2", "n-1", "n-2"]);
     db.cleanup().await;
 }
 

@@ -48,6 +48,10 @@ pub enum CliError {
     /// A job command cannot be done; the message says why.
     #[error("{0}")]
     Job(String),
+    /// A webhook command cannot be done, or a test delivery was refused or not accepted; the
+    /// message says why. Never contains the secret, nor the path or query of the URL.
+    #[error("{0}")]
+    Webhook(String),
     /// The `--data` JSON cannot be used.
     #[error("{0}")]
     Json(#[from] JsonError),

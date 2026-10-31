@@ -8,9 +8,10 @@
 //! uses the same document functions as the CLI and the HTTP API, so validation, naming and
 //! the lifecycle hooks run as usual; each write (and each enqueue) is one **savepoint** inside
 //! the surrounding transaction, so a refused write leaves it usable and a refused or failed job
-//! or method rolls all of them back. Reads (`get`, `list`) run directly on the transaction: a
-//! failed read aborts it, so the attempt fails (a job is retried). Jobs enqueued by the hooks
-//! of these calls are written in the same transaction.
+//! or method rolls all of them back. Reads (`get`, `list`) run in a savepoint as well (M9.2): a
+//! read that the server refuses rolls back to its savepoint and leaves the transaction usable, so
+//! a handler that ignores the error neither loses its earlier writes nor fails its next call.
+//! Jobs enqueued by the hooks of these calls are written in the same transaction.
 
 use std::fmt;
 use std::future::Future;
@@ -289,7 +290,27 @@ impl DocTx for Transaction<'_> {
         name: &'f str,
         c: &'f Caller,
     ) -> Fut<'f, Option<forgebase_db::StoredDocument>> {
-        Box::pin(forgebase_db::get(self, r, doctype, name, c))
+        // A document with Table fields is read in a savepoint by `forgebase_db::get` itself; one
+        // without is a single statement, which is given a savepoint here (see `list`).
+        let has_tables = r
+            .get(doctype)
+            .is_some_and(|d| d.table_fields().next().is_some());
+        if has_tables {
+            return Box::pin(forgebase_db::get(self, r, doctype, name, c));
+        }
+        Box::pin(async move {
+            let mut savepoint = self.transaction().await?;
+            match forgebase_db::get(&mut savepoint, r, doctype, name, c).await {
+                Ok(found) => {
+                    savepoint.commit().await?;
+                    Ok(found)
+                }
+                Err(error) => {
+                    let _ = savepoint.rollback().await;
+                    Err(error)
+                }
+            }
+        })
     }
     fn list<'f>(
         &'f mut self,
@@ -298,7 +319,22 @@ impl DocTx for Transaction<'_> {
         c: &'f Caller,
         q: &'f forgebase_db::ListQuery,
     ) -> Fut<'f, Vec<forgebase_db::StoredDocument>> {
-        Box::pin(async move { forgebase_db::list(&*self, r, doctype, c, q).await })
+        // A savepoint, like every write: a read that the server refuses (a `like` pattern that
+        // ends with a backslash, a statement timeout) aborts only the savepoint, so a handler
+        // that ignores the error can go on and its other work still commits (M9.2).
+        Box::pin(async move {
+            let savepoint = self.transaction().await?;
+            match forgebase_db::list(&savepoint, r, doctype, c, q).await {
+                Ok(found) => {
+                    savepoint.commit().await?;
+                    Ok(found)
+                }
+                Err(error) => {
+                    let _ = savepoint.rollback().await;
+                    Err(error)
+                }
+            }
+        })
     }
     fn insert<'f>(
         &'f mut self,

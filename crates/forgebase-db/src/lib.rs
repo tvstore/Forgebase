@@ -66,6 +66,7 @@ mod document;
 mod error;
 mod ident;
 pub mod jobs;
+pub mod json;
 mod link_titles;
 mod list;
 mod migrate;
@@ -74,9 +75,10 @@ mod reports;
 pub mod schedule;
 mod summary;
 mod sync;
-mod tls;
+pub mod tls;
 mod value;
 mod views;
+pub mod webhooks;
 mod workflow;
 
 pub use app_migrations::{

@@ -366,6 +366,11 @@ pub enum DbError {
     /// reports it as an internal error.
     #[error("job: {0}")]
     Job(String),
+    /// A webhook cannot be added or changed (M9.2, ADR 0020): the name or the events are
+    /// invalid, the name is taken, or no webhook has the name. Raised by the `webhook` commands,
+    /// never by a document operation. The message never contains the secret.
+    #[error("webhook: {0}")]
+    Webhook(String),
     /// The report does not exist, or the caller may not run it (the same error for both, so a
     /// caller learns nothing about reports they may not run).
     #[error("report `{report}` not found")]
