@@ -155,10 +155,10 @@ Test a restore on a spare VM or stack before you need it.
 
 ## 2. Single-container mode
 
-`all` runs the web server **and** the worker in one container, which saves a container and some memory. Use it on a very small machine or on a host that runs only one container. In `compose.yaml` give `forgebase` the command `["all"]` and remove the `worker` service, or without compose:
+`all` runs the web server **and** the worker in one container, which saves a container and some memory. Use it on a very small machine or on a host that runs only one container. In `compose.yaml` give `forgebase` the command `["all"]` and remove the `worker` service, or without compose. This example is meant to sit behind an HTTPS reverse proxy (the session cookie is `Secure`); for a local test over plain HTTP add `-e FORGEBASE_DEV_INSECURE_COOKIES=1` and `FORGEBASE_ALLOWED_HOSTS=localhost` (insecure, testing only):
 
 ```sh
-docker run -d --name forgebase --init -p 8000:8000 \
+docker run -d --name forgebase -p 8000:8000 \
   -e FORGEBASE_DATABASE_URL=postgres://user:password@dbhost:5432/forgebase \
   -e FORGEBASE_ALLOWED_HOSTS=forgebase.example.com \
   -e FORGEBASE_MIGRATE_ON_START=1 \
@@ -167,10 +167,10 @@ docker run -d --name forgebase --init -p 8000:8000 \
 
 How it behaves (`deploy/entrypoint.sh`):
 
-- It starts `serve` and `worker`, forwards SIGTERM and SIGINT to both once, waits for both and exits with 0 after a requested stop. If one process exits on its own, it stops the other and exits with the first one's status, so the container restarts (`restart: unless-stopped`) as a unit.
+- It starts `serve` and `worker`, forwards every SIGTERM or SIGINT it receives to both (one signal makes them stop gracefully; a second one makes them exit at once), waits for both and exits with 0 after a requested stop. If one process exits on its own, it sends the other one SIGTERM and exits with the first one's status (also when a signal arrives meanwhile), so the container restarts (`restart: unless-stopped`) as a unit.
 - `FORGEBASE_MIGRATE_ON_START=1` runs `migrate` before `serve` or `all` start (default **off**). A failed migration stops the container with a non-zero exit code. It is convenient on a host without a shell, but two containers that start together both migrate; use it with one instance only.
 - `FORGEBASE_LISTEN`, if unset, is `0.0.0.0:$PORT` when `PORT` is set (Render and similar hosts) and `0.0.0.0:8000` otherwise.
-- In `all` mode the script is PID 1 and reaps its children itself; in the other modes the binary is PID 1 (compose sets `init: true`; with `docker run`, `--init` is optional).
+- In `all` mode the script is PID 1 and reaps its children itself, so `--init` is not needed; in the other modes the binary is PID 1 (compose sets `init: true`; with `docker run`, `--init` is optional).
 - Trade-offs: a crash of either process restarts both; a busy worker and the web server share one memory budget; stopping gives running jobs up to 30 seconds, so use `docker stop -t 45` (compose: `stop_grace_period: 45s`); the logs of both go to one stream. The separate layout above is the recommended one for production.
 
 ## 3. Render + Neon (not supported yet)

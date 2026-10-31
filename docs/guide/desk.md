@@ -16,7 +16,7 @@ The desk is a React + TypeScript app in `desk/` (no UI component library; at run
 # Build the desk (Node.js ^20.19.0 || >=22.12.0; desk/.npmrc ignores dependency install scripts): writes desk/dist
 cd desk && npm ci && npm run build && cd ..
 
-# Run it with the API from the HTTP API section above (a user and the tables must exist), then open http://localhost:8000/desk/
+# Run it with the API from the [HTTP API guide](http-api.md) (a user and the tables must exist), then open http://localhost:8000/desk/
 # FORGEBASE_DEV_INSECURE_COOKIES=1 is for plain HTTP on localhost only; behind HTTPS leave it out.
 FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist cargo run -p sales -- serve
 

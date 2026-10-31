@@ -13,7 +13,9 @@
 set -eu
 
 app=/usr/local/bin/forgebase-app
-mode="${1:-serve}"
+# No arguments means `serve` (the image sets CMD ["serve"] too).
+[ "$#" -gt 0 ] || set -- serve
+mode="$1"
 
 if [ -z "${FORGEBASE_LISTEN:-}" ]; then
   export FORGEBASE_LISTEN="0.0.0.0:${PORT:-8000}"
@@ -32,8 +34,10 @@ if [ "$mode" != "all" ]; then
   exec "$app" "$@"
 fi
 
-# Single-container mode. Both processes stop gracefully on SIGTERM; a SECOND signal makes them exit at
-# once, so each child gets exactly one TERM. This script is PID 1 and reaps its children with `wait`.
+# Single-container mode. Both processes stop gracefully on SIGTERM; a second signal makes them exit at
+# once. This script forwards TERM to both children on EVERY TERM or INT it receives (so two signals to
+# the container reach the children as two, which is what "exit now" means for them), and sends one TERM
+# itself when a child exits on its own. It is PID 1 and reaps its children with `wait`.
 if [ "$#" -ne 1 ]; then
   echo "entrypoint: all takes no arguments (use the environment and a config file)" >&2
   exit 2
@@ -53,27 +57,29 @@ on_signal() {
 }
 trap on_signal TERM INT
 
-# Returns when either child exits, or when a trapped signal arrives.
+# Returns when either child exits ($who is its PID) or when a trapped signal arrives ($who is empty).
 set +e
-wait -n
+who=
+wait -n -p who
 first=$?
-if [ "$stopping" = 0 ]; then
+if [ -z "${who:-}" ]; then
+  first=   # interrupted by a signal: the children are being stopped, no child status yet
+elif [ "$stopping" = 0 ]; then
   echo "entrypoint: a process exited (status $first), stopping the other" >&2
   stop_children
 fi
-# 127: that child was already reaped by `wait -n`.
-wait "$serve_pid"
-serve_rc=$?
-wait "$worker_pid"
-worker_rc=$?
 
-if [ "$stopping" = 1 ]; then
-  # Stopped on request: success unless a child failed while stopping.
-  for rc in "$serve_rc" "$worker_rc"; do
-    if [ "$rc" != 0 ] && [ "$rc" != 127 ]; then
-      exit "$rc"
-    fi
-  done
-  exit 0
+# A trapped signal also interrupts `wait PID` (status above 128, the child not reaped): wait again
+# until the PID is really gone. A child that `wait -n` reaped is gone already and keeps its status.
+serve_rc=0
+worker_rc=0
+while kill -0 "$serve_pid" 2>/dev/null; do wait "$serve_pid"; serve_rc=$?; done
+while kill -0 "$worker_pid" 2>/dev/null; do wait "$worker_pid"; worker_rc=$?; done
+
+# The first child that exited on its own decides the status (even if a signal arrived afterwards).
+if [ -n "$first" ]; then
+  exit "$first"
 fi
-exit "$first"
+# Stopped on request before any child exited: success unless a child failed while stopping.
+[ "$serve_rc" = 0 ] || exit "$serve_rc"
+exit "$worker_rc"

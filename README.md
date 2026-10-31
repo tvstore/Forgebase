@@ -51,9 +51,12 @@ Open <http://localhost:8000/desk/> and log in as `admin`. (`FORGEBASE_DEV_INSECU
 
 ```sh
 docker build -t forgebase-sales .
-docker network create fb && docker run -d --name fbpg --network fb -e POSTGRES_USER=forgebase -e POSTGRES_PASSWORD=forgebase -e POSTGRES_DB=forgebase postgres:16
-docker run -d --name fbapp --network fb -p 8000:8000 -e FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@fbpg:5432/forgebase \
+docker network create fb
+docker run -d --name fbpg --network fb -e POSTGRES_USER=forgebase -e POSTGRES_PASSWORD=forgebase -e POSTGRES_DB=forgebase postgres:16
+until docker exec fbpg pg_isready -h 127.0.0.1 -U forgebase -d forgebase; do sleep 1; done   # wait for PostgreSQL
+docker run -d --name fbapp --network fb -p 8000:8000 --restart on-failure -e FORGEBASE_DATABASE_URL=postgres://forgebase:forgebase@fbpg:5432/forgebase \
   -e FORGEBASE_MIGRATE_ON_START=1 -e FORGEBASE_ALLOWED_HOSTS=localhost -e FORGEBASE_DEV_INSECURE_COOKIES=1 forgebase-sales all
+until curl -fsS -o /dev/null http://localhost:8000/desk/; do sleep 1; done                   # wait for migrate and the server
 printf '%s\n' 'a long password' | docker exec -i fbapp forgebase-app user create admin --role Administrator
 ```
 

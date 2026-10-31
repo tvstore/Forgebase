@@ -43,7 +43,7 @@ RUN cargo build --release --locked -p "${BIN}" \
 # major version (crates/forgebase/src/backup.rs). It needs no apt repository. The cost: the image is
 # about 650 MB (a Debian slim base plus the PGDG client package would be about 200 MB), and the base
 # declares `VOLUME /var/lib/postgresql/data`, so Docker creates an empty anonymous volume for each
-# container of this image (`docker run --rm` and `docker compose down -v` remove it; it is never used).
+# container of this image (`docker run --rm` removes it, and it is never used).
 FROM postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
 RUN useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin forgebase \
     && install -d -o forgebase -g forgebase /app /backups

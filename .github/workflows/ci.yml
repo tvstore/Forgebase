@@ -110,6 +110,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Test the entrypoint (fake binary)
+        run: bash deploy/test-entrypoint.sh
       - name: Build the image (no push)
         run: docker build -t forgebase-sales .
       # `all` mode on the host network (to reach the service on localhost): migrate on start, the
