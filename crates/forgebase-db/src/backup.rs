@@ -289,6 +289,16 @@ mod tests {
     }
 
     #[test]
+    fn an_at_sign_after_the_host_is_refused_for_the_backup_tools_too() {
+        let message = pg_environment(
+            "postgres://db.example.com/app?sslmode=verify-full&application_name=svc@db.example.com",
+        )
+        .expect_err("at sign")
+        .to_string();
+        assert!(message.contains("%40"), "{message}");
+    }
+
+    #[test]
     fn unsupported_options_are_errors_that_name_the_option_and_not_the_value() {
         for (url, option) in [
             ("postgres://u:pw@h1,h2/db", "host (more than one)"),

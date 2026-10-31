@@ -115,9 +115,20 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
     } else {
         11
     };
-    let creds_end = url[scheme_len..]
-        .find('@')
-        .map_or(scheme_len, |at| scheme_len + at + 1);
+    let creds_end = match url[scheme_len..].find('@') {
+        // libpq looks for credentials only before the first `/`; `tokio-postgres` takes everything
+        // up to the first `@` of the string. With a `/` before that `@` (for example an `@` in a
+        // later query value) the two read different hosts and options, and a TLS choice in the
+        // query could go unseen. Refuse it. Only `/` makes them differ: `?`, `#` and further `@`
+        // before the first `@` are read the same way by both.
+        Some(at) if url[scheme_len..scheme_len + at].contains('/') => {
+            return Err(err(
+                "the database URL has an `@` after the host: percent-encode it as %40",
+            ));
+        }
+        Some(at) => scheme_len + at + 1,
+        None => scheme_len,
+    };
     let (base, query) = match url[creds_end..].find('?') {
         Some(q) => (&url[..creds_end + q], Some(&url[creds_end + q + 1..])),
         None => (url, None),
@@ -214,14 +225,19 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
 }
 
 fn percent_decode(value: &str) -> Result<String, TlsError> {
-    let bad = || err("a TLS parameter of the database URL is not valid percent-encoded UTF-8");
+    let bad = || err("a query parameter of the database URL is not valid percent-encoding");
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = value.get(i + 1..i + 3).ok_or_else(bad)?;
-            out.push(u8::from_str_radix(hex, 16).map_err(|_| bad())?);
+            // Exactly two hex digits (`from_str_radix` would also take a sign).
+            let hex = bytes.get(i + 1..i + 3).ok_or_else(bad)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return Err(bad());
+            }
+            let text = std::str::from_utf8(hex).map_err(|_| bad())?;
+            out.push(u8::from_str_radix(text, 16).map_err(|_| bad())?);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -466,6 +482,37 @@ mod tests {
                 .contains("more than once")
         );
         assert!(refused("postgres://u:a?b@h/db?%73slcert=x").contains("`sslcert`"));
+    }
+
+    #[test]
+    fn an_at_sign_after_the_host_is_refused() {
+        // No user: the first `@` is in a query value, after a `/`. libpq reads host db.example.com
+        // with verify-full; tokio-postgres would read credentials and lose the `sslmode`.
+        let url =
+            "postgres://db.example.com/app?sslmode=verify-full&application_name=svc@db.example.com";
+        assert!(refused(url).contains("percent-encode it as %40"));
+        assert!(refused("postgres://h/db?sslmode=require&x=a@b").contains("%40"));
+        // The same URL with the `@` encoded is fine.
+        assert_eq!(
+            parsed("postgres://db.example.com/app?sslmode=verify-full&application_name=svc%40db").1,
+            Ssl::Verify(RootCerts::System)
+        );
+        // `?`, `#` and a second `@` before the first `@` are read alike by both parsers.
+        parsed("postgres://u:a?b#c@h/db?sslmode=require");
+        // `connect` and `pg_environment` go through the same parse.
+        assert!(prepare(url).is_err());
+    }
+
+    #[test]
+    fn percent_encoding_needs_two_hex_digits() {
+        for bad in ["%+1", "%-1", "%1", "%", "%zz", "%ff"] {
+            let message = refused(&format!("postgres://u@h/db?a{bad}=1"));
+            assert!(
+                message.contains("not valid percent-encoding"),
+                "{bad}: {message}"
+            );
+        }
+        parsed("postgres://u@h/db?a%41=1");
     }
 
     #[test]

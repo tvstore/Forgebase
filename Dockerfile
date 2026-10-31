@@ -49,10 +49,12 @@ FROM postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d
 # server's certificate against the operating system's roots (a Neon database needs this). The build
 # stage has the Debian bundle (the `ca-certificates` package, as of its pinned digest), so it is
 # copied: the final stage then needs no network at build time.
-# The base also ships Debian's "snakeoil" test certificate in /etc/ssl/certs, whose private key is
-# public (the Debian `ssl-cert` package ships it to everyone). It must never be a
-# trusted root, so both files and the dangling hash link are removed, and SSL_CERT_FILE makes the
-# root loader (rustls-native-certs, and libpq) read the bundle only, not the whole directory.
+# The base also ships Debian's "snakeoil" test certificate in /etc/ssl/certs. The `ssl-cert` package
+# generates it, and its private key, when the base image is built, so the key is in every copy of the
+# public image. It must never be a trusted root, so both files and the dangling hash link are
+# removed. SSL_CERT_FILE makes rustls-native-certs read the bundle only. libpq (pg_dump, pg_restore)
+# reads SSL_CERT_FILE and also the hashed files of /etc/ssl/certs, so that directory must hold
+# nothing but the bundle: CI checks it.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN rm -f /etc/ssl/certs/ssl-cert-snakeoil.pem /etc/ssl/private/ssl-cert-snakeoil.key \
     && find /etc/ssl/certs -xtype l -delete \
