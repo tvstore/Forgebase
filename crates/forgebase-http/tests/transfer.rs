@@ -1700,14 +1700,54 @@ async fn every_error_response_is_small_whatever_the_request_echoed() {
         "title,qty,price,due,seen,done,tier,item\n{}",
         vec![line; 100].join("\n")
     );
-    for (query, status) in [
-        ("?format=csv", StatusCode::UNPROCESSABLE_ENTITY),
-        ("?format=csv&dry_run=1", StatusCode::OK),
+    let upsert_csv = format!(
+        "name,title,qty,price,due,seen,done,tier,item\n{}",
+        (0..100)
+            .map(|i| format!("u{i},a,{}", [junk.as_str(); 7].join(",")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for (query, csv, mode, status) in [
+        (
+            "?format=csv",
+            &csv,
+            "insert",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("?format=csv&dry_run=1", &csv, "insert", StatusCode::OK),
+        (
+            "?format=csv&mode=upsert",
+            &upsert_csv,
+            "upsert",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "?format=csv&mode=upsert&dry_run=1",
+            &upsert_csv,
+            "upsert",
+            StatusCode::OK,
+        ),
     ] {
-        let reply = import(&env, &root, query, "text/csv", &csv).await;
+        let reply = import(&env, &root, query, "text/csv", csv).await;
         assert_eq!(reply.status, status, "{}", reply.text);
         assert!(reply.text.len() > 10_000, "the errors are reported");
         small(&format!("bad CSV cells{query}"), &reply);
+        assert!(
+            reply.text.len() < 66 * 1024,
+            "{query}: {} bytes",
+            reply.text.len()
+        );
+        // The mode and the counts survive the bound, and a row error keeps its code and message.
+        let body: Json = serde_json::from_str(&reply.text).expect("JSON");
+        let summary = if status == StatusCode::OK {
+            &body["data"]
+        } else {
+            &body["error"]["details"]
+        };
+        assert_eq!(summary["mode"], mode, "{query}");
+        assert_eq!(summary["rows"], 100, "{query}");
+        assert_eq!(summary["error_count"], 100, "{query}");
+        assert!(summary["errors"][0]["message"].is_string(), "{query}");
     }
     // The same through POST /resource, within its body limit.
     let keys: String = (0..60_000).map(|i| format!("\"k{i}\":1,")).collect();

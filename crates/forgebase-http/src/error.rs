@@ -259,7 +259,7 @@ pub(crate) fn cut_text(text: &str) -> String {
 /// "and N more", for an array that stops early.
 fn more(n: usize, budget: &mut Budget) -> Value {
     let text = format!("and {n} more");
-    budget.0 = budget.0.saturating_sub(text.len() + 2);
+    budget.0 = budget.0.saturating_sub(text.len() + 3);
     Value::String(text)
 }
 
@@ -273,12 +273,14 @@ fn room(taken: usize, budget: &Budget) -> bool {
 /// "and N more" entry, within the budget, each cut to [`MAX_MESSAGE_CHARS`].
 fn capped_in(problems: Vec<String>, budget: &mut Budget) -> Vec<String> {
     let total = problems.len();
+    spend(budget, 2);
     let mut out = Vec::new();
     for problem in problems {
         if !room(out.len(), budget) {
             break;
         }
         out.push(cut(&problem, budget));
+        spend(budget, 1);
     }
     if out.len() < total {
         let Value::String(text) = more(total - out.len(), budget) else {
@@ -294,14 +296,19 @@ pub(crate) fn capped(problems: Vec<String>) -> Vec<String> {
     capped_in(problems, &mut Budget::new())
 }
 
-/// `value` within the budget, in document order (the first entries are kept): strings and keys
-/// are cut, arrays take entries while the count and the budget last and end with "and N more".
-/// Numbers, booleans and null cost nothing but their keys, so the counts of a summary survive. Linear in what
-/// it keeps: the rest is only counted.
+/// `value` within the budget. The budget is exact: it is charged the strings and keys as escaped
+/// with their quotes, the numbers, booleans and null as written, 2 bytes per container (the
+/// brackets), 1 per array entry and 2 per object entry (the comma, and the colon). Strings and keys
+/// are cut, arrays take entries in order while the count and the budget last and end with "and N
+/// more". An object is walked with its keys sorted, in three groups: numbers, booleans and null
+/// first (the counts of a summary), then strings (each at most [`MAX_MESSAGE_CHARS`] characters, so
+/// `mode`, `code` and `message` survive), then arrays and objects; an entry that finds no room is
+/// left out. Linear in what it keeps: the rest is only counted.
 fn bound_in(value: Value, budget: &mut Budget) -> Value {
     match value {
         Value::String(text) => Value::String(cut(&text, budget)),
         Value::Array(items) => {
+            spend(budget, 2);
             let total = items.len();
             let mut out = Vec::new();
             for item in items {
@@ -309,6 +316,7 @@ fn bound_in(value: Value, budget: &mut Budget) -> Value {
                     break;
                 }
                 out.push(bound_in(item, budget));
+                spend(budget, 1);
             }
             if out.len() < total {
                 out.push(more(total - out.len(), budget));
@@ -316,23 +324,35 @@ fn bound_in(value: Value, budget: &mut Budget) -> Value {
             Value::Array(out)
         }
         Value::Object(map) => {
-            // Numbers, booleans and null first (they are the counts of a summary and cost only
-            // their keys), then the rest in order; an entry that finds no room is left out.
-            let (scalars, rest): (Vec<_>, Vec<_>) = map.into_iter().partition(|(_, v)| {
-                !matches!(v, Value::String(_) | Value::Array(_) | Value::Object(_))
-            });
+            spend(budget, 2);
+            let group = |v: &Value| match v {
+                Value::String(_) => 1,
+                Value::Array(_) | Value::Object(_) => 2,
+                _ => 0,
+            };
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by_key(|(_, v)| group(v));
             let mut out = serde_json::Map::new();
-            for (key, value) in scalars.into_iter().chain(rest) {
+            for (key, value) in entries {
                 if !room(out.len(), budget) {
                     break;
                 }
                 let key = cut(&key, budget);
+                spend(budget, 2);
                 out.insert(key, bound_in(value, budget));
             }
             Value::Object(out)
         }
-        other => other,
+        other => {
+            spend(budget, other.to_string().len());
+            other
+        }
     }
+}
+
+/// Takes `bytes` from the budget (to zero at most).
+fn spend(budget: &mut Budget, bytes: usize) {
+    budget.0 = budget.0.saturating_sub(bytes);
 }
 
 /// [`bound_in`] with a budget of its own: the bound of an import summary that is answered as a
@@ -537,7 +557,11 @@ mod bound_tests {
         let capped = super::capped(long);
         assert!(capped.len() <= MAX_REPORTED_ERRORS + 1);
         assert!(capped.last().unwrap().starts_with("and "));
-        assert!(size(&json!(capped)) <= MAX_ERROR_BODY_BYTES + 100);
+        assert!(
+            size(&json!(capped)) <= MAX_ERROR_BODY_BYTES + 100,
+            "{}",
+            size(&json!(capped))
+        );
     }
 
     #[test]
@@ -553,7 +577,7 @@ mod bound_tests {
         let errors = bounded["errors"].as_array().unwrap();
         assert!(errors.len() <= MAX_REPORTED_ERRORS + 1);
         assert!(
-            size(&bounded) < MAX_ERROR_BODY_BYTES + 10_000,
+            size(&bounded) < MAX_ERROR_BODY_BYTES + 2_048,
             "{} bytes",
             size(&bounded)
         );
@@ -564,15 +588,34 @@ mod bound_tests {
     #[test]
     fn the_counts_of_a_summary_survive_an_exhausted_budget() {
         let value = json!({
-            "errors": (0..100).map(|_| json!({"details": vec!["\u{1}".repeat(600); 100]})).collect::<Vec<_>>(),
-            "inserted": 7, "rows": 100, "error_count": 100, "dry_run": true,
+            "errors": (0..100).map(|_| json!({
+                "row": 3, "code": "validation_failed", "message": "bad", "name": "n",
+                "details": vec!["\u{1}".repeat(600); 100],
+            })).collect::<Vec<_>>(),
+            "mode": "upsert", "inserted": 7, "updated": 2, "rows": 100, "error_count": 100,
+            "dry_run": true,
         });
         let bounded = bounded(value);
-        assert_eq!(
-            (bounded["inserted"].clone(), bounded["rows"].clone()),
-            (json!(7), json!(100))
-        );
+        assert_eq!(bounded["mode"], "upsert");
         assert_eq!(bounded["dry_run"], true);
+        for (key, count) in [
+            ("inserted", 7),
+            ("updated", 2),
+            ("rows", 100),
+            ("error_count", 100),
+        ] {
+            assert_eq!(bounded[key], count, "{key}");
+        }
+        // A row error keeps its code and message ahead of its details.
+        let first = &bounded["errors"][0];
+        assert_eq!(first["code"], "validation_failed");
+        assert_eq!(first["message"], "bad");
+        assert_eq!(first["row"], 3);
+        assert!(
+            size(&bounded) <= MAX_ERROR_BODY_BYTES + 2_048,
+            "{}",
+            size(&bounded)
+        );
     }
 
     #[test]
@@ -603,7 +646,7 @@ mod bound_tests {
         let (_, body) = error.into_response().into_parts();
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         assert!(
-            bytes.len() < MAX_ERROR_BODY_BYTES + 5_000,
+            bytes.len() < MAX_ERROR_BODY_BYTES + 2_048,
             "{} bytes",
             bytes.len()
         );
