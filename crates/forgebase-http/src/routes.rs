@@ -109,7 +109,10 @@ pub(crate) fn object(json: Json, allowed: &[&str]) -> Result<Map<String, Json>, 
         return Err(ApiError::bad_request("the body must be a JSON object"));
     };
     if let Some(key) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
-        return Err(ApiError::bad_request(format!("unknown key {key:?}")));
+        return Err(ApiError::bad_request(format!(
+            "unknown key {:?}",
+            forgebase_core::shorten(key)
+        )));
     }
     Ok(map)
 }
@@ -169,12 +172,14 @@ pub(crate) fn params(
     for (key, value) in pairs {
         if !allowed.contains(&key.as_str()) {
             return Err(ApiError::invalid_query(format!(
-                "unknown parameter {key:?}"
+                "unknown parameter {:?}",
+                forgebase_core::shorten(&key)
             )));
         }
         if map.contains_key(&key) {
             return Err(ApiError::invalid_query(format!(
-                "duplicate parameter {key:?}"
+                "duplicate parameter {:?}",
+                forgebase_core::shorten(&key)
             )));
         }
         map.insert(key, value);

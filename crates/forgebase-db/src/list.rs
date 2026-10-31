@@ -230,7 +230,8 @@ pub(crate) fn column(doctype: &DocType, field: &str) -> Result<Column, DbError> 
         (None, Some(f)) => f.field_type.clone(),
         (None, None) => {
             return Err(invalid(format!(
-                "unknown field {field:?} for DocType `{}`",
+                "unknown field {:?} for DocType `{}`",
+                forgebase_core::shorten(field),
                 doctype.name
             )));
         }

@@ -27,7 +27,8 @@
 //! given". Unknown, duplicate and table columns are refused for the whole file. **JSON** is an
 //! array of objects as in `POST /resource` (child rows as arrays); the standard keys of an exported
 //! document (`id`, `owner`, `created_at`, `modified_at`, `modified_by`, `version`, `docstatus`,
-//! `amended_from`, `workflow_state`) are ignored, so an export can be imported again.
+//! `amended_from`, and `workflow_state` only when the DocType has a workflow) are ignored, so an
+//! export can be imported again.
 //! A value that cannot be parsed is an error of its **row**, reported with the others.
 //! [`run_import`] runs the rows with `forgebase_db::import` and builds the summary.
 
@@ -794,7 +795,7 @@ pub async fn run_import(
         .map(|p| RowReport {
             row: p.row,
             line: p.line,
-            name: p.name,
+            name: p.name.as_deref().map(shorten),
             code: "validation_failed".to_owned(),
             message: "validation failed".to_owned(),
             details: p.details,
@@ -806,7 +807,7 @@ pub async fn run_import(
         RowReport {
             row: e.row,
             line: e.line,
-            name: e.name,
+            name: e.name.as_deref().map(shorten),
             code: code.to_owned(),
             message,
             details,

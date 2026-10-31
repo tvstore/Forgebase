@@ -328,7 +328,10 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
             .keys()
             .find(|k| !matches!(k.as_str(), "field" | "op" | "value"))
         {
-            return Err(place(format!("unknown key `{key}` (use field, op, value)")));
+            return Err(place(format!(
+                "unknown key `{}` (use field, op, value)",
+                forgebase_core::shorten(key)
+            )));
         }
         let field = object
             .get("field")
@@ -341,11 +344,17 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
         let value = object.get("value");
         let field_type = forgebase_db::column_type(doctype, field).ok_or_else(|| {
             place(format!(
-                "unknown field {field:?} (table fields cannot be filtered)"
+                "unknown field {:?} (table fields cannot be filtered)",
+                forgebase_core::shorten(field)
             ))
         })?;
         let one = || -> Result<Value, JsonError> {
-            let json = value.ok_or_else(|| place(format!("operator `{op}` needs a `value`")))?;
+            let json = value.ok_or_else(|| {
+                place(format!(
+                    "operator `{}` needs a `value`",
+                    forgebase_core::shorten(op)
+                ))
+            })?;
             to_value(field, &field_type, json)
         };
         let op = match op {
@@ -372,13 +381,17 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
             },
             "is null" | "is not null" => {
                 if value.is_some() {
-                    return Err(place(format!("operator `{op}` takes no `value`")));
+                    return Err(place(format!(
+                        "operator `{}` takes no `value`",
+                        forgebase_core::shorten(op)
+                    )));
                 }
                 FilterOp::IsNull(op == "is null")
             }
             other => {
                 return Err(place(format!(
-                    "unknown operator `{other}` (use =, !=, <, <=, >, >=, in, like, is null, is not null)"
+                    "unknown operator `{}` (use =, !=, <, <=, >, >=, in, like, is null, is not null)",
+                    forgebase_core::shorten(other)
                 )));
             }
         };
@@ -396,7 +409,8 @@ pub fn parse_sort(specs: &[String]) -> Result<Vec<Sort>, JsonError> {
             Some((field, "asc")) => Ok(Sort::asc(field)),
             Some((field, "desc")) => Ok(Sort::desc(field)),
             Some(_) => Err(JsonError::Query(format!(
-                "invalid sort {spec:?}: use FIELD, FIELD:asc or FIELD:desc"
+                "invalid sort {:?}: use FIELD, FIELD:asc or FIELD:desc",
+                forgebase_core::shorten(spec)
             ))),
         })
         .collect()

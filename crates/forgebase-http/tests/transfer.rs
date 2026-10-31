@@ -162,7 +162,7 @@ impl DocTypeHooks for Rules {
 async fn env_with(config: AppConfig) -> Env {
     let env = Env::with_hooks(
         config,
-        &[PARCEL, PARCEL_LINE, TAG, STATEFUL],
+        &[PARCEL, PARCEL_LINE, TAG, STATEFUL, common::PURCHASE],
         vec![("parcel", Arc::new(Rules))],
     )
     .await;
@@ -1483,4 +1483,147 @@ async fn an_echoed_value_is_shortened_whatever_the_size_of_the_input() {
         .to_string();
     let reply = import(&env, &importer, "?format=json", "application/json", &body).await;
     assert!(reply.text.len() < 16_000, "{} bytes", reply.text.len());
+}
+
+#[tokio::test]
+async fn the_name_of_an_error_entry_is_shortened_too() {
+    let env = env().await;
+    let importer = env.login("importer").await;
+    let junk = "\u{1}".repeat(2 * 1024 * 1024);
+    let check = |reply: &Reply| {
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            &reply.text[..200.min(reply.text.len())]
+        );
+        assert!(reply.text.len() < 16_000, "{} bytes", reply.text.len());
+    };
+    // A CSV `name` column, a JSON `name` key, and the value of a naming field.
+    let file = format!("name,title,qty\r\n{junk},a,x\r\n");
+    check(&import(&env, &importer, "?format=csv", "text/csv", &file).await);
+    let body = json!([{"name": junk, "title": "a", "qty": "x"}]).to_string();
+    check(&import(&env, &importer, "?format=json", "application/json", &body).await);
+    let file = format!("code,weight\r\n{junk},x\r\n");
+    let reply = env
+        .send(
+            post("/api/v1/import/tag?format=csv")
+                .session(&importer)
+                .raw("text/csv", file.as_bytes()),
+        )
+        .await;
+    check(&reply);
+    // A name that the database refuses (random naming) is shortened as well.
+    let file = format!("name,title\r\n{junk},a\r\n");
+    check(&import(&env, &importer, "?format=csv", "text/csv", &file).await);
+    let entry = &reply.json()["error"]["details"]["errors"][0];
+    assert!(entry["name"].as_str().unwrap().chars().count() <= 65);
+}
+
+#[tokio::test]
+async fn workflow_state_is_ignored_on_import_for_a_doctype_with_a_workflow() {
+    let env = env().await;
+    let root = env.login("root").await;
+    let post_purchase = |query: &'static str, content_type: &'static str, body: String| {
+        let (env, root) = (&env, &root);
+        async move {
+            env.send(
+                post(&format!("/api/v1/import/purchase{query}"))
+                    .session(root)
+                    .raw(content_type, body.as_bytes()),
+            )
+            .await
+        }
+    };
+    let reply = post_purchase(
+        "?format=csv",
+        "text/csv",
+        "title,amount,workflow_state\r\nA,1,Done\r\n".to_owned(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    let reply = post_purchase(
+        "?format=json",
+        "application/json",
+        r#"[{"title":"B","workflow_state":"Done","docstatus":1}]"#.to_owned(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    let listed = env
+        .send(get("/api/v1/resource/purchase?sort=title").session(&root))
+        .await
+        .data();
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    for doc in listed {
+        assert_eq!(doc["workflow_state"], "Draft", "{doc}");
+        assert_eq!(doc["docstatus"], 0, "{doc}");
+    }
+    // An upsert updates the other fields and leaves the state alone.
+    let name = listed[0]["name"].as_str().unwrap();
+    let reply = post_purchase(
+        "?format=csv&mode=upsert",
+        "text/csv",
+        format!("name,amount,workflow_state\r\n{name},9,Done\r\n"),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    assert_eq!(reply.data()["updated"], 1);
+    let after = env
+        .send(get(&format!("/api/v1/resource/purchase/{name}")).session(&root))
+        .await
+        .data();
+    assert_eq!(
+        (after["amount"].clone(), after["workflow_state"].clone()),
+        (json!(9), json!("Draft"))
+    );
+}
+
+#[tokio::test]
+async fn request_body_input_is_not_echoed_in_full_outside_import_and_export() {
+    let env = env().await;
+    let root = env.login("root").await;
+    let junk = "\u{1}".repeat(150 * 1024);
+    let key = "k".repeat(900 * 1024);
+    let small = |reply: &Reply| assert!(reply.text.len() < 16_000, "{} bytes", reply.text.len());
+    let reply = env
+        .send(
+            post("/api/v1/resource/parcel")
+                .session(&root)
+                .json(json!({"title": "a", key.clone(): 1})),
+        )
+        .await;
+    small(&reply);
+    // `object()` of the lifecycle routes and the login body.
+    let reply = env
+        .send(post("/api/v1/login").json(json!({"username": "a", "password": "b", key.clone(): 1})))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    small(&reply);
+    // A saved view with a huge filter field, key and operator, and a huge sort.
+    for filter in [
+        json!({"field": key, "op": "=", "value": 1}),
+        json!({"field": "title", "op": key, "value": 1}),
+        json!({"field": "title", key.clone(): 1}),
+    ] {
+        let reply = env
+            .send(
+                post("/api/v1/views/parcel")
+                    .session(&root)
+                    .json(json!({"label": "v", "definition": {"filters": [filter]}})),
+            )
+            .await;
+        small(&reply);
+    }
+    let reply = env
+        .send(
+            get(&format!(
+                "/api/v1/resource/parcel?sort={}",
+                "s".repeat(7000)
+            ))
+            .session(&root),
+        )
+        .await;
+    small(&reply);
+    let _ = junk;
 }
