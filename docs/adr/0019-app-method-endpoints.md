@@ -62,5 +62,6 @@ App::new("sales")
 - **A job handler that matched on the `JobError` that `Documents` used to return** must convert (`?` or `.into()`); the repository's examples and tests were updated (listed in the CHANGELOG).
 - **A method is as powerful as its caller, and no more.** A role that may call a method but may not read a DocType does not get its documents through the method, unless the method reads them for a job it enqueues.
 - **A panic or an error loses the whole call's writes** (one transaction): good for correctness, and a reason to keep methods short.
+- **A swallowed read error is a known gap.** Reads run directly on the call's transaction. If a handler ignores a database error of `get` or `list` and returns `Ok`, PostgreSQL has aborted the transaction and `COMMIT` becomes a rollback: the caller gets 200 while the call's writes are lost. Rust-side query errors (`InvalidQuery`) do not abort the transaction; only a server error during a read does. Jobs have the same gap. Handlers should propagate document errors with `?`; refusing to commit after a failed read is planned work.
 - **No limit on duration:** a slow method holds a pool connection for as long as it runs. Until a limit exists, put long work in a job.
 - Reports are unchanged and do not go through methods; a method may not run a report in this version.

@@ -58,7 +58,7 @@ Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message"
 
 ## App methods
 
-An app can register its own endpoints ([first app, section 8](first-app.md#8-app-methods), [ADR 0019](../adr/0019-app-method-endpoints.md)): `POST /api/v1/method/<app>.<method>` with a JSON object body (an empty body is `{}`) answers `200 {"data": ..}`. The caller must be logged in (a cookie with the CSRF header, or an API token) and have a role of the method, or the method must be declared `any_user`; **there are no guest methods**. The call runs as that user in one transaction. The `sales` example has no method yet (M9.5 adds one); this is a call to the `sales.orders_of` method of the first-app guide, after the login of the first example above:
+An app can register its own endpoints ([first app, section 8](first-app.md#8-app-methods), [ADR 0019](../adr/0019-app-method-endpoints.md)): `POST /api/v1/method/<app>.<method>` with a JSON object body (an empty body is `{}`) answers `200 {"data": ..}`. The caller must be logged in (a cookie with the CSRF header, or an API token) and have a role of the method, or the method must be declared `any_user`; **there are no guest methods**. The call runs as that user in one transaction. The `sales` example has no method yet (M9.5 adds one); this is a call to the `sales.orders_of` method of the first-app guide, after logging in again as in the first example above (it ends with a logout):
 
 ```sh
 curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
