@@ -75,6 +75,7 @@ BETA_DATABASE_URL=postgres://forgebase_app:long-random-password@db.internal:5432
 ```
 
 - A **managed database** (Neon, a cloud PostgreSQL) uses a certificate from a public CA: `sslmode=require` is all you need. A **self-hosted server with its own CA** needs `sslrootcert` with the CA certificate, and the server certificate must contain the host name (or IP address) you connect to.
+- **Percent-encode special characters in the user name and password**: `/` as `%2F`, `?` as `%3F`, `#` as `%23`, `@` as `%40` and `%` as `%25` (an `@` in a query value too). A raw `/`, `?` or `#` before the first `@` is refused with a clear error at startup, never silently, because the URL parsers of libpq and Forgebase could read it differently and a `sslmode` could be lost. If you have a generated password with such characters, encode it in the URL (an upgrade step; the password itself does not change).
 - The host name is sent for routing (SNI). A Unix-socket host with TLS is refused; use TCP.
 - `sslcert`, `sslkey` (client certificates), `sslcrl` and other `ssl*` parameters are refused, not ignored. Only `postgres://` and `postgresql://` URLs are accepted.
 - `site backup` and `site restore` give `pg_dump` and `pg_restore` the same choice in their environment: `PGSSLMODE=verify-full` with `PGSSLROOTCERT` (the path, or `system`, which needs the version 16 client tools). With no TLS they get `PGSSLMODE=disable`.

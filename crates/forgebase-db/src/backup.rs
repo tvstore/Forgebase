@@ -265,10 +265,10 @@ mod tests {
     }
 
     #[test]
-    fn tls_is_found_behind_a_raw_question_mark_and_an_encoded_key() {
+    fn tls_is_found_behind_an_encoded_question_mark_and_an_encoded_key() {
         for url in [
-            "postgres://u:a?b@h/shop?sslmode=require",
-            "postgres://u:x?sslmode=disable@h/shop?sslmode=require",
+            "postgres://u:a%3Fb@h/shop?sslmode=require",
+            "postgres://u:x%3Fsslmode=disable@h/shop?sslmode=require",
             "postgres://u@h/shop?%73slmode=require",
         ] {
             let env = env_of(url);
@@ -277,8 +277,8 @@ mod tests {
                 "{url}"
             );
         }
-        let env = env_of("postgres://u:a?b@h/shop?sslmode=require");
-        assert!(env.contains(&("PGPASSWORD", "a?b".to_owned())));
+        let env = env_of("postgres://u:a%3Fb%2Fc%23d@h/shop?sslmode=require");
+        assert!(env.contains(&("PGPASSWORD", "a?b/c#d".to_owned())));
         let message = pg_environment("postgres://u:pw@h/shop?%73slcert=x")
             .expect_err("sslcert")
             .to_string();
@@ -289,13 +289,18 @@ mod tests {
     }
 
     #[test]
-    fn an_at_sign_after_the_host_is_refused_for_the_backup_tools_too() {
-        let message = pg_environment(
+    fn raw_special_characters_before_the_first_at_are_refused_for_the_backup_tools_too() {
+        for url in [
             "postgres://db.example.com/app?sslmode=verify-full&application_name=svc@db.example.com",
-        )
-        .expect_err("at sign")
-        .to_string();
-        assert!(message.contains("%40"), "{message}");
+            "postgres://db.example.com?sslmode=verify-full&application_name=svc@db.example.com",
+            "postgres://u:pw?x@h/shop?sslmode=require",
+            "postgres://u:pw/x@h/shop?sslmode=require",
+            "postgres://u:pw#x@h/shop?sslmode=require",
+        ] {
+            let message = pg_environment(url).expect_err(url).to_string();
+            assert!(message.contains("before its first `@`"), "{url}: {message}");
+            assert!(!message.contains("pw"), "{message}");
+        }
     }
 
     #[test]

@@ -116,14 +116,16 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
         11
     };
     let creds_end = match url[scheme_len..].find('@') {
-        // libpq looks for credentials only before the first `/`; `tokio-postgres` takes everything
-        // up to the first `@` of the string. With a `/` before that `@` (for example an `@` in a
-        // later query value) the two read different hosts and options, and a TLS choice in the
-        // query could go unseen. Refuse it. Only `/` makes them differ: `?`, `#` and further `@`
-        // before the first `@` are read the same way by both.
-        Some(at) if url[scheme_len..scheme_len + at].contains('/') => {
+        // Userinfo (RFC 3986) cannot hold a raw `/`, `?` or `#`. With one before the first `@`,
+        // libpq and `tokio-postgres` can read different hosts and options (for example an `@` in a
+        // later query value: libpq sees no credentials, `tokio-postgres` takes everything before
+        // the `@` as credentials and loses the `sslmode`), and a TLS choice could go unseen. Refuse
+        // it, whatever the URL looks like otherwise.
+        Some(at) if url[scheme_len..scheme_len + at].contains(['/', '?', '#']) => {
             return Err(err(
-                "the database URL has an `@` after the host: percent-encode it as %40",
+                "the database URL has a `/`, `?` or `#` before its first `@`: percent-encode \
+                 them in the user name or password (`%2F`, `%3F`, `%23`), and an `@` in a query \
+                 value as `%40`",
             ));
         }
         Some(at) => scheme_len + at + 1,
@@ -434,35 +436,50 @@ mod tests {
     }
 
     #[test]
-    fn the_query_starts_after_the_credentials_like_in_tokio_postgres() {
-        // A raw `?` (or `#`, or a whole `?sslmode=disable`) in the password is not the query.
+    fn special_characters_in_the_credentials_must_be_percent_encoded() {
+        // Encoded, they work and stay in the password.
         for (url, rest) in [
             (
-                "postgres://u:a?b@h/db?sslmode=require",
-                "postgres://u:a?b@h/db",
+                "postgres://u:a%3Fb@h/db?sslmode=require",
+                "postgres://u:a%3Fb@h/db",
             ),
             (
-                "postgres://u:a#b@h/db?sslmode=require",
-                "postgres://u:a#b@h/db",
+                "postgres://u:a%23b@h/db?sslmode=require",
+                "postgres://u:a%23b@h/db",
             ),
             (
-                "postgresql://u:x?sslmode=disable@h/db?sslmode=require",
-                "postgresql://u:x?sslmode=disable@h/db",
+                "postgres://u:a%2Fb@h/db?sslmode=require",
+                "postgres://u:a%2Fb@h/db",
             ),
             (
-                "postgres://u:a?b@h/db?connect_timeout=5&sslmode=require",
-                "postgres://u:a?b@h/db?connect_timeout=5",
+                "postgresql://u:x%3Fsslmode=disable@h/db?sslmode=require",
+                "postgresql://u:x%3Fsslmode=disable@h/db",
+            ),
+            (
+                "postgres://u:a%3Fb@h/db?connect_timeout=5&sslmode=require",
+                "postgres://u:a%3Fb@h/db?connect_timeout=5",
             ),
         ] {
             let (kept, ssl) = parsed(url);
             assert_eq!(kept, rest, "{url}");
             assert_eq!(ssl, Ssl::Verify(RootCerts::System), "{url}");
-            // And what is left parses, with the password intact and no TLS choice of its own.
             let config: Config = kept.parse().expect(url);
             assert_eq!(config.get_ssl_mode(), SslMode::Prefer, "{url}");
         }
-        // The same password with no TLS asked for stays plain.
-        assert_eq!(parsed("postgres://u:a?b@h/db").1, Ssl::Disable);
+        assert_eq!(parsed("postgres://u:a%3Fb@h/db").1, Ssl::Disable);
+        // Raw, they are refused, with TLS asked for or not.
+        for url in [
+            "postgres://u:a?b@h/db?sslmode=require",
+            "postgres://u:a#b@h/db?sslmode=require",
+            "postgres://u:a/b@h/db?sslmode=require",
+            "postgres://u:x?sslmode=disable@h/db?sslmode=require",
+            "postgres://u:a?b@h/db",
+        ] {
+            let message = refused(url);
+            assert!(message.contains("before its first `@`"), "{url}: {message}");
+            assert!(!message.contains("a?b"), "{message}");
+            assert!(prepare(url).is_err(), "{url}");
+        }
     }
 
     #[test]
@@ -481,26 +498,36 @@ mod tests {
             refused("postgres://u@h/db?sslmode=disable&%73slmode=require")
                 .contains("more than once")
         );
-        assert!(refused("postgres://u:a?b@h/db?%73slcert=x").contains("`sslcert`"));
+        assert!(refused("postgres://u:a%3Fb@h/db?%73slcert=x").contains("`sslcert`"));
     }
 
     #[test]
     fn an_at_sign_after_the_host_is_refused() {
-        // No user: the first `@` is in a query value, after a `/`. libpq reads host db.example.com
-        // with verify-full; tokio-postgres would read credentials and lose the `sslmode`.
-        let url =
+        // With a path: the first `@` is in a query value, after a `/`.
+        let with_path =
             "postgres://db.example.com/app?sslmode=verify-full&application_name=svc@db.example.com";
-        assert!(refused(url).contains("percent-encode it as %40"));
-        assert!(refused("postgres://h/db?sslmode=require&x=a@b").contains("%40"));
-        // The same URL with the `@` encoded is fine.
-        assert_eq!(
-            parsed("postgres://db.example.com/app?sslmode=verify-full&application_name=svc%40db").1,
-            Ssl::Verify(RootCerts::System)
-        );
-        // `?`, `#` and a second `@` before the first `@` are read alike by both parsers.
-        parsed("postgres://u:a?b#c@h/db?sslmode=require");
-        // `connect` and `pg_environment` go through the same parse.
-        assert!(prepare(url).is_err());
+        // Without a path: the first `@` follows a `?` directly.
+        let without_path =
+            "postgres://db.example.com?sslmode=verify-full&application_name=svc@db.example.com";
+        for url in [
+            with_path,
+            without_path,
+            "postgres://h/db?sslmode=require&x=a@b",
+        ] {
+            let message = refused(url);
+            assert!(
+                message.contains("`@` in a query value as `%40`"),
+                "{url}: {message}"
+            );
+            assert!(prepare(url).is_err(), "{url}");
+        }
+        // The same URLs with the `@` encoded are fine.
+        for url in [
+            "postgres://db.example.com/app?sslmode=verify-full&application_name=svc%40db",
+            "postgres://db.example.com?sslmode=verify-full&application_name=svc%40db",
+        ] {
+            assert_eq!(parsed(url).1, Ssl::Verify(RootCerts::System), "{url}");
+        }
     }
 
     #[test]

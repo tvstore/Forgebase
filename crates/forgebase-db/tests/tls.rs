@@ -328,27 +328,45 @@ async fn scram_channel_binding_works_over_tls() {
     assert!(uses_ssl(&pool).await);
 }
 
-/// The role `qmark` (password `p?w`, a raw `?`) is accepted over TLS only (`pg-tls.sh`). The `?`
-/// must not hide `sslmode` from the parser: that once connected without TLS.
+/// The role `qmark` (password `p?w`, a `?`) is accepted over TLS only (`pg-tls.sh`). A raw `?` in
+/// the password hid `sslmode` from the parser once, and connected without TLS: now the raw form is
+/// refused before any connection, and the encoded one (`p%3Fw`) connects over TLS.
 #[tokio::test]
-async fn a_raw_question_mark_in_the_password_does_not_hide_sslmode() {
+async fn a_question_mark_in_the_password_must_be_encoded_and_then_keeps_tls() {
     let Some(tls) = tls() else { return };
-    let user = |url: String| url.replacen("forgebase:forgebase", "qmark:p?w", 1);
+    let user = |url: String, password: &str| {
+        url.replacen("forgebase:forgebase", &format!("qmark:{password}"), 1)
+    };
     for url in [
-        user(tls.verified("require")),
+        user(tls.verified("require"), "p%3Fw"),
         // The key written with a percent-encoded letter.
-        user(tls.url(&format!(
-            "%73slmode=require&sslrootcert={}",
-            encode(&tls.ca)
-        ))),
+        user(
+            tls.url(&format!(
+                "%73slmode=require&sslrootcert={}",
+                encode(&tls.ca)
+            )),
+            "p%3Fw",
+        ),
     ] {
         let pool = connect(&url).await.expect("a TLS connection");
         assert!(uses_ssl(&pool).await);
     }
+    // The raw `?` is refused with a clear message, not connected without TLS.
+    for query in ["sslmode=require", "sslmode=disable"] {
+        let message = connect(&user(tls.url(query), "p?w"))
+            .await
+            .expect_err("raw ?")
+            .to_string();
+        assert!(message.contains("before its first `@`"), "{message}");
+    }
     // Without TLS the server rejects the role: the role really is TLS only.
-    assert!(connect(&user(tls.url("sslmode=disable"))).await.is_err());
+    assert!(
+        connect(&user(tls.url("sslmode=disable"), "p%3Fw"))
+            .await
+            .is_err()
+    );
     // An encoded TLS option is refused by name, not ignored.
-    let message = connect(&user(tls.url("sslmode=require&%73slcert=/x.pem")))
+    let message = connect(&user(tls.url("sslmode=require&%73slcert=/x.pem"), "p%3Fw"))
         .await
         .expect_err("sslcert")
         .to_string();
