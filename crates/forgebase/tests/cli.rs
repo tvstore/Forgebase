@@ -3,6 +3,8 @@
 //! Each test that needs a database gets its own throwaway `fb_test_cli_*` database and fails
 //! loudly (never skips) when `FORGEBASE_TEST_DATABASE_URL` is not set; see CONTRIBUTING.md.
 
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -285,7 +287,7 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 9 pending"), "{text}");
+    assert!(text.contains("framework migrations: 10 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
@@ -295,7 +297,8 @@ fn dry_run_creates_nothing() {
             && text.contains("0006 schedules")
             && text.contains("0007 finished_jobs_index")
             && text.contains("0008 workflow_log")
-            && text.contains("0009 saved_views"),
+            && text.contains("0009 saved_views")
+            && text.contains("0010 webhooks"),
         "{text}"
     );
     assert_eq!(db.scalar("SELECT to_regclass('fb_migration')::text"), None);
@@ -330,7 +333,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 9 applied"), "{text}");
+    assert!(text.contains("framework migrations: 10 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -1866,7 +1869,7 @@ fn the_worker_of_a_binary_without_app_jobs_runs_the_built_in_jobs_and_stops_on_s
             break;
         }
     }
-    assert!(log.contains("3 job type(s)"), "{log}");
+    assert!(log.contains("4 job type(s)"), "{log}");
     let killed = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
@@ -2102,4 +2105,485 @@ fn migrate_gives_documents_their_state_and_warns_about_a_state_that_is_gone() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+// ---- webhooks (M9.2, ADR 0020) ---------------------------------------------------------------
+
+/// The secret an `add` or `rotate-secret` printed (the 64 hex characters after `secret: ` or
+/// `: `), and how many times it is in the text.
+fn printed_secret(text: &str) -> String {
+    let secret = text
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("secret: ").or_else(|| {
+                l.split_once("webhook ")
+                    .and_then(|(_, r)| r.split_once(": "))
+                    .map(|(_, s)| s)
+            })
+        })
+        .unwrap_or_else(|| panic!("no secret printed in: {text}"))
+        .to_owned();
+    assert_eq!(secret.len(), 64, "{text}");
+    assert!(secret.bytes().all(|b| b.is_ascii_hexdigit()), "{text}");
+    secret
+}
+
+fn webhook_db() -> TestDb {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    db
+}
+
+fn add_webhook(db: &TestDb, name: &str, url: &str, flags: &[&str]) -> Output {
+    let mut args = vec![
+        "webhook",
+        "add",
+        name,
+        "--doctype",
+        "customer",
+        "--events",
+        "insert,update",
+        "--url",
+        url,
+        "--doctypes",
+        DOCTYPES,
+    ];
+    args.extend_from_slice(flags);
+    db.forgebase(&args)
+}
+
+#[test]
+fn webhooks_are_added_listed_disabled_enabled_and_removed() {
+    let db = webhook_db();
+    let added = add_webhook(
+        &db,
+        "orders",
+        "https://hooks.example.com:8443/services/T0/B0/TOPSECRET?token=TOPSECRET",
+        &[],
+    );
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    let out = stdout(&added);
+    assert!(out.starts_with("added webhook orders\n"), "{out}");
+    let secret = printed_secret(&out);
+    // Printed once, and it is what the database holds.
+    assert_eq!(out.matches(&secret).count(), 1, "{out}");
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook WHERE name = 'orders'")
+            .as_deref(),
+        Some(secret.as_str())
+    );
+    assert!(stderr(&added).is_empty(), "{}", stderr(&added));
+
+    // `list`: the host only, the flags, never the secret or the path.
+    let listed = db.forgebase(&["webhook", "list"]);
+    assert_eq!(code(&listed), Some(0), "{}", stderr(&listed));
+    let table = stdout(&listed);
+    let header: Vec<&str> = table
+        .lines()
+        .next()
+        .expect("header")
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        header,
+        [
+            "NAME",
+            "DOCTYPE",
+            "EVENTS",
+            "URL",
+            "ENABLED",
+            "ALLOW_PRIVATE",
+            "INSECURE_HTTP"
+        ]
+    );
+    let row: Vec<&str> = table
+        .lines()
+        .nth(1)
+        .expect("row")
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        row,
+        [
+            "orders",
+            "customer",
+            "insert,update",
+            "https://hooks.example.com:8443",
+            "yes",
+            "no",
+            "no"
+        ]
+    );
+    for forbidden in [secret.as_str(), "TOPSECRET", "services", "token"] {
+        assert!(!table.contains(forbidden), "{forbidden} in {table}");
+        assert!(!stderr(&listed).contains(forbidden));
+    }
+
+    // Disable, enable, remove.
+    let disabled = db.forgebase(&["webhook", "disable", "orders"]);
+    assert_eq!(code(&disabled), Some(0), "{}", stderr(&disabled));
+    let after_disable = stdout(&db.forgebase(&["webhook", "list"]));
+    let row: Vec<&str> = after_disable
+        .lines()
+        .nth(1)
+        .expect("row")
+        .split_whitespace()
+        .collect();
+    assert_eq!(row[4], "no", "disabled: {after_disable}");
+    assert_eq!(
+        db.scalar("SELECT enabled::text FROM fb_webhook").as_deref(),
+        Some("false")
+    );
+    let enabled = db.forgebase(&["webhook", "enable", "orders"]);
+    assert_eq!(code(&enabled), Some(0), "{}", stderr(&enabled));
+    assert_eq!(
+        db.scalar("SELECT enabled::text FROM fb_webhook").as_deref(),
+        Some("true")
+    );
+    let removed = db.forgebase(&["webhook", "remove", "orders"]);
+    assert_eq!(code(&removed), Some(0), "{}", stderr(&removed));
+    assert_eq!(
+        stdout(&db.forgebase(&["webhook", "list"])).lines().count(),
+        1,
+        "only the header"
+    );
+
+    // A webhook that is not there.
+    for command in ["disable", "enable", "remove", "rotate-secret", "test"] {
+        let missing = db.forgebase(&["webhook", command, "orders"]);
+        assert_eq!(code(&missing), Some(1), "{command}");
+        assert!(
+            stderr(&missing).contains("no webhook named `orders`"),
+            "{command}: {}",
+            stderr(&missing)
+        );
+    }
+
+    // The same name twice is refused.
+    assert_eq!(
+        code(&add_webhook(&db, "dup", "https://example.com/x", &[])),
+        Some(0)
+    );
+    let again = add_webhook(&db, "dup", "https://example.com/y", &[]);
+    assert_eq!(code(&again), Some(1));
+    assert!(
+        stderr(&again).contains("exists already"),
+        "{}",
+        stderr(&again)
+    );
+}
+
+#[test]
+fn a_webhook_that_is_not_valid_is_refused_and_nothing_is_stored() {
+    let db = webhook_db();
+    let url = "https://example.com/hook-path";
+    let with = |name: &str, doctype: &str, events: &str, url: &str, flags: &[&str]| {
+        let mut args = vec![
+            "webhook",
+            "add",
+            name,
+            "--doctype",
+            doctype,
+            "--events",
+            events,
+            "--url",
+            url,
+            "--doctypes",
+            DOCTYPES,
+        ];
+        args.extend_from_slice(flags);
+        db.forgebase(&args)
+    };
+    let cases: Vec<(Output, &str)> = vec![
+        (
+            with("w", "nobody", "insert", url, &[]),
+            "unknown DocType `nobody`",
+        ),
+        // A child DocType has no documents of its own.
+        (
+            with("w", "sales_order_item", "insert", url, &[]),
+            "child DocType",
+        ),
+        (
+            with(
+                "w",
+                "customer",
+                "insert",
+                "http://example.com/hook-path",
+                &[],
+            ),
+            "--insecure-http",
+        ),
+        (
+            with(
+                "w",
+                "customer",
+                "insert",
+                "https://user:pw@example.com/hook-path",
+                &[],
+            ),
+            "user info",
+        ),
+        (
+            with(
+                "w",
+                "customer",
+                "insert",
+                "https://example.com@evil.test/hook-path",
+                &[],
+            ),
+            "user info",
+        ),
+        (
+            with(
+                "w",
+                "customer",
+                "insert",
+                "ftp://example.com/hook-path",
+                &[],
+            ),
+            "https",
+        ),
+        (
+            with("w", "customer", "insert", "example.com/hook-path", &[]),
+            "absolute URL",
+        ),
+        (
+            with("w", "customer", "insert", "not a url", &[]),
+            "valid absolute URL",
+        ),
+        (with("w", "customer", "", url, &[]), "event"),
+        (
+            with("w", "customer", "insert,save", url, &[]),
+            "unknown event `save`",
+        ),
+        (
+            with("Bad Name", "customer", "insert", url, &[]),
+            "must match",
+        ),
+    ];
+    for (output, expected) in cases {
+        assert_eq!(code(&output), Some(1), "{expected}: {}", stderr(&output));
+        assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+        let message = stderr(&output);
+        assert!(message.contains(expected), "{expected}: {message}");
+        // The URL is never repeated: it may hold credentials or a token.
+        for forbidden in ["hook-path", "pw@", "evil.test"] {
+            assert!(!message.contains(forbidden), "{forbidden} in {message}");
+        }
+    }
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_webhook")
+            .as_deref(),
+        Some("0")
+    );
+
+    // `http://` is allowed with the explicit development flag, and the list shows it.
+    let dev = with(
+        "dev",
+        "customer",
+        "insert",
+        "http://localhost:8080/hook",
+        &["--insecure-http"],
+    );
+    assert_eq!(code(&dev), Some(0), "{}", stderr(&dev));
+    assert!(
+        stdout(&dev).contains("--insecure-http"),
+        "a warning: {}",
+        stdout(&dev)
+    );
+    let table = stdout(&db.forgebase(&["webhook", "list"]));
+    let row: Vec<&str> = table
+        .lines()
+        .nth(1)
+        .expect("row")
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        row,
+        [
+            "dev",
+            "customer",
+            "insert",
+            "http://localhost:8080",
+            "yes",
+            "no",
+            "yes"
+        ],
+        "{table}"
+    );
+}
+
+#[test]
+fn a_secret_from_standard_input_is_used_and_not_printed_and_rotation_prints_once() {
+    let db = webhook_db();
+    let mut args = vec![
+        "webhook",
+        "add",
+        "w",
+        "--doctype",
+        "customer",
+        "--events",
+        "insert",
+        "--url",
+        "https://example.com/x",
+        "--doctypes",
+        DOCTYPES,
+        "--secret-stdin",
+    ];
+    let added = db.forgebase_with_stdin(&args, Some("my own secret value\n"));
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    assert!(
+        !stdout(&added).contains("my own secret value"),
+        "{}",
+        stdout(&added)
+    );
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook").as_deref(),
+        Some("my own secret value")
+    );
+    // An empty secret is refused.
+    args[2] = "w2";
+    let empty = db.forgebase_with_stdin(&args, Some("\n"));
+    assert_eq!(code(&empty), Some(1));
+    assert!(
+        stderr(&empty).contains("the secret is empty"),
+        "{}",
+        stderr(&empty)
+    );
+
+    let rotated = db.forgebase(&["webhook", "rotate-secret", "w"]);
+    assert_eq!(code(&rotated), Some(0), "{}", stderr(&rotated));
+    let new = printed_secret(&stdout(&rotated));
+    assert_eq!(stdout(&rotated).matches(&new).count(), 1);
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook").as_deref(),
+        Some(new.as_str())
+    );
+    assert!(!stdout(&rotated).contains("my own secret value"));
+}
+
+#[test]
+fn webhook_test_sends_one_signed_delivery_and_exits_by_the_answer() {
+    use common::{Receiver, Reply, expected_signature};
+    let db = webhook_db();
+    let receiver = Receiver::http(Reply::Status(200));
+    let url = receiver.url("/hook-path?token=TOPSECRET");
+    let added = add_webhook(&db, "w", &url, &["--allow-private", "--insecure-http"]);
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    let secret = printed_secret(&stdout(&added));
+
+    let ok = db.forgebase(&["webhook", "test", "w"]);
+    assert_eq!(code(&ok), Some(0), "{}", stderr(&ok));
+    let text = stdout(&ok);
+    assert!(
+        text.contains("HTTP 200")
+            && text.contains(&format!("http://127.0.0.1:{}", receiver.addr.port())),
+        "{text}"
+    );
+    for forbidden in [secret.as_str(), "TOPSECRET", "hook-path"] {
+        assert!(
+            !text.contains(forbidden) && !stderr(&ok).contains(forbidden),
+            "{forbidden}"
+        );
+    }
+    let requests = receiver.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.header("x-forgebase-event"), Some("test"));
+    let delivery = request.header("x-forgebase-delivery").expect("delivery");
+    assert!(delivery.starts_with("test-"), "{delivery}");
+    let timestamp = request.header("x-forgebase-timestamp").expect("timestamp");
+    assert_eq!(
+        request.header("x-forgebase-signature"),
+        Some(expected_signature(&secret, timestamp, &request.body).as_str())
+    );
+    let body = request.json();
+    assert_eq!(body["event"], "test");
+    assert_eq!(body["doctype"], "customer");
+    assert_eq!(body["delivery"], delivery);
+    assert!(body["data"].is_null());
+
+    // A disabled webhook can be tested.
+    assert_eq!(code(&db.forgebase(&["webhook", "disable", "w"])), Some(0));
+    assert_eq!(code(&db.forgebase(&["webhook", "test", "w"])), Some(0));
+
+    // Not a 2xx answer: exit 1, the status on standard output.
+    for (reply, status) in [
+        (Reply::Status(500), "500"),
+        (Reply::Status(404), "404"),
+        (Reply::Redirect(302, receiver.url("/other")), "302"),
+    ] {
+        receiver.set_reply(reply);
+        let failed = db.forgebase(&["webhook", "test", "w"]);
+        assert_eq!(code(&failed), Some(1), "{status}");
+        assert!(
+            stdout(&failed).contains(&format!("HTTP {status}")),
+            "{}",
+            stdout(&failed)
+        );
+        assert!(
+            stderr(&failed).contains("not accepted"),
+            "{}",
+            stderr(&failed)
+        );
+        for forbidden in [secret.as_str(), "TOPSECRET", "hook-path"] {
+            assert!(!stdout(&failed).contains(forbidden) && !stderr(&failed).contains(forbidden));
+        }
+    }
+}
+
+#[test]
+fn webhook_test_refuses_a_private_address_unless_the_webhook_allows_it() {
+    use common::{Receiver, Reply};
+    let db = webhook_db();
+    let receiver = Receiver::http(Reply::Status(200));
+    let url = receiver.url("/hook-path?token=TOPSECRET");
+    // Plain http is allowed by the flag; loopback is not, since --allow-private is missing.
+    let added = add_webhook(&db, "w", &url, &["--insecure-http"]);
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    let secret = printed_secret(&stdout(&added));
+    let refused = db.forgebase(&["webhook", "test", "w"]);
+    assert_eq!(code(&refused), Some(1));
+    let message = stderr(&refused);
+    assert!(message.contains("--allow-private"), "{message}");
+    for forbidden in [secret.as_str(), "TOPSECRET", "hook-path"] {
+        assert!(
+            !message.contains(forbidden) && !stdout(&refused).contains(forbidden),
+            "{forbidden}"
+        );
+    }
+    assert!(receiver.requests().is_empty(), "nothing was sent");
+}
+
+#[test]
+fn a_document_written_by_the_cli_enqueues_the_delivery() {
+    let db = webhook_db();
+    assert_eq!(
+        code(&add_webhook(&db, "w", "https://example.com/x", &[])),
+        Some(0)
+    );
+    let inserted = db.forgebase(&[
+        "doc",
+        "insert",
+        "customer",
+        "--doctypes",
+        DOCTYPES,
+        "--data",
+        r#"{"email":"a@example.com","full_name":"A"}"#,
+    ]);
+    assert_eq!(code(&inserted), Some(0), "{}", stderr(&inserted));
+    assert_eq!(
+        db.scalar("SELECT name || '/' || (payload->>'event') || '/' || (payload->'data'->>'email') || '/' || enqueued_by FROM fb_job")
+            .as_deref(),
+        Some("forgebase.deliver_webhook/insert/a@example.com/cli")
+    );
+    // The job is visible to `job list`, and its payload (the document, not the secret) to `job show`.
+    let listed = db.forgebase(&["job", "list"]);
+    assert!(
+        stdout(&listed).contains("forgebase.deliver_webhook"),
+        "{}",
+        stdout(&listed)
+    );
 }
