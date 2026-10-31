@@ -45,6 +45,11 @@ RUN cargo build --release --locked -p "${BIN}" \
 # declares `VOLUME /var/lib/postgresql/data`, so Docker creates an empty anonymous volume for each
 # container of this image (`docker run --rm` removes it, and it is never used).
 FROM postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
+# The base image has no CA store, and TLS to PostgreSQL (`sslmode=require`, ADR 0018) checks the
+# server's certificate against the operating system's roots (a Neon database needs this). The build
+# stage has the Debian bundle (the `ca-certificates` package, as of its pinned digest), so it is
+# copied: the final stage then needs no network at build time.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin forgebase \
     && install -d -o forgebase -g forgebase /app /backups
 COPY --from=build /forgebase-app /usr/local/bin/forgebase-app
