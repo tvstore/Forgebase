@@ -718,14 +718,21 @@ async fn serve(
         // registry of its own apps.
         let mut registries = Vec::new();
         for site in sites {
+            let composed = site_composed(site, apps, doctypes)?;
             registries.push((
                 site,
-                Arc::new(site_composed(site, apps, doctypes)?.registry),
+                Arc::new(composed.registry),
+                Arc::new(composed.methods),
             ));
         }
-        for (site, registry) in registries {
+        for (site, registry, methods) in registries {
             let ctx = site.context(registry, None).await?;
-            let state = AppState::new(ctx.pool, ctx.registry, app_config(site.hosts.clone()));
+            let state = AppState::with_methods(
+                ctx.pool,
+                ctx.registry,
+                app_config(site.hosts.clone()),
+                methods,
+            );
             routing = routing.site(&site.hosts, state).map_err(CliError::Config)?;
             lines.push(format!("site {}: {}\n", site.name, site.hosts.join(", ")));
         }
@@ -735,12 +742,14 @@ async fn serve(
         let [site] = sites.as_slice() else {
             unreachable!("the implicit config has one site");
         };
-        let registry = Arc::new(site_composed(site, apps, doctypes)?.registry);
-        let ctx = site.context(registry, None).await?;
-        routing = Sites::implicit(AppState::new(
+        let composed = site_composed(site, apps, doctypes)?;
+        let methods = Arc::new(composed.methods);
+        let ctx = site.context(Arc::new(composed.registry), None).await?;
+        routing = Sites::implicit(AppState::with_methods(
             ctx.pool,
             ctx.registry,
             app_config(allowed_hosts),
+            methods,
         ));
     }
     let listener = tokio::net::TcpListener::bind(&listen)

@@ -546,7 +546,7 @@ mod tests {
                 let inserted = ctx.documents().insert("seen", document).await;
                 tokio::time::sleep(Duration::from_millis(sleep)).await;
                 lab.running.lock().expect("lock").remove(&id);
-                inserted.map(drop)
+                inserted.map(drop).map_err(JobError::from)
             })
         }
     }

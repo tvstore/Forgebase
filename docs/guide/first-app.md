@@ -283,7 +283,7 @@ fn before_cancel(&self, ctx: &HookContext<'_>, doc: &Document) -> Result<(), Hoo
 
 **Be idempotent.** Delivery is **at least once**: a job can run twice (a worker crash, an operator's `job enqueue`). Everything the handler does to the database is atomic with the job's completion, but make the handler safe to repeat anyway, and any effect outside the database (an email) must be. Two ways from the examples: a row whose name is the idempotency key, looked up first (`get("sales_order_log", "<order>-<event>")`, which keeps the normal path quiet; for two runs at the same moment the unique name refuses the second insert, a failed insert runs in a savepoint so the transaction stays usable, and the handler looks again after it and returns `Ok` if the row now exists: a unique violation is a permanent `JobError`, so check for the row rather than for the error), and a field that remembers the source (`customer_visit.source_order`, looked up with a `list` filter). `ctx.id()` (the same for every attempt) and `ctx.attempt()` are there for effects that need a key or a log line.
 
-**Read and write documents.** `ctx.documents()` offers `get`, `list`, `insert`, `update`, `delete`, `submit`, `cancel` and `amend`. It runs as the **system context** (no permission rules) with the actor `job:<app>.<job>`, which becomes the `owner` and `modified_by` of what the job writes. Validation and hooks run as usual, each write is a savepoint, and everything commits or rolls back with the job. `list` returns one page of at most 500 documents and has no offset.
+**Read and write documents.** `ctx.documents()` offers `get`, `list`, `insert`, `update`, `delete`, `submit`, `cancel`, `amend` and `transition` (a workflow action). Each returns `Result<_, DocError>`, and `?` turns it into the `JobError` below. It runs as the **system context** (no permission rules) with the actor `job:<app>.<job>`, which becomes the `owner` and `modified_by` of what the job writes. Validation and hooks run as usual, each write is a savepoint, and everything commits or rolls back with the job. `list` returns one page of at most 500 documents and has no offset.
 
 **Errors.** A returned `JobError::new(..)` (and a database error) is retried with backoff, then the job is `dead` until `forgebase job retry`. `JobError::permanent(..)` skips the retries: use it for what retrying cannot fix, such as a payload that is wrong or an order that no longer exists. Errors of `ctx.documents()` already follow this rule, so `?` is usually enough.
 
@@ -316,6 +316,47 @@ error: invalid app setup:
 An unknown job name in `ctx.enqueue` is found at run time, not at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
 
 **Query reports.** An app can also define a read-only SQL report (`App::report`, with `Report`, `Param` and `Column`) that is run by the roles it names; the SQL is compiled in, its parameters are `$1..$n` and always bound, and `forgebase migrate` checks it against the database. Row-level rules do not apply inside a report. The guide with the `sales` report is [workflow, saved views and reports](workflow-and-reports.md); the design, the limits and what to watch for are in [ADR 0016](../adr/0016-query-reports-read-only-execution.md).
+
+## 8. App methods
+
+An app can add its own endpoint, `POST /api/v1/method/<app>.<method>`, for an operation that is not a plain create, read or change of one document. A method is a `MethodHandler`, registered with `App::method` and **one** of `.roles(&[..])` or `.any_user()` (neither, both or an empty list is a startup error: there are no guest methods). It runs **as the person who called** and in **one transaction**. The design is [ADR 0019](../adr/0019-app-method-endpoints.md).
+
+```rust
+use forgebase::serde_json::json;
+use forgebase::{
+    App, FilterOp, ListQuery, Method, MethodContext, MethodError, MethodFuture, MethodHandler, Value,
+};
+
+struct OrdersOf;
+
+impl MethodHandler for OrdersOf {
+    fn call<'a>(&'a self, ctx: &'a mut MethodContext<'_>) -> MethodFuture<'a> {
+        Box::pin(async move {
+            let Some(customer) = ctx.body()["customer"].as_str().map(str::to_owned) else {
+                return Err(MethodError::bad_request("Say which customer."));
+            };
+            let query = ListQuery::new()
+                .filter("customer", FilterOp::Eq, Value::Text(customer))
+                .limit(500);
+            // As the caller: a user who may read only their own orders gets only those.
+            let orders = ctx.documents().list("sales_order", &query).await?;
+            let names: Vec<&str> = orders.iter().map(|order| order.name()).collect();
+            Ok(json!({ "orders": names }))
+        })
+    }
+}
+
+pub fn app() -> App {
+    App::new("sales")
+        .method("orders_of", Method::new(OrdersOf).roles(&["Sales User", "Sales Manager"]))
+}
+```
+
+- `ctx.body()` is the request's JSON object (`{}` when there is none) and `ctx.caller()` the user's name and roles; `ctx.documents()` is the same handle a job has, but **it acts as the caller**: the permission rules of the DocTypes (`if_owner`, read rules, read-only fields, workflow roles) decide every call, so a method can do no more than its caller could.
+- `ctx.enqueue("sales.some_job", payload)` writes a job in the method's transaction: it exists only if the method succeeds, and it runs later as the system context.
+- `Ok(json)` commits and answers `200 {"data": json}`. Every error rolls the whole call back: `MethodError::bad_request(message)` (400) and `MethodError::unprocessable(message)` (422) answer `method_error` with **your message, which the client sees**, so write it for users; a `DocError` from `?` keeps the document API's status and code (`permission_denied` 403, `conflict` 409, `validation_failed` 422, ...); anything else, and a panic, is a generic 500.
+- A person without a role of the method, an unknown method and a method of an app that the site does not install all get the same 404.
+- **Test it** with `forgebase::testing`: `db.client(&binary).login("ann").await.post("/api/v1/method/sales.orders_of", json!({"customer": "ada@example.com"}))`, and `db.create_token(user)` with `client.with_token(..)` for a token call. The route, its statuses and a curl call are in the [HTTP API guide](http-api.md#app-methods).
 
 Running your app for real (several sites, a reverse proxy, workers, upgrades, backups and restores) is in the [operations guide](operations.md).
 

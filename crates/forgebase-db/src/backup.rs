@@ -43,6 +43,15 @@ pub fn pg_environment(database_url: &str) -> Result<Vec<(&'static str, String)>,
              pg_restore through the PG* environment variables; remove it from the URL"
         )));
     }
+    // The same refusal as for a connection: TLS needs a TCP host name, so a Unix socket (or no
+    // host) with `sslmode=require` is not turned into `PGSSLMODE=verify-full`.
+    if matches!(ssl, crate::tls::Ssl::Verify(_)) {
+        crate::tls::check_tls_host(&config).map_err(|e| {
+            e.into_db_error(|| {
+                DbError::Backup("the database URL is not a valid PostgreSQL URL".to_owned())
+            })
+        })?;
+    }
     let mut env = Vec::new();
     match config.get_hosts() {
         [] => {}
@@ -262,6 +271,30 @@ mod tests {
             .expect_err("prefer")
             .to_string();
         assert!(message.contains("`sslmode=prefer` is not supported") && !message.contains("pw"));
+    }
+
+    #[test]
+    fn tls_over_a_unix_socket_or_without_a_host_is_refused_like_a_connection() {
+        for url in [
+            "postgres://u:pw@/shop?host=/tmp&sslmode=require",
+            "postgres://u:pw@/shop?host=/var/run/postgresql&sslmode=verify-full",
+            "postgres:///shop?sslmode=require",
+        ] {
+            let message = pg_environment(url).expect_err(url).to_string();
+            assert!(
+                message.contains("TLS is not supported over a Unix socket host")
+                    || message.contains("TLS needs a host name"),
+                "{url}: {message}"
+            );
+            assert!(
+                !message.contains("pw") && !message.contains("/tmp"),
+                "{message}"
+            );
+        }
+        // TLS off keeps working over a socket: pg_dump may use it.
+        let env = env_of("postgres://u@/shop?host=/tmp&sslmode=disable");
+        assert!(env.contains(&("PGHOST", "/tmp".to_owned())));
+        assert!(env.contains(&("PGSSLMODE", "disable".to_owned())));
     }
 
     #[test]

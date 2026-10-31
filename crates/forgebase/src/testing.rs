@@ -283,6 +283,20 @@ impl TestDb {
             .expect("create the user");
     }
 
+    /// Creates an API token for an existing user and returns it as `key:secret` for
+    /// [`HttpClient::with_token`]. Needs the framework tables ([`TestDb::migrate`] first).
+    ///
+    /// # Panics
+    ///
+    /// When the token cannot be created.
+    pub async fn create_token(&self, username: &str) -> String {
+        let client = self.pool.get().await.expect("connection");
+        let token = auth::create_api_token(&**client, username)
+            .await
+            .expect("create the token");
+        format!("{}:{}", token.key, token.secret)
+    }
+
     /// An HTTP client for the API of `forgebase` on this database, not logged in. The database
     /// must have been migrated.
     ///
@@ -292,14 +306,16 @@ impl TestDb {
     pub fn client(&self, forgebase: &Forgebase) -> HttpClient {
         let composed = compose(&forgebase.apps, None)
             .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
-        let state = AppState::new(
+        let state = AppState::with_methods(
             self.pool.clone(),
             Arc::new(composed.registry),
             AppConfig::default(),
+            Arc::new(composed.methods),
         );
         HttpClient {
             router: router(state),
             session: None,
+            token: None,
         }
     }
 
@@ -510,7 +526,8 @@ impl Reply {
 #[derive(Clone)]
 struct Session {
     cookie: String,
-    csrf: String,
+    /// `None` is a client that leaves the CSRF header out ([`HttpClient::without_csrf`]).
+    csrf: Option<String>,
 }
 
 /// A client for the HTTP API that sends requests straight into the router (no socket). Paths
@@ -520,6 +537,8 @@ struct Session {
 pub struct HttpClient {
     router: Router,
     session: Option<Session>,
+    /// `key:secret` of an API token: sent as `Authorization: token ..` instead of the cookie.
+    token: Option<String>,
 }
 
 impl HttpClient {
@@ -553,8 +572,46 @@ impl HttpClient {
             .to_owned();
         HttpClient {
             router: self.router.clone(),
-            session: Some(Session { cookie, csrf }),
+            session: Some(Session {
+                cookie,
+                csrf: Some(csrf),
+            }),
+            token: None,
         }
+    }
+
+    /// A client that authenticates with the API token `key_secret` (from
+    /// [`TestDb::create_token`]) instead of a session: no cookie and no CSRF header.
+    pub fn with_token(&self, key_secret: &str) -> HttpClient {
+        HttpClient {
+            router: self.router.clone(),
+            session: None,
+            token: Some(key_secret.to_owned()),
+        }
+    }
+
+    /// This client's session, but the requests leave out the CSRF header (to test that a cookie
+    /// call without it is refused). The same client when it has no session.
+    pub fn without_csrf(&self) -> HttpClient {
+        let mut client = self.clone();
+        if let Some(session) = &mut client.session {
+            session.csrf = None;
+        }
+        client
+    }
+
+    /// `POST path` with `body` as it is (not necessarily JSON) and this `Content-Type`, or none
+    /// with `None`.
+    pub async fn post_raw(&self, path: &str, content_type: Option<&str>, body: &[u8]) -> Reply {
+        self.request(
+            Method::POST,
+            path,
+            content_type,
+            body.to_vec(),
+            self.session.as_ref(),
+        )
+        .await
+        .0
     }
 
     /// `GET path`.
@@ -591,22 +648,41 @@ impl HttpClient {
         body: Option<Json>,
         session: Option<&Session>,
     ) -> (Reply, Option<String>) {
+        let (content_type, bytes) = match body {
+            Some(json) => (
+                Some("application/json"),
+                serde_json::to_vec(&json).expect("JSON"),
+            ),
+            None => (None, Vec::new()),
+        };
+        self.request(method, path, content_type, bytes, session)
+            .await
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: Option<&str>,
+        bytes: Vec<u8>,
+        session: Option<&Session>,
+    ) -> (Reply, Option<String>) {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
             .header("host", "localhost");
-        if let Some(session) = session {
-            builder = builder
-                .header("cookie", format!("fb_session={}", session.cookie))
-                .header("x-forgebase-csrf", &session.csrf);
-        }
-        let body = match body {
-            Some(json) => {
-                builder = builder.header("content-type", "application/json");
-                Body::from(serde_json::to_vec(&json).expect("JSON"))
+        if let Some(token) = &self.token {
+            builder = builder.header("authorization", format!("token {token}"));
+        } else if let Some(session) = session {
+            builder = builder.header("cookie", format!("fb_session={}", session.cookie));
+            if let Some(csrf) = &session.csrf {
+                builder = builder.header("x-forgebase-csrf", csrf);
             }
-            None => Body::empty(),
-        };
+        }
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        let body = Body::from(bytes);
         let response = self
             .router
             .clone()

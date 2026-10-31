@@ -15,12 +15,13 @@
 //! | `not_submittable` | 422 | submit, cancel or amend of a DocType that is not submittable |
 //! | `validation_failed` | 422 | the data breaks the DocType's rules; `details` lists every problem; also a saved view's label, definition or limit |
 //! | `hook_rejected` | 422 | a lifecycle hook refused; the message is the hook's |
-//! | `bad_request` | 400 | malformed body or parameters |
+//! | `bad_request` | 400 | malformed body or parameters (for a method: a body that is not a JSON object) |
 //! | `invalid_query` | 400 | a filter, sort, limit or offset cannot be used |
 //! | `invalid_host` | 400 | |
 //! | `payload_too_large` | 413 | |
 //! | `unsupported_media_type` | 415 | the body is not `application/json` |
 //! | `too_many_logins` | 503 | login concurrency bound; `Retry-After` is set |
+//! | `method_error` | 400 or 422 | an app method refused the call; the message is the app's, written for users (M9.1) |
 //! | `report_timeout` | 504 | a query report ran over its time limit (M8.4) |
 //! | `internal` | 500 | generic message; the real error goes to standard error |
 //!

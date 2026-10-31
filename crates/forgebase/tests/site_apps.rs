@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use forgebase::testing::TestDb;
 use forgebase::{
-    App, DocTypeFile, Document, Forgebase, JobContext, JobError, JobFuture, JobHandler,
-    MigrationFile, Schedule, Value,
+    App, DocTypeFile, Document, Forgebase, JobContext, JobError, JobFuture, JobHandler, Method,
+    MethodContext, MethodFuture, MethodHandler, MigrationFile, Schedule, Value,
 };
 use forgebase_db::{connect, quote_ident};
 
@@ -48,6 +48,15 @@ impl JobHandler for Noop {
     }
 }
 
+/// A method that answers with its own full name (M9.1): `base.hello` and `extra.hello`.
+struct Hello;
+
+impl MethodHandler for Hello {
+    fn call<'a>(&'a self, ctx: &'a mut MethodContext<'_>) -> MethodFuture<'a> {
+        Box::pin(async move { Ok(forgebase::serde_json::json!({ "method": ctx.name() })) })
+    }
+}
+
 /// `extra.stamp` inserts an `extra_item` with the `code` of its payload.
 struct Stamp;
 
@@ -71,6 +80,7 @@ fn base() -> App {
         .doctypes(const { &[DocTypeFile::new("doctypes/item.toml", ITEM)] })
         .job("tick", Noop)
         .schedule("tick", Schedule::daily_at(4, 0))
+        .method("hello", Method::new(Hello).any_user())
 }
 
 fn extra() -> App {
@@ -81,6 +91,7 @@ fn extra() -> App {
         .job("stamp", Stamp)
         .job("mark", Noop)
         .schedule("mark", Schedule::every_minutes(60))
+        .method("hello", Method::new(Hello).any_user())
 }
 
 fn main() -> ExitCode {
@@ -652,6 +663,14 @@ fn http_per_site() {
         scalar(&world.a, "SELECT to_regclass('doc_extra_item')::text"),
         None
     );
+    // The methods (M9.1) of an app that is not installed do not exist either, over a real server.
+    let method = |hosted: &dyn Fn(&str, &str, &str) -> u16, name: &str| {
+        hosted("POST", &format!("/api/v1/method/{name}"), "{}")
+    };
+    assert_eq!(method(&on_a, "base.hello"), 200);
+    assert_eq!(method(&on_a, "extra.hello"), 404);
+    assert_eq!(method(&on_b, "base.hello"), 200);
+    assert_eq!(method(&on_b, "extra.hello"), 200);
 }
 
 /// Polls `check` until it is true, failing after `what` did not happen within 30 seconds.

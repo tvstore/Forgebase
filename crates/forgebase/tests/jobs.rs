@@ -157,7 +157,7 @@ async fn tour(ctx: &mut JobContext<'_>) -> Result<(), JobError> {
         .update("invoice", &name, 1, stale)
         .await
         .expect_err("conflict");
-    assert!(error.is_permanent(), "{error}");
+    assert!(!error.is_retryable(), "{error}");
 
     let found = docs
         .list(
@@ -171,10 +171,11 @@ async fn tour(ctx: &mut JobContext<'_>) -> Result<(), JobError> {
     assert_eq!(found.len(), 1);
     let bad = ListQuery::new().filter("title", FilterOp::Like, Value::Int(1));
     assert!(
-        docs.list("invoice", &bad)
+        !docs
+            .list("invoice", &bad)
             .await
             .expect_err("text only")
-            .is_permanent()
+            .is_retryable()
     );
 
     let submitted = docs.submit("invoice", &name, 2).await?;

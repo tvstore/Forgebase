@@ -16,7 +16,8 @@
 # Besides the superuser `forgebase`, the server has two roles that pg_hba.conf lets in over TLS
 # only (a connection without TLS is rejected for them), so a test that uses one proves TLS:
 #   tls_only (password tls-only, CREATEDB)   the backup test: pg_dump and pg_restore must use TLS
-#   qmark    (password p?w, a raw `?`)        the test that a `?` in the password hides no parameter
+#   qmark    (password p?w, a `?`)            the test that the raw `?` is refused before the first `@` of the URL
+#                                              (like a raw `/` or `#`), and that the encoded `p%3Fw` connects over TLS
 # Needs openssl and Docker. The credentials are throwaway; the keys never leave DIR.
 set -euo pipefail
 

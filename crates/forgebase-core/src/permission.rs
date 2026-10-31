@@ -15,6 +15,7 @@
 use std::fmt;
 
 use crate::meta::DocType;
+use crate::method::MethodAccess;
 use crate::workflow::Transition;
 
 /// The built-in role that bypasses every permission rule.
@@ -256,6 +257,18 @@ pub fn can_run_report(roles: &[String], caller: &Caller) -> bool {
     }
 }
 
+/// Whether `caller` may call an app method (M9.1, ADR 0019) with this `access`: with
+/// [`MethodAccess::AnyUser`] any caller; with [`MethodAccess::Roles`] the same rule as
+/// [`can_run_report`] (one of the roles, or the Administrator; the system context always). This
+/// is only the **gate**: the documents a method reads and writes are checked by [`evaluate`] for
+/// the caller, as for any other request.
+pub fn can_call_method(access: &MethodAccess, caller: &Caller) -> bool {
+    match access {
+        MethodAccess::AnyUser => true,
+        MethodAccess::Roles(roles) => can_run_report(roles, caller),
+    }
+}
+
 /// Decides how far `caller` may take `transition` of the workflow of `doctype` (M8.1, ADR
 /// 0015, the transition-role rule that extends ADR 0011): **the role and the right**.
 ///
@@ -341,6 +354,21 @@ mod tests {
         // No roles: only the callers that bypass.
         assert!(!can_run_report(&[], &user(&["Manager"])));
         assert!(can_run_report(&[], &user(&[ADMINISTRATOR])));
+    }
+
+    #[test]
+    fn a_method_is_for_its_roles_the_administrator_or_any_user() {
+        let roles = MethodAccess::Roles(vec!["Manager".to_owned()]);
+        assert!(can_call_method(&roles, &user(&["Manager"])));
+        assert!(!can_call_method(&roles, &user(&["Clerk"])));
+        assert!(!can_call_method(&roles, &user(&[])));
+        assert!(can_call_method(&roles, &user(&[ADMINISTRATOR])));
+        assert!(can_call_method(&MethodAccess::AnyUser, &user(&[])));
+        assert!(can_call_method(&MethodAccess::AnyUser, &user(&["Clerk"])));
+        // A list that somehow is empty admits nobody but the Administrator.
+        let empty = MethodAccess::Roles(vec![]);
+        assert!(!can_call_method(&empty, &user(&["Manager"])));
+        assert!(can_call_method(&empty, &user(&[ADMINISTRATOR])));
     }
 
     #[test]

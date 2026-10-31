@@ -139,6 +139,53 @@ fn report_error(report: &ReportDef, error: tokio_postgres::Error) -> DbError {
     }
 }
 
+/// A connection for **one** report run. When it is dropped the connection is closed, not
+/// returned to the pool: a report's SQL is the app's own, and it may leave session state behind
+/// (a session-level `set_config`, a `PREPARE`, a temporary table, `LISTEN`, an advisory lock) that
+/// the next request on a pooled connection would inherit. Closing the connection is the one way
+/// that cannot miss a kind of state; `DISCARD ALL` would also drop the prepared statements that
+/// the pool caches. The cost is a new connection for the next checkout, which is acceptable for
+/// a report (it is heavier than a document read anyway).
+///
+/// It dereferences to the [`Client`], so it can also serve what the handler does after the run
+/// (the titles of Link columns) on the same connection.
+pub struct ReportConnection {
+    object: Option<deadpool_postgres::Object>,
+}
+
+impl ReportConnection {
+    /// Takes a connection from the pool.
+    pub async fn get(pool: &crate::Pool) -> Result<Self, DbError> {
+        Ok(Self {
+            object: Some(pool.get().await?),
+        })
+    }
+}
+
+impl std::ops::Deref for ReportConnection {
+    type Target = Client;
+
+    fn deref(&self) -> &Client {
+        // `object` is `Some` until `drop`.
+        self.object.as_ref().expect("the connection is present")
+    }
+}
+
+impl std::ops::DerefMut for ReportConnection {
+    fn deref_mut(&mut self) -> &mut Client {
+        self.object.as_mut().expect("the connection is present")
+    }
+}
+
+impl Drop for ReportConnection {
+    fn drop(&mut self) {
+        if let Some(object) = self.object.take() {
+            // Taken out of the pool: dropping it closes the connection.
+            drop(deadpool_postgres::Object::take(object));
+        }
+    }
+}
+
 /// Runs `report` for `caller` with the parameter values `params` (by parameter name; see
 /// [`ReportDef::bind_params`] for what is checked) and returns its rows.
 ///

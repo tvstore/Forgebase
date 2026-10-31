@@ -558,3 +558,71 @@ async fn the_sql_is_in_no_response() {
         }
     }
 }
+
+/// A report whose SQL leaves a session-level advisory lock behind (a rollback does not release
+/// it), and one that counts the advisory locks of its own connection.
+fn lock_reports() -> Vec<ReportDef> {
+    let mut leak = report(
+        "leak",
+        "Leak",
+        &["Sales Manager"],
+        "SELECT 1 AS n FROM (SELECT pg_advisory_lock(4242)) l",
+    );
+    leak.columns = vec![column("n", ColumnKind::Int)];
+    let mut held = report(
+        "held",
+        "Held",
+        &["Sales Manager"],
+        "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 \
+         AND objid = 4242 AND pid = pg_backend_pid()",
+    );
+    held.columns = vec![column("n", ColumnKind::Int)];
+    vec![leak, held]
+}
+
+#[tokio::test]
+async fn a_report_leaves_no_session_state_on_the_next_checkout() {
+    // One connection in the pool: the request after the report gets whatever the pool hands out
+    // next. The connection a report ran on is closed, so it is a new one with no lock.
+    let env = Env::with_reports_pool_size(lock_reports(), 1).await;
+    env.user("mgr", &["Sales Manager"]).await;
+    let mgr = env.login("mgr").await;
+    let run = |name: &'static str| {
+        let (env, mgr) = (&env, &mgr);
+        async move {
+            env.send(
+                post(&format!("/api/v1/report/t.{name}"))
+                    .session(mgr)
+                    .json(json!({})),
+            )
+            .await
+        }
+    };
+    let leaked = run("leak").await;
+    assert_eq!(leaked.status, StatusCode::OK, "{}", leaked.text);
+    let held = run("held").await;
+    assert_eq!(held.status, StatusCode::OK, "{}", held.text);
+    assert_eq!(held.data()["rows"], json!([[0]]));
+    // And the lock is gone from the server (the closed connection ends its session).
+    let started = std::time::Instant::now();
+    loop {
+        let client = env.db.pool.get().await.expect("connection");
+        let locks: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' \
+                 AND objsubid = 1 AND objid = 4242",
+                &[],
+            )
+            .await
+            .expect("locks")
+            .get(0);
+        if locks == 0 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the advisory lock of the report is still held"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

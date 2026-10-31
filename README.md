@@ -73,7 +73,7 @@ All guides are indexed in [docs/README.md](docs/README.md). The main ones:
 
 ## Status and roadmap
 
-Milestones M0 to M8 are done (documents, auth and permissions, the REST API, the desk, apps, jobs, multi-site, workflow and reports); the next one is M9, integration. The details and the roadmap are in [docs/blueprint/milestones.md](docs/blueprint/milestones.md); the full status is in [docs/README.md](docs/README.md#project-status). The repository is public and the project is open source.
+Milestones M0 to M8 are done (documents, auth and permissions, the REST API, the desk, apps, jobs, multi-site, workflow and reports); M9, integration, is in progress (TLS to PostgreSQL and app method endpoints are done; webhooks, import and export and fixtures follow). The details and the roadmap are in [docs/blueprint/milestones.md](docs/blueprint/milestones.md); the full status is in [docs/README.md](docs/README.md#project-status). The repository is public and the project is open source.
 
 ## Contributing
 

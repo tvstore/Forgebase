@@ -25,7 +25,7 @@ WHERE so.order_date >= $1 AND so.order_date <= $2
   AND ($3::text IS NULL OR (CASE so.docstatus WHEN 0 THEN 'Draft' WHEN 1 THEN 'Submitted' ELSE 'Cancelled' END) = $3)
   AND (COALESCE($4::bool, false) OR so.docstatus <> 2)
 GROUP BY c.full_name
-ORDER BY c.full_name;
+ORDER BY c.full_name COLLATE \"C\";
 ";
 
 fn e2e() -> App {

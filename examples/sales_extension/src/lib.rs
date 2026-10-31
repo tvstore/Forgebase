@@ -156,7 +156,7 @@ impl JobHandler for PlanFollowUpVisit {
                 // the transaction is usable). Look again: if the visit exists, the work is done.
                 return match documents.list("customer_visit", &existing).await {
                     Ok(found) if !found.is_empty() => Ok(()),
-                    _ => Err(error),
+                    _ => Err(error.into()),
                 };
             }
             Ok(())

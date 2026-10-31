@@ -114,7 +114,7 @@ impl DocTypeHooks for OrderRules {
     }
 
     /// The approval limit (see the `[workflow]` of `sales_order.toml`): `"Approve"` is refused for
-    /// an order whose `total` is above [`APPROVAL_LIMIT`].
+    /// an order whose `total` is above [`APPROVAL_LIMIT`], and for one that has no `total`.
     ///
     /// **Why two actions and not a role check.** Hooks see the actor's name and the transition,
     /// never the actor's roles (ADR 0009, by design: a rule that depends on roles belongs in the
@@ -131,12 +131,23 @@ impl DocTypeHooks for OrderRules {
         doc: &mut Document,
     ) -> Result<(), HookError> {
         let is_approve = ctx.transition.is_some_and(|t| t.action == "Approve");
-        if let (true, Some(Value::Decimal(total))) = (is_approve, doc.values.get("total"))
-            && *total > APPROVAL_LIMIT
-        {
-            return Err(HookError::new(format!(
-                "orders above {APPROVAL_LIMIT} need a Sales Manager: use 'Approve as Manager'"
-            )));
+        if is_approve {
+            match doc.values.get("total") {
+                Some(Value::Decimal(total)) if *total > APPROVAL_LIMIT => {
+                    return Err(HookError::new(format!(
+                        "orders above {APPROVAL_LIMIT} need a Sales Manager: use 'Approve as Manager'"
+                    )));
+                }
+                Some(Value::Decimal(_)) => {}
+                // Defence in depth: `validate` always computes `total`, so an order without one
+                // was changed outside the framework. Without a total the limit cannot be applied,
+                // so the limited action must not pass.
+                _ => {
+                    return Err(HookError::new(
+                        "the order has no total, so the approval limit cannot be applied: use 'Approve as Manager'",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -255,7 +266,7 @@ impl JobHandler for LogOrderEvent {
                 // work is done.
                 return match documents.get("sales_order_log", &key).await {
                     Ok(Some(_)) => Ok(()),
-                    _ => Err(error),
+                    _ => Err(error.into()),
                 };
             }
             Ok(())
@@ -343,7 +354,7 @@ impl JobHandler for DailySummary {
                 // insert, in a savepoint): the summary exists, so the work is done.
                 return match documents.get("sales_daily_summary", &key).await {
                     Ok(Some(_)) => Ok(()),
-                    _ => Err(error),
+                    _ => Err(error.into()),
                 };
             }
             Ok(())

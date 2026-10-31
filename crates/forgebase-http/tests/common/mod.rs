@@ -16,7 +16,9 @@ use forgebase_core::meta::{DocType, Registry};
 use forgebase_core::report::ReportDef;
 use forgebase_core::value::Value;
 use forgebase_db::auth;
-use forgebase_db::{Pool, SyncOptions, connect, migrate_framework, quote_ident, sync};
+use forgebase_db::{
+    Pool, SyncOptions, connect, connect_sized, migrate_framework, quote_ident, sync,
+};
 use forgebase_http::{AppConfig, AppState, router};
 use serde_json::Value as Json;
 use tower::ServiceExt;
@@ -561,6 +563,21 @@ impl Env {
     }
 
     pub async fn build_with(config: AppConfig, extra: &[&str], reports: Vec<ReportDef>) -> Self {
+        Self::build_pooled(config, extra, reports, None).await
+    }
+
+    /// Like [`Env::build_with`], with the router on a pool of `pool_size` connections (the test
+    /// database keeps its own pool for `Env::db`).
+    pub async fn with_reports_pool_size(reports: Vec<ReportDef>, pool_size: usize) -> Self {
+        Self::build_pooled(AppConfig::default(), &[], reports, Some(pool_size)).await
+    }
+
+    async fn build_pooled(
+        config: AppConfig,
+        extra: &[&str],
+        reports: Vec<ReportDef>,
+        pool_size: Option<usize>,
+    ) -> Self {
         let db = TestDb::migrated().await;
         let mut registry = registry_with(extra);
         for report in reports {
@@ -572,7 +589,13 @@ impl Env {
                 .await
                 .expect("sync");
         }
-        let state = AppState::new(db.pool.clone(), Arc::new(registry), config);
+        let pool = match pool_size {
+            Some(size) => connect_sized(&db.url, Some(size))
+                .await
+                .expect("sized pool"),
+            None => db.pool.clone(),
+        };
+        let state = AppState::new(pool, Arc::new(registry), config);
         let app = router(state.clone());
         Self {
             db,
