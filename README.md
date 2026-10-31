@@ -33,7 +33,7 @@ You describe a business entity (a customer, an order, an invoice) in a small TOM
 
 ## Quick start in 5 minutes
 
-You need Rust (the version in [rust-toolchain.toml](rust-toolchain.toml)), Node.js 22 and a PostgreSQL 16 server with an empty database. This runs the `sales` example app; connections to PostgreSQL are not encrypted (no TLS), so use a local or private network.
+You need Rust (the version in [rust-toolchain.toml](rust-toolchain.toml)), Node.js 22 and a PostgreSQL 16 server with an empty database. This runs the `sales` example app. Connections to PostgreSQL are not encrypted unless the URL says `sslmode=require` (TLS with certificate verification, [operations guide](docs/guide/operations.md#tls-to-postgresql)); on a local or private network that is fine.
 
 ```sh
 git clone https://github.com/tvstore/Forgebase && cd Forgebase
@@ -60,7 +60,7 @@ until curl -fsS -o /dev/null http://localhost:8000/desk/; do sleep 1; done      
 printf '%s\n' 'a long password' | docker exec -i fbapp forgebase-app user create admin --role Administrator
 ```
 
-To run it on a server with HTTPS and backups, use the compose file in [deploy/](deploy/compose.yaml) and follow the [deploy guide](docs/guide/deploy.md). The full walkthrough (documents, submit and cancel, permissions, workflow) is [Getting started](docs/guide/getting-started.md).
+To run it on a server with HTTPS and backups, use the compose file in [deploy/](deploy/compose.yaml) and follow the [deploy guide](docs/guide/deploy.md); the same guide has a free Render + Neon path (TLS to PostgreSQL). The full walkthrough (documents, submit and cancel, permissions, workflow) is [Getting started](docs/guide/getting-started.md).
 
 ## Documentation
 

@@ -12,7 +12,7 @@ To run all of this on one VM with Docker, HTTPS and backups, follow the [deploy 
 - **The built desk**, a directory (`desk/dist` after `npm run build`), if you want the web interface. `serve` reads it from `FORGEBASE_DESK_DIR`.
 - **PostgreSQL 16 or newer**, one database per site.
 - **The PostgreSQL client tools** (`pg_dump`, `pg_restore`) of **the same major version as the server** (newer tools can write archives or send SQL that the server's version cannot handle), on the machine that runs the backups. Forgebase does not bundle them. On Debian and Ubuntu the package is `postgresql-client-16` (or the one of your server's major version).
-- A reverse proxy for TLS (see [Running](#running)). Forgebase itself speaks plain HTTP, and its connection to PostgreSQL has no TLS yet, so keep that link on a local or private network.
+- A reverse proxy for TLS (see [Running](#running)). Forgebase itself speaks plain HTTP. Its connection to PostgreSQL has TLS when the database URL asks for it ([TLS to PostgreSQL](#tls-to-postgresql)); without that it is not encrypted, so keep the link on a local or private network.
 
 ## Configuration
 
@@ -55,6 +55,30 @@ BETA_DATABASE_URL=postgres://forgebase_app:long-random-password@127.0.0.1:5432/b
 ```sh
 myapp --config /etc/forgebase/forgebase.toml site list
 ```
+
+### TLS to PostgreSQL
+
+The connection to PostgreSQL follows the `sslmode` in the database URL, for every site (the URLs in the environment variables that `forgebase.toml` names work the same way), and for everything that connects: the pool, `migrate`, `site create`, the worker, `site backup` and `site restore`. Details and reasons: [ADR 0018](../adr/0018-postgres-tls.md).
+
+| In the URL | What happens |
+|---|---|
+| no `sslmode`, or `sslmode=disable` | no TLS (the default; right for a local or private network) |
+| `sslmode=require` (also `verify-ca`, `verify-full`) | TLS, and the certificate is **always fully verified**: the chain against the trusted roots **and** the host name in the URL. This is stricter than libpq's `require`. |
+| `sslmode=prefer` or `allow` | refused with `` `sslmode=prefer` is not supported: use `disable` or `require` ``: a failed handshake never falls back to plain text |
+| `sslrootcert=/path/ca.pem` | trust **only** the certificates in that PEM file (a private CA, or a server's own certificate) |
+| `sslrootcert=system`, or nothing | trust the operating system's CA store (a container image needs the `ca-certificates` package or a copy of its bundle; the image of the [Dockerfile](../../Dockerfile) carries the Debian bundle) |
+
+```sh
+# the URLs, one per site, in the environment (never in forgebase.toml itself)
+ACME_DATABASE_URL=postgres://forgebase_app:long-random-password@db.example.com:5432/acme?sslmode=require
+BETA_DATABASE_URL=postgres://forgebase_app:long-random-password@db.internal:5432/beta?sslmode=require&sslrootcert=/etc/forgebase/db-ca.pem
+```
+
+- A **managed database** (Neon, a cloud PostgreSQL) uses a certificate from a public CA: `sslmode=require` is all you need. A **self-hosted server with its own CA** needs `sslrootcert` with the CA certificate, and the server certificate must contain the host name (or IP address) you connect to.
+- The host name is sent for routing (SNI). A Unix-socket host with TLS is refused; use TCP.
+- `sslcert`, `sslkey` (client certificates), `sslcrl` and other `ssl*` parameters are refused, not ignored. Only `postgres://` and `postgresql://` URLs are accepted.
+- `site backup` and `site restore` give `pg_dump` and `pg_restore` the same choice in their environment: `PGSSLMODE=verify-full` with `PGSSLROOTCERT` (the path, or `system`, which needs the version 16 client tools). With no TLS they get `PGSSLMODE=disable`.
+- A failure says what failed, for example `error performing TLS handshake: invalid peer certificate: UnknownIssuer` (the server's certificate is not signed by a trusted root: use `sslrootcert`) or `certificate not valid for name "..."` (the URL's host is not in the certificate). It is not a password error, and no message contains the URL.
 
 **Connections.** Every site has its own pool (by default four connections per CPU; `pool_size` sets it) and every worker has one of its own. PostgreSQL's `max_connections` must cover the sum for all sites, workers and your own tools.
 
@@ -207,6 +231,10 @@ Delete the app from the site's `apps` list (and from the list of every site that
 |---|---|
 | `404 not_found` for every request | The `Host` matches no site. Check `site list`, and that the proxy passes the original `Host` (`proxy_set_header Host $host;`). `400 invalid_host` means a malformed or missing `Host`. |
 | `site `acme`: the environment variable ACME_DATABASE_URL is not set or is empty` | The variable named in `forgebase.toml` is missing in this process's environment (systemd: `EnvironmentFile=`; shell: `export`). |
+| `error performing TLS handshake: invalid peer certificate: UnknownIssuer` | The server's certificate is not signed by a root that Forgebase trusts. For a private CA add `sslrootcert=/path/ca.pem` to the URL ([TLS to PostgreSQL](#tls-to-postgresql)). |
+| `certificate not valid for name "..."` | The host in the URL is not in the server certificate. Connect with a name that is (or fix the certificate). |
+| `` `sslmode=prefer` is not supported: use `disable` or `require` `` | Change the URL: `sslmode=disable` for no TLS, `sslmode=require` for TLS. |
+| `no root certificate in the operating system's trust store` | The machine or image has no CA certificates. Install `ca-certificates` or set `sslrootcert`. |
 | `pg_dump not found; install the PostgreSQL client tools ...` | Install `postgresql-client-NN` or set `FORGEBASE_PG_BIN` to the directory that has the tools. |
 | `pg_dump is version 18 but the server is version 16` | The client tools do not have the server's major version (older or newer). Install the package of the server's version, or point `FORGEBASE_PG_BIN` at it (on Debian and Ubuntu: `/usr/lib/postgresql/16/bin`). |
 | `the database of site `acme` is not empty` | A restore needs an empty database: use `site create acme --empty` (not plain `site create`, which migrates), or a freshly created database. |

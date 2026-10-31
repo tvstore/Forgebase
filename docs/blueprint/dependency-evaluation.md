@@ -374,6 +374,37 @@ Owner decisions U2 and U3 ([ADR 0017](../adr/0017-desk-styling-tailwind.md), sec
 
 M5.1 adds **no external package** and no new version to `Cargo.lock`. The crate `forgebase-cli` is renamed `forgebase` and gets a library target; `axum` and `tower` (already direct dependencies of `forgebase-http`, same version and features) become **optional normal dependencies** of `forgebase`, enabled only by its cargo feature `testing` (the in-process HTTP client of `forgebase::testing` needs `axum::Router` and `tower::ServiceExt::oneshot`, as the `forgebase-http` tests do). The `testing` feature is off by default, so the stock binary and an app's release build do not carry the helpers; an app enables it in its `[dev-dependencies]`. The crate depends on itself as a dev-dependency with that feature, so that its own integration tests (which use the helpers) run in a plain `cargo test`. `tokio` also gets the `rt-multi-thread` runtime built by hand in the library (`Forgebase::run`) instead of `#[tokio::main]`; the features are the ones it already had. The public API re-exports `rust_decimal::Decimal` and `time::{Date, OffsetDateTime}` (the payloads of `Value`) from the versions already in the tree. Licenses: unchanged.
 
+### 13. TLS to PostgreSQL (M9.0)
+
+Owner decision of 2026-10-31, *"setuju ci-result dan setuju M9.0"* ([ADR 0018](../adr/0018-postgres-tls.md)): **`tokio-postgres-rustls` is approved**, with rustls and the **`ring`** provider. `rustls-native-certs` was already approved on 2026-10-30 for the M9.2 webhooks; the two share **one TLS stack** (M9.2 adds `hyper-rustls` on the same `rustls`).
+
+| Crate | Version | Licence | Why it is in the tree |
+|---|---|---|---|
+| **`tokio-postgres-rustls`** | 0.14.0 | MIT | **new direct dependency** (workspace, `default-features = false`, feature `ring`); the `MakeTlsConnect` for `tokio-postgres`, one file, also does SCRAM channel binding |
+| `rustls` | 0.23.46 | Apache-2.0 OR ISC OR MIT | direct dependency of `forgebase-db` (builds the client config); `default-features = false`, features `ring`, `std`, `tls12` |
+| `rustls-native-certs` | 0.8.5 | Apache-2.0 OR ISC OR MIT | direct dependency of `forgebase-db` (the operating system's roots) |
+| `ring` | 0.17.14 | Apache-2.0 AND ISC | the crypto provider (both licences are on the allow-list; builds C and assembly with `cc`, no CMake) |
+| `rustls-webpki` | 0.103.16 | ISC | certificate and name verification (IP names included) |
+| `rustls-pki-types` | 1.15.1 | MIT OR Apache-2.0 | types, PEM reading of `sslrootcert` |
+| `tokio-rustls` | 0.26.6 | MIT OR Apache-2.0 | the async TLS stream |
+| `x509-cert` 0.2.5, `der` 0.7.10, `der_derive`, `spki` 0.7.3, `const-oid` 0.9.6, `flagset`, `tls_codec` 0.4.2 (+ `_derive`) | | Apache-2.0 OR MIT (`flagset`: Apache-2.0) | `tokio-postgres-rustls` reads the server certificate for SCRAM channel binding |
+| `subtle` 2.6.1 | | BSD-3-Clause | constant-time compares (`ring`, `rustls`) |
+| `untrusted` 0.9.0 | | ISC | `ring`, `rustls-webpki` |
+| `zeroize` 1.9.1 (+ `_derive`) | | Apache-2.0 OR MIT | `rustls` |
+| `openssl-probe` 0.2.2 | | MIT OR Apache-2.0 | `rustls-native-certs`: where Linux keeps the CA store |
+| `cc` 1.10.0, `shlex` 2.0.1, `find-msvc-tools` | | MIT OR Apache-2.0 | build scripts of `ring` |
+| `core-foundation` (+ `-sys`), `security-framework` (+ `-sys`) | | MIT OR Apache-2.0 | macOS root store (not built on Linux) |
+| `schannel` 0.1.30, `windows-sys` 0.52.6, `windows-targets` and the `windows_*` crates | | MIT | Windows root store (not built on Linux) |
+
+`Verified (local measurement)`, 2026-10-31, from `Cargo.lock` and `cargo metadata`:
+
+- **The lockfile grows from 171 to 209 package entries (+38)**, 15 of which are only built on Windows or macOS. `sha2` stays at the one version in the tree (0.11.1; `tokio-postgres-rustls` 0.14 asks for `^0.11`), so there is **no second `sha2`**.
+- **Absent from the tree:** `cargo tree --workspace --all-features -i aws-lc-rs`, `-i openssl-sys` and `-i webpki-roots` each report that the package is not in the graph. No OpenSSL, no `aws-lc-rs` (a C library and CMake), no `webpki-roots` (its data is CDLA-Permissive-2.0, avoided by decision).
+- **Licences:** `cargo deny --locked check` passes with the existing allow-list; no new entry and no `clarify` for `ring`. (Whether the `ring` 0.17.14 source tree still carries OpenSSL- or BoringSSL-derived text, as older releases did, was not inspected: the crate's declared licence is `Apache-2.0 AND ISC` and `cargo deny` accepts it. Inspect before a release.)
+- **New duplicate versions** (`cargo deny` warns, as for the other duplicates of the tree): `const-oid` 0.9.6 beside 0.10.2, and `windows-sys` 0.52.6 beside 0.61.2 (Windows only).
+- **MSRV:** `cargo +1.97 check --workspace --all-targets --all-features --locked` passes.
+- **TLS is not behind a cargo feature** (the older "Proposed" text said it would be): one code path is easier to keep correct than two builds, and the stack is shared with M9.2.
+
 ## Recommended baseline
 
 Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 0005); everything else is Proposed.
@@ -392,7 +423,7 @@ Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 
 | Auth | argon2 + opaque DB-backed sessions | tower-sessions with own store |
 | Jobs | custom Postgres SKIP LOCKED queue | apalis (if sqlx, after maturing) |
 | Config | toml + serde + env overlay | figment |
-| TLS | none in app, TLS terminated at a reverse proxy (Accepted, ADR 0005); rustls+ring for Postgres behind a feature (Proposed) | native-tls |
+| TLS | none in app, TLS terminated at a reverse proxy (Accepted, ADR 0005); rustls+ring for Postgres through `tokio-postgres-rustls` (Accepted 2026-10-31, [ADR 0018](../adr/0018-postgres-tls.md), not behind a feature) | native-tls |
 | Frontend | React + TypeScript (Accepted, ADR 0002) + Vite + Vitest, no UI, router or data library (Accepted 2026-10-29, M4.1) | Vue/Svelte/Solid, htmx (not evaluated) |
 
 Approximate core-stack weight: 136 packages (A) vs 179 (B); excludes TLS, sessions and sha2.
@@ -428,7 +459,7 @@ The Dockerfile and `deploy/compose.yaml` use base images. They are runtime and b
 - **Postgres:** optional on private networks, required for most managed databases.
   - rustls 0.23.46: pure Rust, no system OpenSSL. Default provider aws-lc-rs needs a C compiler and CMake (NASM on Windows); the `ring` provider avoids CMake. sqlx `tls-rustls` currently resolves to ring (verified locally).
   - native-tls 0.2.18: uses system OpenSSL on Linux; adds a system dependency and version drift.
-- **Recommendation:** reverse proxy for HTTPS (Accepted, [ADR 0005](../adr/0005-http-stack.md)); Postgres TLS (Proposed) behind a cargo feature using rustls with ring via `tokio-postgres-rustls` 0.14.0 (third-party, MIT), or sqlx `tls-rustls-ring` if sqlx is chosen (feature name Unverified). Root certificates via `webpki-roots` or `rustls-native-certs` (not evaluated).
+- **Decision (2026-10-31, M9.0):** reverse proxy for HTTPS (Accepted, [ADR 0005](../adr/0005-http-stack.md)); Postgres TLS is **Accepted** with rustls and `ring` through `tokio-postgres-rustls` 0.14.0 (third-party, MIT), not behind a cargo feature, with the operating system's roots (`rustls-native-certs`) and no `webpki-roots` ([ADR 0018](../adr/0018-postgres-tls.md), [section 13](#13-tls-to-postgresql-m90)). This replaces the earlier recommendation, which was Proposed.
 
 ## Open questions
 
