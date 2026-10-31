@@ -42,20 +42,23 @@ if [ "$#" -ne 1 ]; then
   echo "entrypoint: all takes no arguments (use the environment and a config file)" >&2
   exit 2
 fi
-"$app" serve &
-serve_pid=$!
-"$app" worker &
-worker_pid=$!
-
 stopping=0
 stop_children() {
-  kill -TERM "$serve_pid" "$worker_pid" 2>/dev/null || true
+  kill -TERM "${serve_pid:-}" "${worker_pid:-}" 2>/dev/null || true
 }
 on_signal() {
   stopping=1
   stop_children
 }
+# Installed before the children start, so that no signal is lost in between.
 trap on_signal TERM INT
+
+"$app" serve &
+serve_pid=$!
+"$app" worker &
+worker_pid=$!
+# A signal that arrived before both PIDs existed reached neither or one of them: send it again.
+[ "$stopping" = 0 ] || stop_children
 
 # Returns when either child exits ($who is its PID) or when a trapped signal arrives ($who is empty).
 set +e
@@ -69,12 +72,24 @@ elif [ "$stopping" = 0 ]; then
   stop_children
 fi
 
-# A trapped signal also interrupts `wait PID` (status above 128, the child not reaped): wait again
-# until the PID is really gone. A child that `wait -n` reaped is gone already and keeps its status.
+# Collect the real status of a child. bash keeps the status of a child that it reaped, so the first
+# `wait` returns it; only a trapped signal makes `wait` return early (status above 128, the child
+# still running), and then we wait again.
+reap() {
+  local rc
+  wait "$1"
+  rc=$?
+  while [ "$rc" -gt 128 ] && kill -0 "$1" 2>/dev/null; do
+    wait "$1"
+    rc=$?
+  done
+  return "$rc"
+}
+# The child that `wait -n` returned already has its status in $first.
 serve_rc=0
 worker_rc=0
-while kill -0 "$serve_pid" 2>/dev/null; do wait "$serve_pid"; serve_rc=$?; done
-while kill -0 "$worker_pid" 2>/dev/null; do wait "$worker_pid"; worker_rc=$?; done
+[ "${who:-}" = "$serve_pid" ] || { reap "$serve_pid"; serve_rc=$?; }
+[ "${who:-}" = "$worker_pid" ] || { reap "$worker_pid"; worker_rc=$?; }
 
 # The first child that exited on its own decides the status (even if a signal arrived afterwards).
 if [ -n "$first" ]; then

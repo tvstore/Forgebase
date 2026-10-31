@@ -1,7 +1,7 @@
 #!/bin/bash
 # Tests of deploy/entrypoint.sh with a fake binary (no Docker, no database): bash deploy/test-entrypoint.sh
 # The fake `forgebase-app` behaves as FAKE_SERVE / FAKE_WORKER say: `clean` (exit 0 on TERM), `slow` (exit 0
-# one second after TERM), `crash:SECONDS:STATUS` (exit by itself). Every TERM it receives is counted.
+# one second after TERM), `failterm` (exit 1 at once on TERM), `crash:SECONDS:STATUS` (exit by itself). Every TERM it receives is counted.
 set -u
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
@@ -18,7 +18,7 @@ case "$cmd" in
   worker) mode=${FAKE_WORKER:-clean} ;;
   *) exit 0 ;;
 esac
-term() { echo x >> "$LOG.$cmd.term"; [ "$mode" = slow ] && sleep 1; exit 0; }
+term() { echo x >> "$LOG.$cmd.term"; [ "$mode" = slow ] && sleep 1; [ "$mode" = failterm ] && exit 1; exit 0; }
 trap term TERM
 case "$mode" in
   crash:*) IFS=: read -r _ secs rc <<< "$mode"; sleep "$secs"; exit "$rc" ;;
@@ -47,6 +47,11 @@ check "all: two TERMs, status" 0 "$rc"; check "all: two TERMs reach serve" 2 "$(
 
 FAKE_WORKER=crash:0.5:3 FAKE_SERVE=slow run all; sleep 0.9; kill -TERM $pid; wait $pid; rc=$?
 check "all: worker exits 3, then TERM while serve stops" 3 "$rc"
+
+FAKE_WORKER=failterm FAKE_SERVE=slow run all; sleep 0.5; kill -TERM $pid; wait $pid; rc=$?
+check "all: worker fails on TERM at once, serve stops slowly" 1 "$rc"
+FAKE_SERVE=failterm FAKE_WORKER=slow run all; sleep 0.5; kill -TERM $pid; wait $pid; rc=$?
+check "all: serve fails on TERM at once, worker stops slowly" 1 "$rc"
 
 FAKE_WORKER=crash:0.5:5 run all; wait $pid; rc=$?
 check "all: crashing worker status" 5 "$rc"; check "all: serve was stopped once" 1 "$(terms serve)"

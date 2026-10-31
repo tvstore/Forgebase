@@ -68,7 +68,7 @@ If you already have a Chromium, skip the install and set `PLAYWRIGHT_CHROMIUM_EX
 
 ## Docker files
 
-The `Dockerfile`, `.dockerignore` and `deploy/` (compose, Caddyfile, `entrypoint.sh`) are described in the [deploy guide](docs/guide/deploy.md); CI builds the image only when they change (`docker build .`).
+The `Dockerfile`, `.dockerignore` and `deploy/` (compose, Caddyfile, `entrypoint.sh`) are described in the [deploy guide](docs/guide/deploy.md); CI builds the image only when they change (`docker build .`). Run `bash deploy/test-entrypoint.sh` to test the entrypoint locally (a fake binary, no Docker needed).
 
 ## PostgreSQL for tests
 

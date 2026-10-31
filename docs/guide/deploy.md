@@ -158,7 +158,7 @@ Test a restore on a spare VM or stack before you need it.
 `all` runs the web server **and** the worker in one container, which saves a container and some memory. Use it on a very small machine or on a host that runs only one container. In `compose.yaml` give `forgebase` the command `["all"]` and remove the `worker` service, or without compose. This example is meant to sit behind an HTTPS reverse proxy (the session cookie is `Secure`); for a local test over plain HTTP add `-e FORGEBASE_DEV_INSECURE_COOKIES=1` and `FORGEBASE_ALLOWED_HOSTS=localhost` (insecure, testing only):
 
 ```sh
-docker run -d --name forgebase -p 8000:8000 \
+docker run -d --name forgebase --restart unless-stopped -p 8000:8000 \
   -e FORGEBASE_DATABASE_URL=postgres://user:password@dbhost:5432/forgebase \
   -e FORGEBASE_ALLOWED_HOSTS=forgebase.example.com \
   -e FORGEBASE_MIGRATE_ON_START=1 \
