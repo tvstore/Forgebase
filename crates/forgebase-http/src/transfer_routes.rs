@@ -134,6 +134,7 @@ pub async fn export(
         filters: list_query.filters,
         sort: list_query.sort,
         limit: state.config().export_max_rows,
+        send_timeout: state.config().export_send_timeout,
         exporter,
     };
     tokio::spawn(stream_export(client, job, started_tx, sender));
@@ -162,6 +163,7 @@ struct ExportJob {
     filters: Vec<forgebase_db::Filter>,
     sort: Vec<forgebase_db::Sort>,
     limit: u64,
+    send_timeout: std::time::Duration,
     exporter: Exporter,
 }
 
@@ -173,11 +175,12 @@ async fn stream_export<C>(
     mut client: C,
     mut job: ExportJob,
     started: oneshot::Sender<Result<u64, DbError>>,
-    mut sender: Sender<Bytes, io::Error>,
+    sender: Sender<Bytes, io::Error>,
 ) where
     C: std::ops::DerefMut,
     C::Target: std::ops::DerefMut<Target = forgebase_db::Client>,
 {
+    let mut sender = Some(sender);
     let tx = match begin_export(&mut client).await {
         Ok(tx) => tx,
         Err(error) => {
@@ -202,11 +205,7 @@ async fn stream_export<C>(
     if started.send(Ok(export.count())).is_err() {
         return; // the request is gone
     }
-    if sender
-        .send_data(Bytes::from(job.exporter.start()))
-        .await
-        .is_err()
-    {
+    if !send_chunk(&mut sender, job.exporter.start(), job.send_timeout).await {
         return;
     }
     loop {
@@ -218,7 +217,9 @@ async fn stream_export<C>(
                     &mut io::stderr(),
                     format_args!("export failed halfway: {error}\n"),
                 );
-                sender.abort(io::Error::other("the export failed"));
+                if let Some(sender) = sender {
+                    sender.abort(io::Error::other("the export failed"));
+                }
                 return;
             }
         };
@@ -229,16 +230,43 @@ async fn stream_export<C>(
                     &mut io::stderr(),
                     format_args!("export failed halfway: {error}\n"),
                 );
-                sender.abort(io::Error::other("the export failed"));
+                if let Some(sender) = sender {
+                    sender.abort(io::Error::other("the export failed"));
+                }
                 return;
             }
         };
-        if sender.send_data(Bytes::from(text)).await.is_err() {
-            return; // the client went away: the snapshot ends with the task
+        if !send_chunk(&mut sender, text, job.send_timeout).await {
+            return; // the client went away or stopped reading: the snapshot ends with the task
         }
     }
-    let _ = sender.send_data(Bytes::from(job.exporter.finish())).await;
+    let _ = send_chunk(&mut sender, job.exporter.finish(), job.send_timeout).await;
     let _ = tx.rollback().await;
+}
+
+/// Sends one chunk, waiting at most `timeout` for room in the channel. False when the export
+/// must end: the client is gone, or too slow, in which case the body is **aborted** (the client
+/// sees an incomplete download) and the task's connection and snapshot are released when the
+/// caller returns.
+async fn send_chunk(
+    sender: &mut Option<Sender<Bytes, io::Error>>,
+    text: String,
+    timeout: std::time::Duration,
+) -> bool {
+    let Some(live) = sender.as_mut() else {
+        return false;
+    };
+    match tokio::time::timeout(timeout, live.send_data(Bytes::from(text))).await {
+        Ok(sent) => sent.is_ok(),
+        Err(_) => {
+            if let Some(slow) = sender.take() {
+                slow.abort(io::Error::other(
+                    "the client did not read the export in time",
+                ));
+            }
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -412,4 +440,34 @@ pub async fn import(
         return Err(ApiError::import_failed(summary.to_json()));
     }
     Ok(data(StatusCode::OK, summary.to_json()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A client that never reads: the channel fills and the next chunk gives up after the
+    /// timeout, so the export task can end and release its connection and snapshot.
+    #[tokio::test]
+    async fn a_chunk_for_a_client_that_stops_reading_times_out() {
+        let (sender, _body) = Channel::<Bytes, io::Error>::new(2);
+        let mut sender = Some(sender);
+        let timeout = Duration::from_millis(100);
+        assert!(send_chunk(&mut sender, "a".into(), timeout).await);
+        assert!(send_chunk(&mut sender, "b".into(), timeout).await);
+        let started = std::time::Instant::now();
+        assert!(!send_chunk(&mut sender, "c".into(), timeout).await);
+        assert!(sender.is_none(), "the body was aborted, not just ended");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_chunk_for_a_client_that_went_away_fails_at_once() {
+        let (sender, body) = Channel::<Bytes, io::Error>::new(2);
+        let mut sender = Some(sender);
+        drop(body);
+        assert!(!send_chunk(&mut sender, "a".into(), Duration::from_secs(5)).await);
+    }
 }

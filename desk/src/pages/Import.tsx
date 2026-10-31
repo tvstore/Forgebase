@@ -253,8 +253,8 @@ function ImportView({ doctype, meta }: { doctype: string; meta: DocTypeMeta }) {
           <p>{refusal.message}</p>
           {refusal.details.length > 0 ? (
             <ul>
-              {refusal.details.map((detail) => (
-                <li key={detail}>{detail}</li>
+              {refusal.details.map((detail, index) => (
+                <li key={`${index}-${detail}`}>{detail}</li>
               ))}
             </ul>
           ) : null}

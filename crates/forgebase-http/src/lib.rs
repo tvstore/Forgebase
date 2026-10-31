@@ -123,6 +123,11 @@ pub struct AppConfig {
     /// The most data rows an import file may have; more is `422 import_too_large`, before
     /// anything runs. Default 10 000.
     pub import_max_rows: usize,
+    /// How long an export waits for the client to take one chunk of the body. A client that
+    /// stops reading would otherwise hold a pooled connection and a `REPEATABLE READ` snapshot
+    /// for as long as it likes; when the time passes the body is aborted and both are released.
+    /// Default 30 seconds.
+    pub export_send_timeout: std::time::Duration,
     /// The largest body of an import request in bytes: the import route has its own limit, and
     /// the other routes keep `body_limit_bytes`. Default 16 MiB.
     pub import_body_limit_bytes: usize,
@@ -138,6 +143,7 @@ impl Default for AppConfig {
             desk_dir: None,
             export_max_rows: 100_000,
             import_max_rows: 10_000,
+            export_send_timeout: std::time::Duration::from_secs(30),
             import_body_limit_bytes: 16 * 1024 * 1024,
         }
     }

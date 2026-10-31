@@ -23,7 +23,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing", "formatting"] }
 tower.workspace = true
-tokio = { workspace = true, features = ["fs", "net", "sync"] }
+tokio = { workspace = true, features = ["fs", "net", "sync", "time"] }
 
 [dev-dependencies]
 deadpool-postgres.workspace = true

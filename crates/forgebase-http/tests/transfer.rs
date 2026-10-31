@@ -1327,3 +1327,59 @@ async fn a_report_exports_for_its_roles_with_the_same_csv_rules_and_marks_a_trun
     let reply = run("?format=pdf").await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn a_header_with_a_hundred_thousand_columns_gets_a_short_answer() {
+    let env = env().await;
+    let importer = env.login("importer").await;
+    let file = format!("{}\r\nx\r\n", vec!["a"; 100_000].join(","));
+    let started = std::time::Instant::now();
+    let reply = import(&env, &importer, "?format=csv", "text/csv", &file).await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.code(), "invalid_import");
+    assert!(reply.text.len() < 2_000, "{} bytes", reply.text.len());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // The same with a few more columns than the DocType can have, none of them known.
+    let file = format!(
+        "{}\r\n",
+        (0..60)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let reply = import(&env, &importer, "?format=csv", "text/csv", &file).await;
+    assert_eq!(reply.code(), "invalid_import");
+    assert!(reply.json()["error"]["details"].as_array().unwrap().len() <= 101);
+}
+
+#[tokio::test]
+async fn a_csv_with_the_standard_columns_of_an_export_imports() {
+    let env = env().await;
+    let importer = env.login("importer").await;
+    let root = env.login("root").await;
+    let file = "title,owner,modified_at,version,docstatus,workflow_state\r\nfrom export,ann,2026-01-01T00:00:00Z,4,0,\r\n";
+    let reply = import(&env, &importer, "?format=csv", "text/csv", file).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    assert_eq!(titles(&env, &root).await, ["from export"]);
+    let owner = env
+        .send(get("/api/v1/resource/parcel?limit=5").session(&root))
+        .await
+        .data()[0]["owner"]
+        .clone();
+    assert_eq!(owner, "importer", "the owner column is read, not used");
+}
+
+#[tokio::test]
+async fn child_rows_count_toward_the_row_limit() {
+    let env = env_with(AppConfig {
+        import_max_rows: 4,
+        ..AppConfig::default()
+    })
+    .await;
+    let importer = env.login("importer").await;
+    // 2 documents and 3 child rows are 5 rows.
+    let body = r#"[{"title":"a","lines":[{"what":"1"},{"what":"2"}]},{"title":"b","lines":[{"what":"3"}]}]"#;
+    let reply = import(&env, &importer, "?format=json", "application/json", body).await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.code(), "import_too_large");
+}

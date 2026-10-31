@@ -88,15 +88,25 @@ impl Format {
 /// A value as the text of a CSV cell, with the formula mitigation for text values (a value is
 /// text exactly when its field is of a text kind). Null is an empty cell.
 pub fn csv_cell(name: &str, value: &Value) -> Result<String, JsonError> {
-    Ok(match value {
-        Value::Null => String::new(),
-        Value::Text(text) => neutralize(text),
+    // Fail safe: only the known non-text kinds skip the guard, so a value kind added later is
+    // guarded until someone decides it cannot be a formula.
+    let text = match value {
+        Value::Null => return Ok(String::new()),
+        Value::Text(text) => text.clone(),
         other => match from_value(name, other)? {
             Json::String(text) => text,
             Json::Number(number) => number.to_string(),
             Json::Bool(flag) => flag.to_string(),
             _ => String::new(),
         },
+    };
+    Ok(match value {
+        Value::Int(_)
+        | Value::Decimal(_)
+        | Value::Bool(_)
+        | Value::Date(_)
+        | Value::Datetime(_) => text,
+        _ => neutralize(&text),
     })
 }
 
@@ -344,6 +354,17 @@ pub enum FileError {
     },
 }
 
+/// Keeps at most [`MAX_REPORTED_ERRORS`] problems and ends the list with "and N more", so a
+/// crafted file cannot make the answer (or the memory behind it) grow with its size.
+fn capped(mut problems: Vec<String>) -> Vec<String> {
+    if problems.len() > MAX_REPORTED_ERRORS {
+        let more = problems.len() - MAX_REPORTED_ERRORS;
+        problems.truncate(MAX_REPORTED_ERRORS);
+        problems.push(format!("and {more} more"));
+    }
+    problems
+}
+
 fn invalid(problem: impl Into<String>) -> FileError {
     FileError::Invalid(vec![problem.into()])
 }
@@ -395,7 +416,19 @@ fn parse_json(
     else {
         return Err(invalid("the JSON must be an array of document objects"));
     };
-    if items.len() > max_rows {
+    // The row limit counts the documents and their child rows together: a small file of
+    // documents must not carry millions of rows.
+    let mut total = items.len();
+    for item in &items {
+        if let Json::Object(object) = item {
+            for (field, _) in doctype.table_fields() {
+                if let Some(Json::Array(rows)) = object.get(&field.name) {
+                    total = total.saturating_add(rows.len());
+                }
+            }
+        }
+    }
+    if total > max_rows {
         return Err(FileError::TooLarge { limit: max_rows });
     }
     let mut parsed = ParsedImport::default();
@@ -464,6 +497,8 @@ fn known_name(
 enum Column<'a> {
     Name,
     Field(&'a FieldType),
+    /// A standard column of an exported file (`owner`, `modified_at`, ...): read, not used.
+    Ignored,
 }
 
 fn parse_csv(
@@ -483,6 +518,15 @@ fn parse_csv(
     if headers.is_empty() || (headers.len() == 1 && headers.get(0) == Some("")) {
         return Err(invalid("the CSV file has no header row"));
     }
+    // More columns than the DocType can have is refused before any column is looked at: the
+    // list of problems must not grow with the file.
+    let possible = doctype.fields.len() + 1 + STANDARD_KEYS.len();
+    if headers.len() > possible {
+        return Err(invalid(format!(
+            "the header has {} columns; at most {possible} are possible",
+            headers.len()
+        )));
+    }
     let mut problems = Vec::new();
     let mut seen = BTreeSet::new();
     // One entry per column; a refused column ends the import below, so alignment only matters
@@ -494,6 +538,10 @@ fn parse_csv(
         }
         if header == "name" {
             columns.push(Column::Name);
+            continue;
+        }
+        if STANDARD_KEYS.contains(&header) {
+            columns.push(Column::Ignored);
             continue;
         }
         match doctype.field(header).map(|f| &f.field_type) {
@@ -511,7 +559,7 @@ fn parse_csv(
         problems.push("an upsert needs a `name` column".to_owned());
     }
     if !problems.is_empty() {
-        return Err(FileError::Invalid(problems));
+        return Err(FileError::Invalid(capped(problems)));
     }
     let mut parsed = ParsedImport::default();
     let mut record = csv::StringRecord::new();
@@ -545,6 +593,7 @@ fn parse_csv(
                         item.name = Some(cell.to_owned());
                     }
                 }
+                Column::Ignored => {}
                 Column::Field(_) if cell.is_empty() => item.empty.push(header.to_owned()),
                 Column::Field(field_type) => match cell_value(header, field_type, cell) {
                     Ok(value) => {
@@ -1013,5 +1062,71 @@ target = "thing_line"
             10,
         );
         assert!(matches!(refused, Err(FileError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_header_with_too_many_columns_is_one_short_problem() {
+        let header = vec!["a"; 100_000].join(",");
+        let started = std::time::Instant::now();
+        let Err(FileError::Invalid(problems)) = csv(&format!("{header}\n")) else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].contains("100000 columns; at most"),
+            "{problems:?}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_problems_of_a_header_are_capped() {
+        // As many columns as allowed (6 fields + name + 9 standard = 16 here), all unknown.
+        let header = (0..16)
+            .map(|i| format!("x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let Err(FileError::Invalid(problems)) = csv(&format!("{header}\n")) else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(problems.len(), 16);
+        let many: Vec<String> = (0..250).map(|i| i.to_string()).collect();
+        let capped = capped(many);
+        assert_eq!(capped.len(), MAX_REPORTED_ERRORS + 1);
+        assert_eq!(capped.last().map(String::as_str), Some("and 150 more"));
+    }
+
+    #[test]
+    fn csv_ignores_the_standard_columns_of_an_export() {
+        let parsed = csv("name,owner,modified_at,version,title,docstatus,workflow_state\nN,ann,2026-01-01T00:00:00Z,3,Hello,0,Draft\n").unwrap();
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let row = &parsed.rows[0];
+        assert_eq!(row.name.as_deref(), Some("N"));
+        assert_eq!(row.values.len(), 1);
+        assert!(row.empty.is_empty());
+    }
+
+    #[test]
+    fn child_rows_count_toward_the_row_limit() {
+        let file = br#"[{"title":"a","lines":[{"item":"1"},{"item":"2"}]},{"title":"b","lines":[{"item":"3"}]}]"#;
+        let run = |limit| {
+            parse_import(
+                &registry(),
+                &customer(),
+                Format::Json,
+                ImportMode::Insert,
+                file,
+                limit,
+            )
+        };
+        // 2 documents + 3 child rows = 5.
+        assert!(run(5).is_ok());
+        assert_eq!(run(4).unwrap_err(), FileError::TooLarge { limit: 4 });
+    }
+
+    #[test]
+    fn a_text_is_guarded_whatever_else_is() {
+        assert_eq!(csv_cell("f", &Value::Text("=1".into())).unwrap(), "'=1");
+        assert_eq!(csv_cell("f", &Value::Int(-1)).unwrap(), "-1");
     }
 }

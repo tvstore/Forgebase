@@ -106,6 +106,13 @@ import = true
 create = true
 write = true
 read = true
+[[permissions]]
+role = "Own Upserter"
+import = true
+create = true
+write = true
+read = true
+if_owner = true
 "#;
 
 /// Sets the note of a parcel titled `hook-me`; refuses `reject`; enqueues an audit job.
@@ -920,4 +927,62 @@ async fn an_upsert_replaces_the_child_rows_it_is_given_and_keeps_the_others() {
         .unwrap()
         .unwrap();
     assert_eq!(after.tables["lines"], new_rows);
+}
+
+/// A caller under an `if_owner` read does not see a document of somebody else: an upsert of its
+/// name is an insert, which collides (a row error, as `POST /resource` gives a unique violation);
+/// the other user's document is not changed.
+#[tokio::test]
+async fn an_upsert_of_a_document_the_caller_cannot_read_changes_nothing() {
+    let (db, registry) = setup().await;
+    let mut client = db.pool.get().await.unwrap();
+    let alice = Document {
+        name: Some("A".to_owned()),
+        values: BTreeMap::from([
+            ("code".to_owned(), text("A")),
+            ("level".to_owned(), Value::Int(1)),
+        ]),
+        tables: BTreeMap::new(),
+    };
+    insert(
+        &mut **client,
+        &registry,
+        "badge",
+        alice,
+        &Caller::system("alice"),
+    )
+    .await
+    .unwrap();
+    drop(client);
+    let rows = [named(
+        1,
+        "A",
+        &[("code", text("A")), ("level", Value::Int(9))],
+    )];
+    let bob = Caller::user("bob", vec!["Own Upserter".to_owned()]);
+    let outcome = run_import(
+        &db,
+        &registry,
+        "badge",
+        &bob,
+        &rows,
+        ImportMode::Upsert,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (outcome.updated, outcome.inserted, outcome.error_count),
+        (0, 0, 1)
+    );
+    assert!(matches!(
+        outcome.errors[0].error,
+        DbError::UniqueViolation { .. }
+    ));
+    assert!(!outcome.committed);
+    assert_eq!(
+        db.rows("SELECT name || '=' || level::text || '/' || owner FROM doc_badge")
+            .await,
+        [["A=1/alice"]]
+    );
 }
