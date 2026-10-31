@@ -89,7 +89,8 @@ Keep Plan, Doing and Review separate. Do not rely on the implementing agent to d
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, run local checks and contribute |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes, Keep a Changelog format |
 | [docs/blueprint/](docs/blueprint/) | `vision`, `feature-matrix`, `architecture`, `dependency-evaluation`, `security-model`, `milestones`, `maintenance-policy` |
-| [docs/guide/](docs/guide/first-app.md) | Guides for people who build on Forgebase (first app) |
+| [docs/README.md](docs/README.md) | Index of all documentation (guides, blueprint, ADRs, records) and the project status |
+| [docs/guide/](docs/guide/first-app.md) | Guides for people who build on Forgebase and run it: [getting started](docs/guide/getting-started.md), [first app](docs/guide/first-app.md), [CLI](docs/guide/cli.md), [HTTP API](docs/guide/http-api.md), [desk](docs/guide/desk.md), [workflow and reports](docs/guide/workflow-and-reports.md), [operations](docs/guide/operations.md), [deploy](docs/guide/deploy.md) |
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records |
 | [docs/owner-decisions.md](docs/owner-decisions.md) | The owner's decisions, comments and way of thinking, with links to the detailed records; read before planning, keep current |
 
