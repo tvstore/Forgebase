@@ -69,7 +69,7 @@ Change DocTypes additively. Adding a field or a DocType is applied by `migrate`;
 
 A hook set implements `forgebase::DocTypeHooks` for a DocType and is registered with `.hooks("crm_note", NoteRules)`. The sample trims the title and rejects a blank one. Hooks receive the document and a `HookContext`, run inside the operation's transaction, and have **no database access**. They run before the framework's own validation, so a value may be missing or of another kind: look before you change. The order of the hooks in each operation is in [ADR 0009](../adr/0009-lifecycle-pipeline-and-hooks.md) and in the documentation of `DocTypeHooks` (`cargo doc -p forgebase --open`). A hook is tested without a database by calling it with `HookContext::new(..)`, as the sample test does.
 
-A DocType can also have an **approval workflow**: states and transitions with roles, written in the DocType file (`[workflow]`), and a `before_transition` hook for conditions. A transition needs a role of the transition and the right it stands for, and plain `submit` and `cancel` are refused on such a DocType. The short version is in the README ("Workflow") and the rules are in [ADR 0015](../adr/0015-workflow-states-and-transitions.md); the full guide section comes with M8.5.
+A DocType can also have an **approval workflow**: states and transitions with roles, written in the DocType file (`[workflow]`), and a `before_transition` hook for conditions. A transition needs a role of the transition and the right it stands for, and plain `submit` and `cancel` are refused on such a DocType. The full guide, with the `sales` example, is [workflow, saved views and reports](workflow-and-reports.md); the short version is in the README ("Workflow") and the rules are in [ADR 0015](../adr/0015-workflow-states-and-transitions.md).
 
 ## 5. Extend another app
 
@@ -315,7 +315,7 @@ error: invalid app setup:
 
 An unknown job name in `ctx.enqueue` is found at run time, not at startup (it is a string): it fails the **operation** that enqueued it when the job is written, with a message like ``unknown job `sales.log_order_evnt` (jobs are registered by the apps of the binary as `<app>.<job>`)``. A job of an app that the worker's binary does not contain stays `queued` until a binary that has it runs a worker.
 
-**Query reports.** An app can also define a read-only SQL report (`App::report`, with `Report`, `Param` and `Column`) that is run by the roles it names; the SQL is compiled in, its parameters are `$1..$n` and always bound, and `forgebase migrate` checks it against the database. Row-level rules do not apply inside a report. The design, the limits and what to watch for are in [ADR 0016](../adr/0016-query-reports-read-only-execution.md); the full guide section is part of M8.5.
+**Query reports.** An app can also define a read-only SQL report (`App::report`, with `Report`, `Param` and `Column`) that is run by the roles it names; the SQL is compiled in, its parameters are `$1..$n` and always bound, and `forgebase migrate` checks it against the database. Row-level rules do not apply inside a report. The guide with the `sales` report is [workflow, saved views and reports](workflow-and-reports.md); the design, the limits and what to watch for are in [ADR 0016](../adr/0016-query-reports-read-only-execution.md).
 
 Running your app for real (several sites, a reverse proxy, workers, upgrades, backups and restores) is in the [operations guide](operations.md).
 

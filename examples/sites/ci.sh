@@ -7,7 +7,10 @@
 #   1. two sites with different apps, reached by their Host, keep their users and DocTypes apart;
 #   2. an unknown host is 404;
 #   3. `site backup shop`, restored into the new empty database of `restore_check`, gives the same
-#      documents (and the same login).
+#      documents (and the same login);
+#   4. (M8.5) the approval workflow of `sales_order` and a shared saved view over HTTP: a Sales
+#      User sends an order for approval, an Administrator saves the view "Pending approval" for
+#      everyone, the Sales User sees it, filters with it, and cannot delete it.
 #
 # Needs: the binary built (cargo build --locked -p sales_extension), PostgreSQL 16 with a role
 # that has CREATEDB, the PostgreSQL client tools (pg_dump, pg_restore) of the server's major
@@ -135,6 +138,54 @@ diff "$work/shop.docs" "$work/restore_check.docs" || fail "the restored document
 # The restored site has the users of the backup: shop's password logs in on restore_check.
 [ "$(login restore.localhost "$shop_password")" = 200 ] || fail "login on restore_check"
 echo "ok: the restored database has the same documents and users"
+
+echo "== a workflow transition and a shared saved view on shop (M8.5)"
+# The Sales User bob works with an API token (no cookie and no CSRF token to carry around); the
+# Administrator ann does too. The tokens are kept in variables and never printed.
+printf '%s\n' "the password of bob" | "$bin" user create bob --site shop --role "Sales User"
+admin_token="$("$bin" token create ann --site shop)"
+bob_token="$("$bin" token create bob --site shop)"
+# call TOKEN METHOD PATH [JSON]: one request to shop. The body of the reply goes to
+# $work/reply.json and the HTTP status is printed.
+call() {
+  local args=(-s -o "$work/reply.json" -w '%{http_code}' -X "$2" -H "Host: shop.localhost" \
+    -H "Authorization: token $1")
+  if [ -n "${4:-}" ]; then args+=(-H 'Content-Type: application/json' -d "$4"); fi
+  curl "${args[@]}" "$base$3"
+}
+order="$(jq -r '.[0].name' "$work/shop.sales_order.list")"
+# `sales_order` has a workflow: plain submit is refused, the order moves by transitions. A Sales
+# User may send an order for approval ("Draft" -> "Pending Approval") ...
+[ "$(call "$bob_token" POST "/api/v1/resource/sales_order/$order/submit" '{"version":1}')" = 409 ] \
+  || fail "a plain submit was not refused"
+[ "$(jq -r .error.code "$work/reply.json")" = workflow_required ] || fail "the refusal is not workflow_required"
+[ "$(call "$bob_token" POST "/api/v1/resource/sales_order/$order/transition" \
+  '{"action":"Submit for Approval","version":1}')" = 200 ] || fail "bob could not send the order for approval"
+[ "$(jq -r .data.workflow_state "$work/reply.json")" = "Pending Approval" ] || fail "the order is not pending"
+# ... but not reject it: that is for a Sales Manager.
+[ "$(call "$bob_token" POST "/api/v1/resource/sales_order/$order/transition" \
+  '{"action":"Reject","version":2}')" = 403 ] || fail "bob could reject an order"
+
+# The Administrator saves a view for everyone: a shared view.
+view='{"label":"Pending approval","shared":true,"definition":{"filters":[{"field":"workflow_state","op":"=","value":"Pending Approval"}]}}'
+[ "$(call "$admin_token" POST /api/v1/views/sales_order "$view")" = 201 ] || fail "ann could not create the shared view"
+view_id="$(jq -r .data.id "$work/reply.json")"
+# A Sales User cannot create a shared view ...
+[ "$(call "$bob_token" POST /api/v1/views/sales_order "$view")" = 403 ] || fail "bob created a shared view"
+# ... sees the Administrator's view ...
+[ "$(call "$bob_token" GET /api/v1/views/sales_order)" = 200 ] || fail "bob could not list the views"
+[ "$(jq -r '[.data[] | select(.label == "Pending approval" and .shared)] | length' "$work/reply.json")" = 1 ] \
+  || fail "bob does not see the shared view"
+# ... can run its filter ...
+filters="$(jq -c '.data[] | select(.label == "Pending approval") | .definition.filters' "$work/reply.json")"
+code="$(curl -s -o "$work/reply.json" -w '%{http_code}' -G -H "Host: shop.localhost" \
+  -H "Authorization: token $bob_token" --data-urlencode "filters=$filters" "$base/api/v1/resource/sales_order")"
+[ "$code" = 200 ] || fail "the view's filter was refused ($code)"
+[ "$(jq -r '.data | length' "$work/reply.json")" = 1 ] || fail "the view does not show exactly the pending order"
+# ... and cannot delete it. Only the Administrator can.
+[ "$(call "$bob_token" DELETE "/api/v1/views/sales_order/$view_id?version=1")" = 403 ] || fail "bob deleted a shared view"
+[ "$(call "$admin_token" DELETE "/api/v1/views/sales_order/$view_id?version=1")" = 204 ] || fail "ann could not delete the shared view"
+echo "ok: a Sales User sent an order for approval, the Administrator's shared view is visible to bob and not his to delete"
 
 echo "== stop the server"
 kill "$server"
