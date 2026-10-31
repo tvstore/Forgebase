@@ -107,8 +107,19 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
             Err(e) => TlsError::InvalidUrl(e),
         });
     }
-    let (base, query) = match url.split_once('?') {
-        Some((base, query)) => (base, Some(query)),
+    // Find the query exactly where `tokio-postgres` does: the credentials end at the first `@`
+    // of the string, the authority and the path end at the first `?` after that. A `?` in a
+    // password is therefore not the start of the query.
+    let scheme_len = if lower.starts_with("postgresql://") {
+        13
+    } else {
+        11
+    };
+    let creds_end = url[scheme_len..]
+        .find('@')
+        .map_or(scheme_len, |at| scheme_len + at + 1);
+    let (base, query) = match url[creds_end..].find('?') {
+        Some(q) => (&url[..creds_end + q], Some(&url[creds_end + q + 1..])),
         None => (url, None),
     };
     let mut mode: Option<String> = None;
@@ -118,8 +129,10 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
         if param.is_empty() {
             continue;
         }
-        let (key, value) = param.split_once('=').unwrap_or((param, ""));
-        match key {
+        let (raw_key, value) = param.split_once('=').unwrap_or((param, ""));
+        // `tokio-postgres` decodes the key before it looks at it: so do we.
+        let key = percent_decode(raw_key)?;
+        match key.as_str() {
             "sslmode" => {
                 if mode.replace(percent_decode(value)?).is_some() {
                     return Err(err("the database URL sets `sslmode` more than once"));
@@ -132,7 +145,7 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
             }
             // `sslnegotiation` is a plain `tokio-postgres` option.
             "sslnegotiation" => kept.push(param),
-            k if k.starts_with("ssl") || k == "requiressl" => {
+            k if k.starts_with("ssl") || k.eq_ignore_ascii_case("requiressl") => {
                 return Err(err(format!(
                     "the database URL uses the TLS option `{k}`, which is not supported; \
                      supported are `sslmode` and `sslrootcert`"
@@ -171,6 +184,31 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
     if !kept.is_empty() {
         rest.push('?');
         rest.push_str(&kept.join("&"));
+    }
+    // Belt and braces: `tokio-postgres` must see the same TLS choice that we found. What is left
+    // of the URL must not set an `sslmode` of its own (it would be one that our scan missed), and
+    // the whole URL must give the `sslmode` that matches ours. Otherwise a URL that asks for TLS
+    // could connect without it.
+    if let Ok(left) = rest.parse::<Config>()
+        && left.get_ssl_mode() != SslMode::Prefer
+    {
+        return Err(err(
+            "the database URL has an `sslmode` that could not be read safely; \
+             check the URL (a `?`, `@` or `%` in the password must be percent-encoded)",
+        ));
+    }
+    if let Ok(whole) = url.parse::<Config>() {
+        let expected = match (&ssl, &mode) {
+            (Ssl::Verify(_), _) => SslMode::Require,
+            (Ssl::Disable, Some(_)) => SslMode::Disable,
+            (Ssl::Disable, None) => SslMode::Prefer,
+        };
+        if whole.get_ssl_mode() != expected {
+            return Err(err(
+                "the database URL has an `sslmode` that could not be read safely; \
+                 check the URL (a `?`, `@` or `%` in the password must be percent-encoded)",
+            ));
+        }
     }
     Ok((rest, ssl))
 }
@@ -377,6 +415,57 @@ mod tests {
             refused("postgres://u@h/db?sslmode=require&sslmode=disable").contains("more than once")
         );
         assert!(refused("host=h dbname=db sslmode=require").contains("must start with"));
+    }
+
+    #[test]
+    fn the_query_starts_after_the_credentials_like_in_tokio_postgres() {
+        // A raw `?` (or `#`, or a whole `?sslmode=disable`) in the password is not the query.
+        for (url, rest) in [
+            (
+                "postgres://u:a?b@h/db?sslmode=require",
+                "postgres://u:a?b@h/db",
+            ),
+            (
+                "postgres://u:a#b@h/db?sslmode=require",
+                "postgres://u:a#b@h/db",
+            ),
+            (
+                "postgresql://u:x?sslmode=disable@h/db?sslmode=require",
+                "postgresql://u:x?sslmode=disable@h/db",
+            ),
+            (
+                "postgres://u:a?b@h/db?connect_timeout=5&sslmode=require",
+                "postgres://u:a?b@h/db?connect_timeout=5",
+            ),
+        ] {
+            let (kept, ssl) = parsed(url);
+            assert_eq!(kept, rest, "{url}");
+            assert_eq!(ssl, Ssl::Verify(RootCerts::System), "{url}");
+            // And what is left parses, with the password intact and no TLS choice of its own.
+            let config: Config = kept.parse().expect(url);
+            assert_eq!(config.get_ssl_mode(), SslMode::Prefer, "{url}");
+        }
+        // The same password with no TLS asked for stays plain.
+        assert_eq!(parsed("postgres://u:a?b@h/db").1, Ssl::Disable);
+    }
+
+    #[test]
+    fn encoded_keys_are_decoded_before_they_are_matched() {
+        assert_eq!(
+            parsed("postgres://u@h/db?%73slmode=require").1,
+            Ssl::Verify(RootCerts::System)
+        );
+        assert_eq!(
+            parsed("postgres://u@h/db?sslmode=require&%73slrootcert=%2Fca.pem").1,
+            Ssl::Verify(RootCerts::File("/ca.pem".to_owned()))
+        );
+        assert!(refused("postgres://u@h/db?%73slcert=x").contains("`sslcert`"));
+        assert!(refused("postgres://u@h/db?sslmode=require&%73slkey=x").contains("`sslkey`"));
+        assert!(
+            refused("postgres://u@h/db?sslmode=disable&%73slmode=require")
+                .contains("more than once")
+        );
+        assert!(refused("postgres://u:a?b@h/db?%73slcert=x").contains("`sslcert`"));
     }
 
     #[test]

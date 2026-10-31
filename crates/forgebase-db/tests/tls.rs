@@ -327,3 +327,30 @@ async fn scram_channel_binding_works_over_tls() {
     let pool = connect(&url).await.expect("channel_binding=require");
     assert!(uses_ssl(&pool).await);
 }
+
+/// The role `qmark` (password `p?w`, a raw `?`) is accepted over TLS only (`pg-tls.sh`). The `?`
+/// must not hide `sslmode` from the parser: that once connected without TLS.
+#[tokio::test]
+async fn a_raw_question_mark_in_the_password_does_not_hide_sslmode() {
+    let Some(tls) = tls() else { return };
+    let user = |url: String| url.replacen("forgebase:forgebase", "qmark:p?w", 1);
+    for url in [
+        user(tls.verified("require")),
+        // The key written with a percent-encoded letter.
+        user(tls.url(&format!(
+            "%73slmode=require&sslrootcert={}",
+            encode(&tls.ca)
+        ))),
+    ] {
+        let pool = connect(&url).await.expect("a TLS connection");
+        assert!(uses_ssl(&pool).await);
+    }
+    // Without TLS the server rejects the role: the role really is TLS only.
+    assert!(connect(&user(tls.url("sslmode=disable"))).await.is_err());
+    // An encoded TLS option is refused by name, not ignored.
+    let message = connect(&user(tls.url("sslmode=require&%73slcert=/x.pem")))
+        .await
+        .expect_err("sslcert")
+        .to_string();
+    assert!(message.contains("`sslcert`"), "{message}");
+}

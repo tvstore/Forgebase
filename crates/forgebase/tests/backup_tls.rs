@@ -14,16 +14,20 @@ use forgebase_db::{connect, quote_ident};
 
 const DOCTYPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/quickstart");
 
-fn settings() -> Option<(String, String)> {
+fn settings() -> Option<(String, String, String)> {
     let get = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    match (get("FORGEBASE_TEST_TLS_URL"), get("FORGEBASE_TEST_TLS_CA")) {
-        (Some(url), Some(ca)) => Some((url, ca)),
+    match (
+        get("FORGEBASE_TEST_TLS_URL"),
+        get("FORGEBASE_TEST_TLS_CA"),
+        get("FORGEBASE_TEST_TLS_WRONG_CA"),
+    ) {
+        (Some(url), Some(ca), Some(wrong)) => Some((url, ca, wrong)),
         _ if std::env::var("CI").is_ok_and(|v| v == "true") => panic!(
-            "CI=true but FORGEBASE_TEST_TLS_URL and FORGEBASE_TEST_TLS_CA are not set: run \
+            "CI=true but FORGEBASE_TEST_TLS_URL, _CA and _WRONG_CA are not all set: run \
              .github/ci/pg-tls.sh up DIR first. These tests are never skipped in CI."
         ),
         _ => {
-            eprintln!("SKIPPED: FORGEBASE_TEST_TLS_URL and FORGEBASE_TEST_TLS_CA are not set");
+            eprintln!("SKIPPED: FORGEBASE_TEST_TLS_* are not set");
             None
         }
     }
@@ -85,7 +89,12 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn site_create_backup_and_restore_work_over_tls() {
-    let Some((url, ca)) = settings() else { return };
+    let Some((admin_url, ca, wrong_ca)) = settings() else {
+        return;
+    };
+    // The role `tls_only` is accepted over TLS only (see .github/ci/pg-tls.sh), so the dump and the
+    // restore below prove that pg_dump and pg_restore used TLS.
+    let url = admin_url.replacen("forgebase:forgebase", "tls_only:tls-only", 1);
     let id = std::process::id();
     let names = [
         format!("fb_test_tls_src_{id}"),
@@ -101,7 +110,7 @@ fn site_create_backup_and_restore_work_over_tls() {
     let dir = std::env::temp_dir().join(format!("fb_backup_tls_{id}"));
     std::fs::create_dir_all(&dir).expect("temporary directory");
     let world = World {
-        maintenance_url: format!("{url}?{query}"),
+        maintenance_url: format!("{admin_url}?{query}"),
         names,
         dir: dir.clone(),
     };
@@ -161,6 +170,25 @@ fn site_create_backup_and_restore_work_over_tls() {
     assert!(before.contains("a@example.com"), "{before}");
 
     // pg_dump and pg_restore verify the server with PGSSLMODE=verify-full and PGSSLROOTCERT.
+    // pg_dump with the environment of a wrong-CA URL fails on the certificate, not on the login.
+    let bin = std::env::var_os("FORGEBASE_PG_BIN").map(PathBuf::from);
+    let pg_dump = bin.map_or_else(|| PathBuf::from("pg_dump"), |d| d.join("pg_dump"));
+    let wrong_url = format!(
+        "{}?sslmode=require&sslrootcert={}",
+        url.replacen("/postgres", &format!("/{}", world.names[0]), 1),
+        encode(&wrong_ca)
+    );
+    let mut dump = Command::new(pg_dump);
+    dump.env_clear()
+        .args(["--format=custom", "--file=/dev/null"]);
+    for (name, value) in forgebase_db::pg_environment(&wrong_url).expect("environment") {
+        dump.env(name, value);
+    }
+    let output = dump.output().expect("run pg_dump");
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(message.contains("certificate"), "{message}");
+
     let file = dir.join("src.dump");
     let file_arg = file.to_str().expect("utf-8 path");
     let out = ok(&["site", "backup", "src", "--out", file_arg]);

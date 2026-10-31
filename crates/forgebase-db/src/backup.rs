@@ -265,6 +265,30 @@ mod tests {
     }
 
     #[test]
+    fn tls_is_found_behind_a_raw_question_mark_and_an_encoded_key() {
+        for url in [
+            "postgres://u:a?b@h/shop?sslmode=require",
+            "postgres://u:x?sslmode=disable@h/shop?sslmode=require",
+            "postgres://u@h/shop?%73slmode=require",
+        ] {
+            let env = env_of(url);
+            assert!(
+                env.contains(&("PGSSLMODE", "verify-full".to_owned())),
+                "{url}"
+            );
+        }
+        let env = env_of("postgres://u:a?b@h/shop?sslmode=require");
+        assert!(env.contains(&("PGPASSWORD", "a?b".to_owned())));
+        let message = pg_environment("postgres://u:pw@h/shop?%73slcert=x")
+            .expect_err("sslcert")
+            .to_string();
+        assert!(
+            message.contains("`sslcert`") && !message.contains("pw"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn unsupported_options_are_errors_that_name_the_option_and_not_the_value() {
         for (url, option) in [
             ("postgres://u:pw@h1,h2/db", "host (more than one)"),

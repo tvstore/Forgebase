@@ -139,7 +139,7 @@ pub async fn connect_sized(database_url: &str, max_size: Option<usize>) -> Resul
     }
     let pool = builder
         .build()
-        .map_err(|e| DbError::Tls(format!("cannot create the connection pool: {e}")))?;
+        .map_err(deadpool_postgres::CreatePoolError::Build)?;
     drop(pool.get().await?);
     Ok(pool)
 }

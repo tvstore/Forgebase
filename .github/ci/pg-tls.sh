@@ -13,6 +13,10 @@
 #   FORGEBASE_TEST_TLS_URL       postgres://forgebase:forgebase@localhost:5433/postgres
 #   FORGEBASE_TEST_TLS_CA        DIR/ca.pem        (signs the server certificate)
 #   FORGEBASE_TEST_TLS_WRONG_CA  DIR/wrong-ca.pem  (signs nothing)
+# Besides the superuser `forgebase`, the server has two roles that pg_hba.conf lets in over TLS
+# only (a connection without TLS is rejected for them), so a test that uses one proves TLS:
+#   tls_only (password tls-only, CREATEDB)   the backup test: pg_dump and pg_restore must use TLS
+#   qmark    (password p?w, a raw `?`)        the test that a `?` in the password hides no parameter
 # Needs openssl and Docker. The credentials are throwaway; the keys never leave DIR.
 set -euo pipefail
 
@@ -55,6 +59,17 @@ openssl x509 -req -in "$dir/server.csr" -CA "$dir/ca.pem" -CAkey "$dir/ca.key" -
 chmod 0644 "$dir"/*.pem
 chmod 0600 "$dir"/*.key
 
+cat > "$dir/roles.sh" <<'ROLES'
+# Sourced by the image's entrypoint while it initialises the database (as the postgres user).
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<'SQL'
+CREATE ROLE tls_only LOGIN CREATEDB PASSWORD 'tls-only';
+CREATE ROLE qmark LOGIN CREATEDB PASSWORD 'p?w';
+SQL
+{ echo "hostnossl all tls_only,qmark all reject"; cat "$PGDATA/pg_hba.conf"; } > /tmp/pg_hba.new
+cat /tmp/pg_hba.new > "$PGDATA/pg_hba.conf"
+ROLES
+chmod 0644 "$dir/roles.sh"
+
 docker rm -f "$name" > /dev/null 2>&1 || true
 # The server key must belong to the postgres user and have mode 0600, so the container copies it
 # (as root) before it starts the normal entrypoint. The mount is read-only.
@@ -62,6 +77,7 @@ docker run -d --name "$name" \
   -e POSTGRES_USER=forgebase -e POSTGRES_PASSWORD=forgebase \
   -p "127.0.0.1:$port:5432" \
   -v "$dir:/tls-src:ro" \
+  -v "$dir/roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro" \
   --entrypoint bash "$image" -c '
     set -e
     install -o postgres -g postgres -m 0600 /tls-src/server.key /var/lib/postgresql/server.key
