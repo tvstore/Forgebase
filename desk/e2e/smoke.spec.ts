@@ -878,13 +878,31 @@ test('the Summary panel counts by status, follows the filters and a click on a g
  * What a keyboard user sees on the focused element: an outline of at least 2 px in a visible colour
  * (not transparent, alpha of at least 0.5, and not white unless the control is on the navy top bar:
  * a white ring on a white page is no indicator), or a box shadow.
+ *
+ * `getComputedStyle` can return `oklab()`, `color-mix()` or another modern colour syntax, which
+ * cannot be read as numbers. The colour is therefore painted on a 1x1 canvas and the pixel is read
+ * back: the browser converts any colour it understands to sRGB. A colour the browser cannot parse
+ * would leave the canvas colour unchanged, which the sentinel detects (the test then fails loudly
+ * instead of passing on a wrong reading).
  */
 async function focusIndicator(target: Locator): Promise<{ outline: boolean; shadow: boolean; text: string }> {
   return target.evaluate((el) => {
     const style = getComputedStyle(el);
-    // `rgb(r, g, b)` or `rgba(r, g, b, a)` (also `rgb(r g b / a)`): getComputedStyle gives one of these.
-    const parts = (style.outlineColor.match(/[\d.]+/g) ?? []).map(Number);
-    const [r = 0, g = 0, b = 0, a = 1] = parts;
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('no 2d canvas to normalise the outline colour');
+    const pixel = (color: string): [number, number, number, number] => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = '#010203'; // sentinel: an unparsable colour leaves it in place
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+      if (r === 1 && g === 2 && b === 3 && a === 255) throw new Error(`cannot read the colour ${color}`);
+      return [r, g, b, a / 255];
+    };
+    const [r, g, b, a] = pixel(style.outlineColor);
     const white = r >= 250 && g >= 250 && b >= 250;
     const onNavy = el.closest('.topbar') !== null;
     const visible = a >= 0.5 && (!white || onNavy);
@@ -892,6 +910,23 @@ async function focusIndicator(target: Locator): Promise<{ outline: boolean; shad
     return { outline, shadow: style.boxShadow !== 'none', text: el.tagName + (el.getAttribute('aria-label') ?? el.textContent ?? '').slice(0, 30) };
   });
 }
+
+test('the focus indicator check reads oklab() and color-mix() colours and catches a white ring', async ({ page }) => {
+  const outline = async (color: string): Promise<boolean> => {
+    await page.setContent(`<button id="b" style="outline: 3px solid ${color}; background: #fff">x</button>`);
+    return (await focusIndicator(page.locator('#b'))).outline;
+  };
+  // White in the modern syntaxes is no indicator on a white page; a dark colour is one.
+  expect(await outline('oklab(1 0 0)')).toBe(false);
+  expect(await outline('color-mix(in srgb, white 100%, white)')).toBe(false);
+  expect(await outline('color-mix(in oklab, white, white)')).toBe(false);
+  expect(await outline('rgb(255 255 255)')).toBe(false);
+  expect(await outline('oklab(0.3 0 0)')).toBe(true);
+  expect(await outline('color-mix(in oklab, #0b2545 80%, #0b2545)')).toBe(true);
+  expect(await outline('rgb(11 37 69)')).toBe(true);
+  // Half transparent (alpha 0.4) is too faint.
+  expect(await outline('oklab(0.3 0 0 / 0.4)')).toBe(false);
+});
 
 /**
  * Walks forward with the Tab key until each target (in page order) has the focus, and asserts that

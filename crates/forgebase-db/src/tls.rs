@@ -108,8 +108,9 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
         });
     }
     // Find the query exactly where `tokio-postgres` does: the credentials end at the first `@`
-    // of the string, the authority and the path end at the first `?` after that. A `?` in a
-    // password is therefore not the start of the query.
+    // of the string, the authority and the path end at the first `?` after that. A raw `/`, `?`
+    // or `#` before that `@` is refused below, so the credentials never hide the start of the
+    // query.
     let scheme_len = if lower.starts_with("postgresql://") {
         13
     } else {
@@ -207,7 +208,7 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
     {
         return Err(err(
             "the database URL has an `sslmode` that could not be read safely; \
-             check the URL (a `?`, `@` or `%` in the password must be percent-encoded)",
+             check the URL (a `/`, `?`, `#`, `@` or `%` in the password must be percent-encoded)",
         ));
     }
     if let Ok(whole) = url.parse::<Config>() {
@@ -219,7 +220,7 @@ pub(crate) fn parse(url: &str) -> Result<(String, Ssl), TlsError> {
         if whole.get_ssl_mode() != expected {
             return Err(err(
                 "the database URL has an `sslmode` that could not be read safely; \
-                 check the URL (a `?`, `@` or `%` in the password must be percent-encoded)",
+                 check the URL (a `/`, `?`, `#`, `@` or `%` in the password must be percent-encoded)",
             ));
         }
     }
@@ -262,17 +263,7 @@ pub(crate) fn prepare(url: &str) -> Result<(Config, MakeRustlsConnect), TlsError
         }
         Ssl::Verify(source) => {
             config.ssl_mode(SslMode::Require);
-            if config.get_hosts().is_empty() {
-                return Err(err("TLS needs a host name in the database URL"));
-            }
-            #[cfg(unix)]
-            if config
-                .get_hosts()
-                .iter()
-                .any(|h| matches!(h, Host::Unix(_)))
-            {
-                return Err(err("TLS is not supported over a Unix socket host"));
-            }
+            check_tls_host(&config)?;
             load_roots(source)?
         }
     };
@@ -283,6 +274,24 @@ pub(crate) fn prepare(url: &str) -> Result<(Config, MakeRustlsConnect), TlsError
         .with_root_certificates(roots)
         .with_no_client_auth();
     Ok((config, MakeRustlsConnect::new(client)))
+}
+
+/// TLS needs a host name to verify, and is not offered over a Unix socket. Used for the
+/// connections of this crate and for `pg_environment`, so `pg_dump` and `pg_restore` refuse the
+/// same URLs.
+pub(crate) fn check_tls_host(config: &Config) -> Result<(), TlsError> {
+    if config.get_hosts().is_empty() {
+        return Err(err("TLS needs a host name in the database URL"));
+    }
+    #[cfg(unix)]
+    if config
+        .get_hosts()
+        .iter()
+        .any(|h| matches!(h, Host::Unix(_)))
+    {
+        return Err(err("TLS is not supported over a Unix socket host"));
+    }
+    Ok(())
 }
 
 fn load_roots(source: &RootCerts) -> Result<RootCertStore, TlsError> {

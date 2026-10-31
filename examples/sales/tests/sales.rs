@@ -670,27 +670,73 @@ async fn a_rejected_order_is_a_draft_again_and_editable() {
     let name = draft(&env, None, two_items()).await;
     transition(&env.user, &name, "Submit for Approval", 1).await;
 
-    // While it waits for approval only a Sales Manager may edit it (`edit_roles`).
+    // While it waits for approval only a Sales Manager may edit it (`edit_roles`): a Sales User is
+    // refused, for the remarks and for the items alike.
     let edit = json!({"version": 2, "data": {"remarks": "ring me"}});
     let denied = env
         .user
         .patch(&format!("{ORDERS}/{name}"), edit.clone())
         .await;
     assert_eq!(denied.status, 403, "{:?}", denied.body);
+    assert_eq!(denied.error_code(), Some("permission_denied"));
+    let new_items = json!({"version": 2, "data": {
+        "items": [{"description": "Cheaper", "qty": 1, "rate": "1.00"}]
+    }});
+    let denied = env.user.patch(&format!("{ORDERS}/{name}"), new_items).await;
+    assert_eq!(denied.status, 403, "{:?}", denied.body);
+    assert_eq!(denied.error_code(), Some("permission_denied"));
+
+    // A Sales Manager may edit it (version 2 to 3).
+    let note = json!({"version": 2, "data": {"remarks": "checked by the manager"}});
+    let edited = env.manager.patch(&format!("{ORDERS}/{name}"), note).await;
+    assert_eq!(edited.status, 200, "{:?}", edited.body);
+    assert_eq!(edited.data()["remarks"], "checked by the manager");
+    assert_eq!(edited.data()["workflow_state"], "Pending Approval");
 
     // Only a Sales Manager rejects.
-    let denied = transition(&env.user, &name, "Reject", 2).await;
+    let denied = transition(&env.user, &name, "Reject", 3).await;
     assert_eq!(denied.status, 403, "{:?}", denied.body);
-    let rejected = transition(&env.manager, &name, "Reject", 2).await;
+    assert_eq!(denied.error_code(), Some("permission_denied"));
+    let rejected = transition(&env.manager, &name, "Reject", 3).await;
     assert_eq!(rejected.status, 200, "{:?}", rejected.body);
     assert_eq!(rejected.data()["workflow_state"], "Draft");
     assert_eq!(rejected.data()["docstatus"], 0);
 
     // Back in Draft the Sales User edits it again.
-    let edit = json!({"version": 3, "data": {"remarks": "ring me"}});
+    let edit = json!({"version": 4, "data": {"remarks": "ring me"}});
     let updated = env.user.patch(&format!("{ORDERS}/{name}"), edit).await;
     assert_eq!(updated.status, 200, "{:?}", updated.body);
     assert_eq!(updated.data()["remarks"], "ring me");
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_order_without_a_total_cannot_be_approved_with_the_limited_action() {
+    let env = env().await;
+    customer(&env.manager).await;
+    let name = draft(&env, None, two_items()).await;
+    let sent = transition(&env.user, &name, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    // `validate` always computes the total; an order without one was changed outside the
+    // framework (here: in SQL).
+    env.db
+        .exec(&format!(
+            "UPDATE doc_sales_order SET total = NULL WHERE name = '{name}'"
+        ))
+        .await;
+    let vetoed = transition(&env.user, &name, "Approve", 2).await;
+    assert_eq!(vetoed.status, 422, "{:?}", vetoed.body);
+    assert_eq!(vetoed.error_code(), Some("hook_rejected"));
+    assert!(
+        vetoed
+            .error_message()
+            .expect("message")
+            .contains("the order has no total"),
+        "{:?}",
+        vetoed.body
+    );
+    let read = env.user.get(&format!("{ORDERS}/{name}")).await;
+    assert_eq!(read.data()["workflow_state"], "Pending Approval");
     env.db.cleanup().await;
 }
 
@@ -763,7 +809,8 @@ async fn sales_by_customer_counts_the_approved_orders_of_the_period() {
     // Not counted: a draft, a pending order, a cancelled order, an order outside the period.
     order_of(&env, "ada@example.com", "2026-10-06", "100.00", false).await;
     let pending = order_of(&env, "ada@example.com", "2026-10-07", "100.00", false).await;
-    transition(&env.user, &pending, "Submit for Approval", 1).await;
+    let sent = transition(&env.user, &pending, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
     let cancelled = order_of(&env, "ada@example.com", "2026-10-08", "100.00", true).await;
     let reply = transition(&env.manager, &cancelled, "Cancel", 3).await;
     assert_eq!(reply.status, 200, "{:?}", reply.body);

@@ -13,7 +13,7 @@ use forgebase_core::report::{
     ColumnKind, DEFAULT_MAX_ROWS, DEFAULT_TIMEOUT, ParamKind, ReportColumn, ReportDef, ReportParam,
 };
 use forgebase_core::value::Value;
-use forgebase_db::{DbError, check_reports, run_report};
+use forgebase_db::{DbError, ReportConnection, check_reports, connect_sized, run_report};
 use rust_decimal::Decimal;
 use time::{Date, Month};
 
@@ -286,6 +286,100 @@ async fn a_statement_that_is_not_a_query_is_refused_before_it_runs() {
             "{error:?}"
         );
         assert!(!error.to_string().contains("DELETE"), "{error}");
+    }
+    items_unchanged(&db).await;
+}
+
+#[tokio::test]
+async fn a_multi_statement_report_is_refused_and_changes_nothing() {
+    // The extended protocol prepares one statement: a second one riding along never runs.
+    let db = items().await;
+    let sql = "SELECT 1; DELETE FROM items";
+    let report = report(sql, vec![], vec![("n", ColumnKind::Int)]);
+    let error = run(&db, &report, &manager(), &BTreeMap::new())
+        .await
+        .expect_err("refused");
+    let message = error.to_string();
+    assert!(message.contains("multiple commands"), "{message}");
+    // The message never shows the SQL.
+    assert!(
+        !message.contains("DELETE") && !message.contains("items"),
+        "{message}"
+    );
+    items_unchanged(&db).await;
+    // The check at migrate says so, naming the report and not the SQL.
+    let found = problems(&db, &[&report]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("report `t.r`: the SQL does not prepare:"),
+        "{found:?}"
+    );
+    assert!(!found[0].contains("DELETE"), "{found:?}");
+    items_unchanged(&db).await;
+}
+
+#[tokio::test]
+async fn a_report_connection_is_closed_so_session_state_cannot_leak_to_the_next_checkout() {
+    // A pool of one connection makes the next checkout deterministic: it is the same pool, and
+    // a leaked setting or lock would be on whatever connection it hands out.
+    let db = items().await;
+    let pool = connect_sized(&db.url(), Some(1))
+        .await
+        .expect("pool of one");
+    // Session-level state, which only the connection that ran the report would keep.
+    let leaky = report(
+        "SELECT 1 AS n FROM (SELECT set_config('search_path', 'pg_catalog', false)) c, \
+         (SELECT pg_advisory_lock(4242)) l",
+        vec![],
+        vec![("n", ColumnKind::Int)],
+    );
+    {
+        let mut connection = ReportConnection::get(&pool).await.expect("connection");
+        let result = run_report(&mut connection, &leaky, &manager(), &BTreeMap::new())
+            .await
+            .expect("runs");
+        assert_eq!(result.rows, vec![vec![Value::Int(1)]]);
+        // The advisory lock really is held by this connection (a session lock is not released by
+        // the rollback that ends the report's transaction), so the check below proves something.
+        // (A session-level `set_config` is undone by that rollback already.)
+        let held: i64 = connection
+            .query_one(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 \
+                 AND objid = 4242 AND pid = pg_backend_pid()",
+                &[],
+            )
+            .await
+            .expect("locks")
+            .get(0);
+        assert_eq!(held, 1);
+    }
+    // The next checkout is a new connection: the default setting, and no advisory lock held.
+    let client = pool.get().await.expect("next checkout");
+    let seen: String = client
+        .query_one("SELECT current_setting('search_path')", &[])
+        .await
+        .expect("setting")
+        .get(0);
+    assert!(seen.contains("public"), "{seen}");
+    // The server notices the closed connection a moment later: poll for the lock to go.
+    let started = Instant::now();
+    loop {
+        let locks: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 AND objid = 4242",
+                &[],
+            )
+            .await
+            .expect("locks")
+            .get(0);
+        if locks == 0 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the advisory lock of the report is still held"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     items_unchanged(&db).await;
 }

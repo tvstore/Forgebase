@@ -95,7 +95,7 @@ pub use list::{
 };
 pub use migrate::{MIGRATIONS, Migration, migrate_framework};
 pub use plan::{Conflict, Step, Warning};
-pub use reports::{ReportResult, check_reports, report_link_titles, run_report};
+pub use reports::{ReportConnection, ReportResult, check_reports, report_link_titles, run_report};
 pub use summary::{AggregateFn, Group, MAX_AGGREGATES, MAX_GROUPS, Summary, SummaryQuery, summary};
 pub use sync::{SyncOptions, SyncReport, sync};
 pub use tokio_postgres::{Client, GenericClient, SimpleQueryMessage, Transaction};

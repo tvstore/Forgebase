@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use forgebase_core::permission::can_run_report;
 use forgebase_core::report::{ColumnKind, ParamKind, ReportColumn, ReportDef, ReportParam};
 use forgebase_core::value::Value;
+use forgebase_db::ReportConnection;
 use serde_json::{Map, Value as Json, json};
 
 use crate::AppState;
@@ -142,7 +143,9 @@ pub async fn run(
     if !problems.is_empty() {
         return Err(ApiError::validation(problems));
     }
-    let mut client = state.client().await?;
+    // A connection that is closed afterwards, not pooled: the report's SQL may leave session
+    // state behind (`ReportConnection`).
+    let mut client = ReportConnection::get(state.pool()).await?;
     let result = forgebase_db::run_report(&mut client, report, &caller, &values).await?;
     let mut rows = Vec::with_capacity(result.rows.len());
     for row in &result.rows {
@@ -163,7 +166,7 @@ pub async fn run(
         // The connection of this request, as in `with_link_titles`: a second one could never be
         // had when every pool slot is held by a request like this.
         let link_titles = forgebase_db::report_link_titles(
-            &**client,
+            &*client,
             state.registry(),
             &caller,
             report,

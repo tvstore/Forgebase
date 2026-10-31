@@ -47,7 +47,7 @@ type = "text"
 # A submitted order is locked, except for the fields marked allow_on_submit.
 allow_on_submit = true
 
-# A Sales User works on orders and submits them; a Sales Manager can also delete, cancel and amend.
+# A Sales User works on orders and takes them through the workflow transitions (see [workflow] below); a Sales Manager can also delete, cancel and amend.
 # (Child rows follow the parent: `sales_order_item` has no rules of its own.)
 [[permissions]]
 role = "Sales User"
