@@ -94,6 +94,38 @@ type = "link"
 target = "party"
 "#;
 
+/// A workflow DocType with the export right, for the matrix of user permissions (M10.3): `Agent`
+/// reads, exports and takes the transition "Close".
+const AGENT_CASE: &str = r#"
+name = "agent_case"
+label = "Agent Case"
+[[fields]]
+name = "title"
+type = "data"
+required = true
+[[fields]]
+name = "customer"
+type = "link"
+target = "party"
+[[permissions]]
+role = "Agent"
+read = true
+write = true
+export = true
+[workflow]
+[[workflow.states]]
+name = "Open"
+docstatus = 0
+[[workflow.states]]
+name = "Closed"
+docstatus = 0
+[[workflow.transitions]]
+action = "Close"
+from = "Open"
+to = "Closed"
+roles = ["Agent"]
+"#;
+
 /// A Link target: `Reader` reads all, `OwnReader` reads own, `PartyAdmin` reads and deletes all.
 const PARTY: &str = r#"
 name = "party"
@@ -156,7 +188,15 @@ async fn setup_with(reg: Registry) -> (TestDb, Registry) {
 }
 
 async fn setup() -> (TestDb, Registry) {
-    setup_with(registry(&[TICKET, TICKET_LINE, PARTY, MEMO, SECRET])).await
+    setup_with(registry(&[
+        TICKET,
+        TICKET_LINE,
+        PARTY,
+        MEMO,
+        SECRET,
+        AGENT_CASE,
+    ]))
+    .await
 }
 
 fn user(name: &str, roles: &[&str]) -> Caller {
@@ -1632,6 +1672,91 @@ async fn the_matrix_with_user_permissions() {
                     }
                 }
             }
+        }
+    }
+
+    // A workflow transition and the export, on cases with an allowed, an empty and a hidden Link:
+    // the hidden one is `NotFound` for the transition and absent from the export, for the
+    // restricted user only.
+    let agent = user("rita", &["Agent"])
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+    let agent_plain = user("pat", &["Agent"]);
+    let agent_admin = user("root", &[ADMINISTRATOR])
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+    for (customer, visible) in tickets {
+        let mut client = db.pool.get().await.unwrap();
+        let client = &mut **client;
+        let mut d = doc(&[("title", text(customer.unwrap_or("none")))]);
+        if let Some(customer) = customer {
+            d.values.insert("customer".into(), text(customer));
+        }
+        let made = insert(client, &reg, "agent_case", d, &sys()).await.unwrap();
+        for (who, expect_visible, label) in [
+            (&agent, visible, "restricted"),
+            (&agent_plain, true, "unrestricted"),
+            (&agent_admin, true, "administrator"),
+            (&sys(), true, "system"),
+        ] {
+            // The export lists the case only to a caller who sees it.
+            let tx = forgebase_db::begin_export(client).await.unwrap();
+            let query = forgebase_db::ExportQuery {
+                doctype: "agent_case",
+                filters: &[forgebase_db::Filter::new(
+                    "name",
+                    forgebase_db::FilterOp::Eq(text(&made.name)),
+                )],
+                sort: &[],
+                limit: 10,
+                with_tables: false,
+            };
+            let export = forgebase_db::Export::start(&tx, &reg, who, &query)
+                .await
+                .unwrap();
+            assert_eq!(
+                export.count() == 1,
+                expect_visible,
+                "export of a case linked to {customer:?} by {label}"
+            );
+            drop(export);
+            drop(tx);
+            // A stale version is `NotFound` for a hidden case, before the version is compared.
+            let stale = forgebase_db::transition(
+                client,
+                &reg,
+                "agent_case",
+                &made.name,
+                "Close",
+                made.version + 7,
+                who,
+            )
+            .await;
+            match (stale, expect_visible) {
+                (Err(DbError::NotFound { .. }), false) | (Err(DbError::Conflict { .. }), true) => {}
+                (other, _) => panic!("stale transition on {customer:?} by {label}: {other:?}"),
+            }
+            let transitions =
+                forgebase_db::available_transitions(client, &reg, "agent_case", &made.name, who)
+                    .await;
+            assert_eq!(
+                transitions.is_ok(),
+                expect_visible,
+                "{label}: {transitions:?}"
+            );
+        }
+        // The real transition: refused for the restricted user on a hidden case, taken otherwise.
+        let moved = forgebase_db::transition(
+            client,
+            &reg,
+            "agent_case",
+            &made.name,
+            "Close",
+            made.version,
+            &agent,
+        )
+        .await;
+        match (moved, visible) {
+            (Ok(_), true) | (Err(DbError::NotFound { .. }), false) => {}
+            (other, _) => panic!("transition on {customer:?}: {other:?}"),
         }
     }
 

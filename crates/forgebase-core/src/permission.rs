@@ -341,6 +341,15 @@ impl RowScope<'_> {
     }
 }
 
+/// Whether the caller may make **new** documents of `doctype` (create, and amend, which makes
+/// a new document) as far as user permissions go: a user restricted on the DocType itself may
+/// not, because the new name could not be checked against the allowed names and the user could
+/// not see the result (ADR 0025). The role right is [`evaluate`]'s business; `forgebase-db`
+/// and the metadata API both ask this one function.
+pub fn may_make_documents(doctype: &DocType, caller: &Caller) -> bool {
+    row_scope(doctype, caller).names.is_none()
+}
+
 /// Decides which documents of `doctype` `caller` may see because of their user permissions
 /// (M10.3, ADR 0025). Pure, like [`evaluate`].
 ///

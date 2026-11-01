@@ -725,11 +725,8 @@ fn read_user_password(command: &UserCommand) -> Result<String, CliError> {
 /// Runs a `user` command with the `password` already read from standard input; it is never
 /// printed.
 async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Result<(), CliError> {
-    if let UserCommand::Permission(command) = command {
-        return user_permission(site, &site.registry, command).await;
-    }
-    let mut client = site.pool.get().await.map_err(DbError::from)?;
-    let client = &mut **client;
+    let mut conn = site.pool.get().await.map_err(DbError::from)?;
+    let client = &mut **conn;
     let text = match command {
         UserCommand::Create { username, roles } => {
             let roles: Vec<&str> = roles.iter().map(String::as_str).collect();
@@ -762,7 +759,11 @@ async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Resul
             auth::set_enabled(client, &username, true).await?;
             format!("enabled user {username}\n")
         }
-        UserCommand::Permission(_) => unreachable!("handled above"),
+        UserCommand::Permission(command) => {
+            // It takes its own connection: give this one back first.
+            drop(conn);
+            return user_permission(site, &site.registry, command).await;
+        }
     };
     write_stdout(&text)
 }

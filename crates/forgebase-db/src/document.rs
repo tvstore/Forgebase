@@ -75,7 +75,8 @@ use forgebase_core::hooks::{DocTypeHooks, EnqueuedJobs, HookContext, HookError, 
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry, WORKFLOW_COLUMN};
 use forgebase_core::permission::{
-    Access, Caller, FieldAccess, Right, evaluate, field_access, readable_doctype, row_scope,
+    Access, Caller, FieldAccess, Right, evaluate, field_access, may_make_documents,
+    readable_doctype, row_scope,
 };
 use forgebase_core::series::SeriesPattern;
 use forgebase_core::value::Value;
@@ -1550,7 +1551,7 @@ fn refuse_restricted_create(
     caller: &Caller,
     right: Right,
 ) -> Result<(), DbError> {
-    if row_scope(doctype, caller).names.is_some() {
+    if !may_make_documents(doctype, caller) {
         return Err(permission_denied(doctype, right));
     }
     Ok(())
