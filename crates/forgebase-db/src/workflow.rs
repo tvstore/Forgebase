@@ -17,10 +17,11 @@ use tokio_postgres::{Client, GenericClient};
 
 use crate::document::{
     Pipeline, StoredDocument, Target, as_document, cancel_tail, check_actor, check_not_locked,
-    document_doctype, get, lock_current, read_grant, require_status, run_hooks, submit_tail,
-    update_tail, write_jobs, write_webhooks,
+    document_doctype, get, levels_of, lock_current, read_grant, require_status, run_hooks,
+    submit_tail, update_tail, write_jobs, write_webhooks,
 };
 use crate::error::DbError;
+use crate::field_levels::{redact, scrub};
 use crate::ident::quote_ident;
 use forgebase_core::ident::table_name;
 
@@ -72,6 +73,7 @@ pub async fn transition(
     caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
     let (stored, entry) = transition_in(
@@ -82,7 +84,8 @@ pub async fn transition(
         caller,
         &jobs,
     )
-    .await?;
+    .await
+    .map_err(|e| scrub(e, doctype, levels))?;
     tx.execute(
         "INSERT INTO fb_workflow_log (doctype, name, action, from_state, to_state, actor) \
          VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text)",
@@ -104,7 +107,7 @@ pub async fn transition(
     };
     write_webhooks(&tx, registry, doctype, events, &stored, caller).await?;
     tx.commit().await?;
-    Ok(stored)
+    Ok(redact(stored, doctype, levels))
 }
 
 /// What a transition logs.

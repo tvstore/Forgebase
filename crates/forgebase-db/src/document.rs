@@ -55,7 +55,9 @@ use forgebase_core::document::{Changes, DocStatus, Document, Row, ValidationErro
 use forgebase_core::hooks::{DocTypeHooks, EnqueuedJobs, HookContext, HookError, Operation};
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry, WORKFLOW_COLUMN};
-use forgebase_core::permission::{Access, Caller, Right, evaluate};
+use forgebase_core::permission::{
+    Access, Caller, FieldAccess, Right, evaluate, field_access, readable_doctype,
+};
 use forgebase_core::series::SeriesPattern;
 use forgebase_core::value::Value;
 use time::{Date, OffsetDateTime};
@@ -65,6 +67,7 @@ use tokio_postgres::types::ToSql;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::field_levels::{check_input, redact, restricted, scrub};
 use crate::ident::quote_ident;
 use crate::value::{SqlParam, SqlValue, cast_type, decode};
 
@@ -204,13 +207,22 @@ pub async fn insert(
     let doctype = document_doctype(registry, doctype)?;
     check_actor(caller.name())?;
     access_to(doctype, caller, Right::Create)?;
+    let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
-    let stored = insert_in(&tx, registry, doctype, doc, caller, None, &jobs).await?;
+    let stored = insert_in(&tx, registry, doctype, doc, caller, None, &jobs)
+        .await
+        .map_err(|e| scrub(e, doctype, levels))?;
     write_jobs(&tx, registry, &jobs, caller).await?;
+    // The webhooks get the whole document: they run as the system, configured by an administrator.
     write_webhooks(&tx, registry, doctype, &["insert"], &stored, caller).await?;
     tx.commit().await?;
-    Ok(stored)
+    Ok(redact(stored, doctype, levels))
+}
+
+/// The caller's field levels when they matter (see [`crate::field_levels`]).
+pub(crate) fn levels_of(doctype: &DocType, caller: &Caller) -> Option<FieldAccess> {
+    restricted(doctype, field_access(doctype, caller))
 }
 
 /// What makes an insert an amendment: the cancelled document it replaces and its name.
@@ -234,8 +246,11 @@ async fn insert_in(
     } else {
         Operation::Insert
     };
-    // An amendment copies the cancelled document: that is not caller input.
+    // An amendment copies the cancelled document: that is not caller input (it keeps the values
+    // of the fields the caller cannot read, too).
     if amend.is_none() {
+        let levels = levels_of(doctype, caller);
+        check_input(doctype, levels, (&doc.values, &doc.tables), None)?;
         check_read_only(registry, doctype, (&doc.values, &doc.tables), None)?;
     }
     let ctx = HookContext::new(&doctype.name, actor, operation).with_jobs(jobs);
@@ -295,7 +310,7 @@ async fn insert_in(
     let row = client
         .query_one(&sql, &params)
         .await
-        .map_err(|e| DbError::from_write(e, doctype))?;
+        .map_err(|e| DbError::from_write(e, doctype, levels_of(doctype, caller)))?;
     let mut stored = decode_row(doctype, &row)?;
     write_rows(client, stored.id, &writes).await?;
     stored.tables = load_tables(client, registry, doctype, stored.id).await?;
@@ -322,6 +337,8 @@ pub async fn get(
 ) -> Result<Option<StoredDocument>, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let owner = owner_scope(access_to(doctype, caller, Right::Read)?, caller);
+    // The fields the caller cannot read are not selected at all (ADR 0024).
+    let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
     // Without Table fields the read is one statement, already consistent: no transaction needed.
     if doctype.table_fields().next().is_none() {
         return get_in(&*client, registry, doctype, name, owner).await;
@@ -460,6 +477,7 @@ pub async fn update(
     caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
     let stored = update_in(
@@ -472,11 +490,12 @@ pub async fn update(
         caller,
         &jobs,
     )
-    .await?;
+    .await
+    .map_err(|e| scrub(e, doctype, levels))?;
     write_jobs(&tx, registry, &jobs, caller).await?;
     write_webhooks(&tx, registry, doctype, &["update"], &stored, caller).await?;
     tx.commit().await?;
-    Ok(stored)
+    Ok(redact(stored, doctype, levels))
 }
 
 // One more argument than clippy likes: the job collector of the outbox, passed to every `*_in`.
@@ -515,6 +534,13 @@ async fn update_in(
         status => status == Some(DocStatus::Submitted),
     };
     check_edit_roles(doctype, &current, caller)?;
+    // Before the read-only check, which would name a hidden field.
+    check_input(
+        doctype,
+        levels_of(doctype, caller),
+        (&changes.values, &changes.tables),
+        Some(&current),
+    )?;
     check_read_only(
         registry,
         doctype,
@@ -784,7 +810,7 @@ async fn write_update(
     let row = client
         .query_opt(&sql, &params)
         .await
-        .map_err(|e| DbError::from_write(e, doctype))?;
+        .map_err(|e| DbError::from_write(e, doctype, levels_of(doctype, target.caller)))?;
     // The row is locked and its version was checked, so it matches; this is only a safeguard.
     let Some(row) = row else {
         return Err(stale_or_missing(client, doctype, target).await?);
@@ -872,6 +898,7 @@ pub async fn submit(
     caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
     let stored = submit_in(
@@ -883,11 +910,12 @@ pub async fn submit(
         caller,
         &jobs,
     )
-    .await?;
+    .await
+    .map_err(|e| scrub(e, doctype, levels))?;
     write_jobs(&tx, registry, &jobs, caller).await?;
     write_webhooks(&tx, registry, doctype, &["submit"], &stored, caller).await?;
     tx.commit().await?;
-    Ok(stored)
+    Ok(redact(stored, doctype, levels))
 }
 
 async fn submit_in(
@@ -1002,6 +1030,7 @@ pub async fn cancel(
     caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
     let stored = cancel_in(
@@ -1013,11 +1042,12 @@ pub async fn cancel(
         caller,
         &jobs,
     )
-    .await?;
+    .await
+    .map_err(|e| scrub(e, doctype, levels))?;
     write_jobs(&tx, registry, &jobs, caller).await?;
     write_webhooks(&tx, registry, doctype, &["cancel"], &stored, caller).await?;
     tx.commit().await?;
-    Ok(stored)
+    Ok(redact(stored, doctype, levels))
 }
 
 async fn cancel_in(
@@ -1165,6 +1195,7 @@ pub async fn amend(
     caller: &Caller,
 ) -> Result<StoredDocument, DbError> {
     let doctype = document_doctype(registry, doctype)?;
+    let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
     let stored = amend_in(
@@ -1176,12 +1207,13 @@ pub async fn amend(
         caller,
         &jobs,
     )
-    .await?;
+    .await
+    .map_err(|e| scrub(e, doctype, levels))?;
     write_jobs(&tx, registry, &jobs, caller).await?;
     // The amendment is a new document: its event is `insert`.
     write_webhooks(&tx, registry, doctype, &["insert"], &stored, caller).await?;
     tx.commit().await?;
-    Ok(stored)
+    Ok(redact(stored, doctype, levels))
 }
 
 async fn amend_in(

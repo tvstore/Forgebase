@@ -71,6 +71,7 @@ mod database;
 mod document;
 mod error;
 mod export;
+mod field_levels;
 mod fixtures;
 mod ident;
 mod import;
