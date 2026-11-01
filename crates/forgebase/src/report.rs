@@ -192,7 +192,7 @@ mod tests {
         let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 11 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n  0009 saved_views\n  0010 webhooks\n  0011 fixtures\n"
+                "framework migrations: 12 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n  0009 saved_views\n  0010 webhooks\n  0011 fixtures\n  0012 custom_fields\n"
             ),
             "{text}"
         );
@@ -217,7 +217,7 @@ mod tests {
             fixtures_failure: None,
         };
         let text = migrate_report(&report, true, 0);
-        assert!(text.contains("11 pending"), "{text}");
+        assert!(text.contains("12 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 

@@ -103,6 +103,7 @@ mod builder;
 mod builtin;
 mod compose;
 mod config;
+mod customize_cmd;
 mod data_cmd;
 mod doctypes;
 mod documents;

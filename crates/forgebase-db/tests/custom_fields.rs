@@ -131,7 +131,8 @@ async fn unique_and_link_fields_get_their_keys_and_indexes() {
 #[tokio::test]
 async fn the_rules_are_enforced_and_nothing_is_written_on_a_refusal() {
     let (db, base) = site().await;
-    let cases: Vec<(&str, &str, fn(&DbError) -> bool)> = vec![
+    type Case = (&'static str, &'static str, fn(&DbError) -> bool);
+    let cases: Vec<Case> = vec![
         ("customer", "name = \"vip\"\ntype = \"check\"\n", |e| {
             matches!(e, DbError::CustomField(OverlayError::MissingPrefix(_)))
         }),
@@ -535,14 +536,27 @@ async fn the_holder_serves_a_snapshot_and_rebuilds_on_a_version_change() {
 }
 
 #[tokio::test]
+async fn a_database_without_migration_12_serves_the_registry_of_the_apps() {
+    let db = TestDb::new().await;
+    let base = Arc::new(registry(&[CUSTOMER]));
+    // Not even the framework tables: the holder still builds, from the apps alone.
+    let holder = RegistryHolder::load("t", Arc::clone(&base), &db.pool)
+        .await
+        .expect("load");
+    assert!(holder.snapshot().get("customer").is_some());
+    assert!(!holder.poll(&db.pool).await.unwrap());
+}
+
+#[tokio::test]
 async fn a_failed_poll_keeps_the_current_registry() {
     let (db, base) = site().await;
     let holder = RegistryHolder::load("t", Arc::new(base), &db.pool)
         .await
         .expect("load");
     let before = holder.snapshot();
-    db.exec("DROP TABLE fb_meta_version").await;
+    db.pool.close();
     assert!(holder.poll(&db.pool).await.is_err());
+    assert!(holder.reload(&db.pool).await.is_err());
     assert!(Arc::ptr_eq(&before, &holder.snapshot()));
 }
 

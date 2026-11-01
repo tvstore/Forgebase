@@ -16,12 +16,13 @@ use forgebase_http::{AppConfig, AppState, Sites};
 
 use crate::app::App;
 use crate::args::{
-    ActorArg, Cli, Command, DataCommand, DocCommand, DocTypesDir, SiteCommand, TokenCommand,
-    UserCommand, VersionArg, WebhookCommand,
+    ActorArg, Cli, Command, CustomizeCommand, DataCommand, DocCommand, DocTypesDir, FieldCommand,
+    SiteCommand, TokenCommand, UserCommand, VersionArg, WebhookCommand,
 };
 use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
 use crate::config::{Config, Site, SiteContext, host_problem};
+use crate::customize_cmd::{field as customize_field, read_field};
 use crate::error::CliError;
 use crate::job_cmd::{job, read_payload};
 use crate::new_app::new_app;
@@ -124,6 +125,19 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             let secret = read_secret(&command)?;
             let ctx = site.context(registry, None).await?;
             webhook(&ctx, command, secret).await
+        }
+        Command::Customize(CustomizeCommand::Field(command)) => {
+            // The field is read and checked before the database is opened. `add` checks it
+            // against the DocTypes of the site, the `--doctypes` directory included.
+            let base = match &command {
+                FieldCommand::Add { doctypes, .. } => {
+                    Arc::new(site_composed(site, apps, doctypes)?.registry)
+                }
+                _ => site_registry(site, apps)?,
+            };
+            let field = read_field(&command)?;
+            let ctx = site.context(Arc::clone(&base), None).await?;
+            customize_field(&ctx, &base, command, field).await
         }
         Command::Worker {
             doctypes,
@@ -760,11 +774,11 @@ async fn serve(
         }
         for (site, registry, methods) in registries {
             let ctx = site.context(registry, None).await?;
-            let state = AppState::with_methods(
+            let state = AppState::with_holder(
                 ctx.pool,
-                ctx.registry,
+                ctx.holder,
                 app_config(site.hosts.clone()),
-                methods,
+                Some(methods),
             );
             routing = routing.site(&site.hosts, state).map_err(CliError::Config)?;
             lines.push(format!("site {}: {}\n", site.name, site.hosts.join(", ")));
@@ -778,11 +792,11 @@ async fn serve(
         let composed = site_composed(site, apps, doctypes)?;
         let methods = Arc::new(composed.methods);
         let ctx = site.context(Arc::new(composed.registry), None).await?;
-        routing = Sites::implicit(AppState::with_methods(
+        routing = Sites::implicit(AppState::with_holder(
             ctx.pool,
-            ctx.registry,
+            ctx.holder,
             app_config(allowed_hosts),
-            methods,
+            Some(methods),
         ));
     }
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -833,7 +847,7 @@ async fn worker(
     let signals = stop_signals().map_err(CliError::Serve)?;
     let worker = Worker::new(
         ctx.pool,
-        composed.registry,
+        ctx.holder,
         composed.jobs,
         composed.schedules,
         WorkerConfig::default(),

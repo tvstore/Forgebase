@@ -43,6 +43,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use forgebase_core::overlay::OverlayError;
 use forgebase_db::auth::AuthError;
 use forgebase_db::{DbError, MAX_REPORTED_ERRORS};
 use serde_json::{Value, json};
@@ -401,6 +402,15 @@ impl From<DbError> for ApiError {
             DbError::InvalidView(message) => Self::validation(vec![message]),
             DbError::ViewExists { .. } => Self::new(S::CONFLICT, "conflict", text),
             DbError::ViewDenied(_) => Self::new(S::FORBIDDEN, "permission_denied", text),
+            // Custom fields (M10.1): an unknown DocType is a 404 like everywhere, a name that is
+            // taken a conflict, anything else the field's own problem.
+            DbError::CustomField(OverlayError::UnknownDocType(_)) => {
+                Self::not_found("unknown doctype")
+            }
+            DbError::CustomField(OverlayError::Collision { .. })
+            | DbError::CustomFieldExists { .. } => Self::new(S::CONFLICT, "conflict", text),
+            DbError::CustomField(problem) => Self::validation(vec![problem.to_string()]),
+            DbError::CustomFieldNotFound { .. } => Self::not_found(text),
             DbError::NotFound { .. } => Self::not_found(text),
             // The same answer for a report that does not exist and one the caller may not run.
             DbError::ReportNotFound { .. } => Self::not_found("report not found"),

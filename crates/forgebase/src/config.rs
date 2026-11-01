@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use forgebase_core::meta::Registry;
-use forgebase_db::Pool;
+use forgebase_db::{Pool, RegistryHolder};
 use serde::Deserialize;
 
 use crate::app::App;
@@ -107,8 +107,9 @@ impl Site {
     }
 
     /// Opens the pool of this site (`pool_size` overrides the configured size) and joins it with
-    /// `registry`, the registry of the site's apps. This is the only way a command gets a
-    /// database connection. A connection error names the site (and never the URL), so that
+    /// `registry`, the registry of the site's apps, plus the site's custom fields as they are
+    /// now (ADR 0023; a database without them is served with the registry of the apps alone).
+    /// This is the only way a command gets a database connection. A connection error names the site (and never the URL), so that
     /// `serve` with several sites says which one failed.
     pub(crate) async fn context(
         &self,
@@ -122,20 +123,33 @@ impl Site {
                 site: self.name.clone(),
                 source: Box::new(source),
             })?;
+        let holder = RegistryHolder::load(&self.name, registry, &pool)
+            .await
+            .map_err(|source| CliError::Site {
+                site: self.name.clone(),
+                source: Box::new(source),
+            })?;
+        let holder = Arc::new(holder);
         Ok(SiteContext {
             site: self.clone(),
             pool,
-            registry,
+            registry: holder.snapshot(),
+            holder,
         })
     }
 }
 
 /// Everything a command needs for one site: the site, its pool and its registry, which holds
-/// only the DocTypes, hooks, jobs and schedules of the apps installed on the site.
+/// only the DocTypes, hooks, jobs and schedules of the apps installed on the site, and the
+/// site's custom fields.
 pub(crate) struct SiteContext {
     pub site: Site,
     pub pool: Pool,
+    /// The registry as it was when the context was made: what a short command uses.
     pub registry: Arc<Registry>,
+    /// The registry behind `registry`, which a long-running command (`serve`, `worker`) keeps
+    /// current.
+    pub holder: Arc<RegistryHolder>,
 }
 
 impl Site {

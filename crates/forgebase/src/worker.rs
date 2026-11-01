@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use forgebase_core::meta::Registry;
 use forgebase_db::jobs::{self, Claimed, Failure, JobConnection, Known};
 use forgebase_db::schedule::{self, Spec};
-use forgebase_db::{DbError, Pool};
+use forgebase_db::{DbError, Pool, RegistryHolder};
 use tokio::sync::{mpsc, watch};
 
 use crate::jobs::{JobContext, JobError, JobHandler, JobOptions};
@@ -47,6 +47,9 @@ pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// still holds the lease while its failure is recorded.
 pub(crate) const LEASE_MARGIN: Duration = Duration::from_secs(30);
 
+/// How often a worker checks the metadata version of its site (custom fields, ADR 0023).
+pub(crate) const META_RELOAD_INTERVAL: Duration = Duration::from_secs(10);
+
 /// A job of an app: its full name, handler and options.
 #[derive(Clone)]
 pub(crate) struct JobDef {
@@ -61,6 +64,9 @@ pub(crate) struct WorkerConfig {
     pub poll: Duration,
     pub grace: Duration,
     pub margin: Duration,
+    /// How often the worker checks `fb_meta_version` and rebuilds its registry when the site's
+    /// custom fields changed (ADR 0023). `Duration::ZERO` turns the check off.
+    pub meta_reload: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -69,6 +75,7 @@ impl Default for WorkerConfig {
             poll: POLL_INTERVAL,
             grace: SHUTDOWN_GRACE,
             margin: LEASE_MARGIN,
+            meta_reload: META_RELOAD_INTERVAL,
         }
     }
 }
@@ -128,7 +135,9 @@ enum Finish {
 /// The worker: the jobs of the binary and what it needs to run them.
 pub(crate) struct Worker {
     pool: Pool,
-    registry: Arc<Registry>,
+    /// The registry of the site, replaced when its custom fields change. A job attempt takes one
+    /// snapshot when it starts and keeps it to its end, like a request.
+    holder: Arc<RegistryHolder>,
     jobs: BTreeMap<String, JobDef>,
     /// The schedules of the binary by full job name.
     schedules: BTreeMap<String, Spec>,
@@ -136,23 +145,54 @@ pub(crate) struct Worker {
     /// When this worker last ran a tick; at most one tick per poll interval, whatever the
     /// concurrency.
     last_tick: std::sync::Mutex<Option<Instant>>,
+    /// When this worker last checked the metadata version.
+    last_meta: std::sync::Mutex<Option<Instant>>,
 }
 
 impl Worker {
     pub fn new(
         pool: Pool,
-        registry: Registry,
+        holder: Arc<RegistryHolder>,
         jobs: BTreeMap<String, JobDef>,
         schedules: BTreeMap<String, Spec>,
         config: WorkerConfig,
     ) -> Self {
         Self {
             pool,
-            registry: Arc::new(registry),
+            holder,
             jobs,
             schedules,
             config,
             last_tick: std::sync::Mutex::new(None),
+            last_meta: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// True for the first caller in each `meta_reload` interval (and records it).
+    fn meta_due(&self) -> bool {
+        if self.config.meta_reload.is_zero() {
+            return false;
+        }
+        let mut last = self
+            .last_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        if last.is_some_and(|at| now.duration_since(at) < self.config.meta_reload) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+
+    /// Checks the metadata version and rebuilds the registry if it changed. A failure (the
+    /// database is down) is logged and the current registry is kept.
+    pub async fn poll_meta(&self) {
+        if let Err(error) = self.holder.poll(&self.pool).await {
+            log(&format!(
+                "warning: cannot check the metadata version, keeping the current registry: {}",
+                crate::error::describe_db(&error)
+            ));
         }
     }
 
@@ -174,7 +214,7 @@ impl Worker {
     /// run ([`schedule::tick`]). `at` replaces the database's `now()` (tests only).
     pub async fn tick(&self, at: Option<time::OffsetDateTime>) -> Result<usize, DbError> {
         let mut client = self.pool.get().await?;
-        schedule::tick(&mut **client, &self.registry, &self.schedules, at).await
+        schedule::tick(&mut **client, &self.holder.snapshot(), &self.schedules, at).await
     }
 
     pub fn job_count(&self) -> usize {
@@ -217,7 +257,7 @@ impl Worker {
 
         let mut task = tokio::spawn(attempt_job(
             self.pool.clone(),
-            Arc::clone(&self.registry),
+            self.holder.snapshot(),
             Arc::clone(&def.handler),
             claimed.clone(),
             worker.to_owned(),
@@ -332,6 +372,9 @@ impl Worker {
         while !stop.is_set() {
             // The tick comes before the claim, so a job that is due now is claimed at once. Only
             // one slot ticks per poll interval, so ticks do not grow with the concurrency.
+            if self.meta_due() {
+                self.poll_meta().await;
+            }
             if self.tick_due() {
                 match self.tick(None).await {
                     Ok(0) => {}
@@ -570,6 +613,7 @@ mod tests {
             poll: Duration::from_millis(20),
             grace,
             margin: Duration::from_secs(1),
+            meta_reload: Duration::ZERO,
         }
     }
 
@@ -585,9 +629,14 @@ mod tests {
         let db = TestDb::new().await;
         db.migrate(&binary, false).await.expect("migrate");
         let composed = compose(&binary.apps, None).expect("composes");
+        let registry = Arc::new(composed.registry);
         let worker = Arc::new(Worker::new(
             db.pool.clone(),
-            composed.registry,
+            Arc::new(RegistryHolder::new(
+                "default",
+                Arc::clone(&registry),
+                registry,
+            )),
             composed.jobs,
             composed.schedules,
             config(grace),

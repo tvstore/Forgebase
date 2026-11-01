@@ -552,7 +552,7 @@ fn apply_overlays(
             }
         }
         if !problems.is_empty() {
-            errors.apps.extend(problems.into_iter().map(|p| problem(p)));
+            errors.apps.extend(problems.into_iter().map(&problem));
             continue;
         }
         match registry.add_overlay_fields(app, target, fields.clone()) {

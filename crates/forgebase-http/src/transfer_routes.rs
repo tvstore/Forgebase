@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::PathRejection;
@@ -95,7 +96,8 @@ pub async fn export(
     query: RawQuery,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Read], Right::Read)?;
     require(doctype, &caller, &[Right::Export], Right::Export)?;
@@ -128,7 +130,7 @@ pub async fn export(
     let (started_tx, started_rx) = oneshot::channel();
     let (sender, channel) = Channel::<Bytes, io::Error>::new(2);
     let job = ExportJob {
-        registry: state.registry_arc().clone(),
+        registry: Arc::clone(&registry),
         doctype: doctype.name.clone(),
         caller,
         filters: list_query.filters,
@@ -287,7 +289,8 @@ pub async fn report_export(
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
     let caller = authenticated.caller();
-    let report = find_report(&state, &name, &caller)?;
+    let registry = state.registry();
+    let report = find_report(&registry, &name, &caller)?;
     let format = format_param(&params(query, &["format"])?)?;
     let values = report_params(report, body)?;
     let mut client = ReportConnection::get(state.pool()).await?;
@@ -365,7 +368,8 @@ pub async fn import(
     request: Request,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Import], Right::Import)?;
     require(doctype, &caller, &[Right::Create], Right::Create)?;
@@ -418,7 +422,7 @@ pub async fn import(
         }
     })?;
     let max_rows = state.config().import_max_rows;
-    let parsed = parse_import(state.registry(), doctype, format, mode, &body, max_rows).map_err(
+    let parsed = parse_import(&registry, doctype, format, mode, &body, max_rows).map_err(
         |error| match error {
             FileError::Invalid(problems) => ApiError::invalid_import(problems),
             FileError::TooLarge { limit } => ApiError::import_too_large(limit),
@@ -428,7 +432,7 @@ pub async fn import(
     let mut client = state.client().await?;
     let summary = run_import(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &caller,
         parsed,

@@ -44,7 +44,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request};
-use forgebase_db::{Pool, SyncOptions, auth, connect, quote_ident};
+use forgebase_db::{Pool, RegistryHolder, SyncOptions, auth, connect, quote_ident};
 use forgebase_http::{AppConfig, AppState, router};
 use tower::ServiceExt;
 
@@ -347,19 +347,88 @@ impl TestDb {
     ///
     /// When the apps of `forgebase` do not fit together ([`Forgebase::check`]).
     pub fn client(&self, forgebase: &Forgebase) -> HttpClient {
+        self.client_polling(forgebase, AppConfig::default().meta_reload_interval)
+    }
+
+    /// Like [`TestDb::client`], with the interval at which the server checks the metadata
+    /// version and rebuilds its registry after a custom field changed (10 seconds by default;
+    /// ADR 0023). A test of live reload passes a short one. The client starts from the registry
+    /// of the apps: call [`HttpClient::reload_metadata`] to pick up custom fields that exist
+    /// already.
+    ///
+    /// # Panics
+    ///
+    /// When the apps of `forgebase` do not fit together ([`Forgebase::check`]).
+    pub fn client_polling(&self, forgebase: &Forgebase, interval: Duration) -> HttpClient {
         let composed = compose(&forgebase.apps, None)
             .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
-        let state = AppState::with_methods(
+        let holder = plain_holder(composed.registry);
+        let state = AppState::with_holder(
             self.pool.clone(),
-            Arc::new(composed.registry),
-            AppConfig::default(),
-            Arc::new(composed.methods),
+            Arc::clone(&holder),
+            AppConfig {
+                meta_reload_interval: interval,
+                ..AppConfig::default()
+            },
+            Some(Arc::new(composed.methods)),
         );
         HttpClient {
             router: router(state),
+            holder,
+            pool: self.pool.clone(),
             session: None,
             token: None,
         }
+    }
+
+    /// Adds a site custom field to `doctype` as the command `forgebase customize field add`
+    /// does (ADR 0023): `field_toml` is the body of one `[[fields]]` table, for example
+    /// `name = "custom_vip"` and `type = "check"` on two lines. The column is created at once.
+    /// Servers that run on this database see the field within their reload interval
+    /// ([`TestDb::client_polling`]), and [`HttpClient::reload_metadata`] at once.
+    ///
+    /// # Panics
+    ///
+    /// When the apps do not fit together, the field is refused (the message says why) or the
+    /// database fails.
+    pub async fn add_custom_field(&self, forgebase: &Forgebase, doctype: &str, field_toml: &str) {
+        let composed = compose(&forgebase.apps, None)
+            .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
+        let field = forgebase_core::overlay::parse_field_toml(field_toml)
+            .unwrap_or_else(|e| panic!("add_custom_field: {e}"));
+        let mut client = self.pool.get().await.expect("connection");
+        forgebase_db::add_custom_field(
+            &mut client,
+            &composed.registry,
+            "test",
+            doctype,
+            field,
+            "test",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("add_custom_field: {e}"));
+    }
+
+    /// Disables (`false`) or enables (`true`) a site custom field, as the commands
+    /// `forgebase customize field disable` and `enable` do: the field is hidden or shown
+    /// everywhere, and its column and data are kept either way.
+    ///
+    /// # Panics
+    ///
+    /// When there is no such field or the database fails.
+    pub async fn set_custom_field_enabled(&self, doctype: &str, name: &str, enabled: bool) {
+        let mut client = self.pool.get().await.expect("connection");
+        forgebase_db::set_custom_field_enabled(
+            &mut client,
+            doctype,
+            name,
+            enabled,
+            "test",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("set_custom_field_enabled: {e}"));
     }
 
     /// Drops the database now. Dropping the `TestDb` does the same, in a helper thread.
@@ -368,6 +437,16 @@ impl TestDb {
         self.pool.close();
         drop_database(&self.admin_url, &self.name).await;
     }
+}
+
+/// A holder that serves `registry` (the apps alone) for a helper that needs no custom fields.
+fn plain_holder(registry: forgebase_core::meta::Registry) -> Arc<RegistryHolder> {
+    let registry = Arc::new(registry);
+    Arc::new(RegistryHolder::new(
+        "default",
+        Arc::clone(&registry),
+        registry,
+    ))
 }
 
 /// What [`run_jobs`] did. Only read it: the type is `#[non_exhaustive]`, so a field can be added
@@ -416,9 +495,13 @@ const RUN_JOBS_LIMIT: usize = 10_000;
 pub async fn run_jobs(forgebase: &Forgebase, db: &TestDb) -> JobRun {
     let composed = compose(&forgebase.apps, None)
         .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
+    // The registry of the apps with the custom fields the database has now, like a worker's.
+    let holder = RegistryHolder::load("default", Arc::new(composed.registry), &db.pool)
+        .await
+        .unwrap_or_else(|e| panic!("run_jobs: {e}"));
     let worker = Worker::new(
         db.pool.clone(),
-        composed.registry,
+        Arc::new(holder),
         composed.jobs,
         composed.schedules,
         WorkerConfig::default(),
@@ -470,7 +553,7 @@ pub async fn run_schedules_at(
         .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
     let worker = Worker::new(
         db.pool.clone(),
-        composed.registry,
+        plain_holder(composed.registry),
         composed.jobs,
         composed.schedules,
         WorkerConfig::default(),
@@ -579,12 +662,28 @@ struct Session {
 #[derive(Clone)]
 pub struct HttpClient {
     router: Router,
+    holder: Arc<RegistryHolder>,
+    pool: Pool,
     session: Option<Session>,
     /// `key:secret` of an API token: sent as `Authorization: token ..` instead of the cookie.
     token: Option<String>,
 }
 
 impl HttpClient {
+    /// Rebuilds the registry of the server behind this client from the database now: use it
+    /// after [`TestDb::add_custom_field`] or [`TestDb::set_custom_field_enabled`] to see the
+    /// change without waiting for the reload interval.
+    ///
+    /// # Panics
+    ///
+    /// On a database error.
+    pub async fn reload_metadata(&self) {
+        self.holder
+            .reload(&self.pool)
+            .await
+            .unwrap_or_else(|e| panic!("reload_metadata: {e}"));
+    }
+
     /// Logs in as `username` (a user made with [`TestDb::create_user`]) and returns a client
     /// that carries the session.
     ///
@@ -615,6 +714,8 @@ impl HttpClient {
             .to_owned();
         HttpClient {
             router: self.router.clone(),
+            holder: Arc::clone(&self.holder),
+            pool: self.pool.clone(),
             session: Some(Session {
                 cookie,
                 csrf: Some(csrf),
@@ -628,6 +729,8 @@ impl HttpClient {
     pub fn with_token(&self, key_secret: &str) -> HttpClient {
         HttpClient {
             router: self.router.clone(),
+            holder: Arc::clone(&self.holder),
+            pool: self.pool.clone(),
             session: None,
             token: Some(key_secret.to_owned()),
         }

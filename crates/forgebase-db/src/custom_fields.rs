@@ -111,8 +111,25 @@ pub struct Effective {
     pub warnings: Vec<String>,
 }
 
-/// The current `fb_meta_version`.
+/// Whether the tables of migration 0012 exist. A database that an older binary migrated does not
+/// have them yet, and a newer binary must still serve it (without custom fields) until `migrate`
+/// has run.
+async fn tables_exist(client: &impl GenericClient) -> Result<bool, DbError> {
+    let row = client
+        .query_one(
+            "SELECT to_regclass('fb_custom_field') IS NOT NULL \
+                AND to_regclass('fb_meta_version') IS NOT NULL",
+            &[],
+        )
+        .await?;
+    Ok(row.try_get(0)?)
+}
+
+/// The current `fb_meta_version` (0 in a database that migration 0012 has not reached).
 pub async fn meta_version(client: &impl GenericClient) -> Result<i64, DbError> {
+    if !tables_exist(client).await? {
+        return Ok(0);
+    }
     let row = client
         .query_one("SELECT version FROM fb_meta_version WHERE id = 1", &[])
         .await?;
@@ -133,6 +150,13 @@ pub async fn effective_registry(
     site: &str,
     include_disabled: bool,
 ) -> Result<Effective, DbError> {
+    if !tables_exist(client).await? {
+        return Ok(Effective {
+            registry: base.clone(),
+            version: 0,
+            warnings: Vec::new(),
+        });
+    }
     let version = meta_version(client).await?;
     let rows = client
         .query(

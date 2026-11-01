@@ -114,13 +114,13 @@ pub async fn list(
     query: RawQuery,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Read], Right::Read)?;
     params(query, &[])?;
     let client = state.client().await?;
-    let views =
-        forgebase_db::list_views(&**client, state.registry(), &doctype.name, &caller).await?;
+    let views = forgebase_db::list_views(&**client, &registry, &doctype.name, &caller).await?;
     let views = views.iter().map(view_json).collect::<Result<Vec<_>, _>>()?;
     Ok(data(StatusCode::OK, Json::Array(views)))
 }
@@ -134,7 +134,8 @@ pub async fn create(
     ApiJson(body): ApiJson,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Read], Right::Read)?;
     params(query, &[])?;
@@ -154,7 +155,7 @@ pub async fn create(
     let mut client = state.client().await?;
     let view = forgebase_db::create_view(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &caller,
         &label,
@@ -174,7 +175,8 @@ pub async fn update(
     ApiJson(body): ApiJson,
 ) -> Reply {
     let (Path((name, id)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Read], Right::Read)?;
     params(query, &[])?;
@@ -188,7 +190,7 @@ pub async fn update(
     let client = state.client().await?;
     let view = forgebase_db::update_view(
         &**client,
-        state.registry(),
+        &registry,
         &doctype.name,
         id,
         expected_version,
@@ -210,7 +212,8 @@ pub async fn delete(
     query: RawQuery,
 ) -> Reply {
     let (Path((name, id)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Read], Right::Read)?;
     let expected_version = version_param(&params(query, &["version"])?)?;
@@ -218,7 +221,7 @@ pub async fn delete(
     let client = state.client().await?;
     forgebase_db::delete_view(
         &**client,
-        state.registry(),
+        &registry,
         &doctype.name,
         id,
         expected_version,
@@ -274,7 +277,8 @@ pub async fn summary(
     query: RawQuery,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     require(doctype, &caller, &[Right::Read], Right::Read)?;
     let query = params(query, &["group_by", "aggregates", "filters"])?;
@@ -290,14 +294,8 @@ pub async fn summary(
         aggregates: aggregates(query.get("aggregates").map_or("", String::as_str))?,
     };
     let client = state.client().await?;
-    let summary = forgebase_db::summary(
-        &**client,
-        state.registry(),
-        &doctype.name,
-        &caller,
-        &summary_query,
-    )
-    .await?;
+    let summary =
+        forgebase_db::summary(&**client, &registry, &doctype.name, &caller, &summary_query).await?;
     let groups = summary
         .groups
         .iter()
