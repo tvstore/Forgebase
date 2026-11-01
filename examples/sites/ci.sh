@@ -190,7 +190,7 @@ bob_token="$("$bin" token create bob --site shop)"
 # call TOKEN METHOD PATH [JSON]: one request to shop. The body of the reply goes to
 # $work/reply.json and the HTTP status is printed.
 call() {
-  local args=(-s -o "$work/reply.json" -w '%{http_code}' -X "$2" -H "Host: shop.localhost" \
+  local args=(-s --max-time 10 -o "$work/reply.json" -w '%{http_code}' -X "$2" -H "Host: shop.localhost" \
     -H "Authorization: token $1")
   if [ -n "${4:-}" ]; then args+=(-H 'Content-Type: application/json' -d "$4"); fi
   curl "${args[@]}" "$base$3"
@@ -295,7 +295,7 @@ field_token="$("$bin" token create ann --site field)"
 # is captured first so that a failing request is an error and not "no such field".
 meta_has() {
   local names
-  names="$(curl -fsS -H "Host: $1" -H "Authorization: token $2" "$base/api/v1/meta/$3" | jq -r '.data.fields[].name')" \
+  names="$(curl -fsS --max-time 5 -H "Host: $1" -H "Authorization: token $2" "$base/api/v1/meta/$3" | jq -r '.data.fields[].name')" \
     || fail "reading the metadata of $3 on $1"
   printf '%s\n' "$names" | grep -qx "$4"
 }
@@ -311,7 +311,7 @@ wait_meta() {
 # callf TOKEN METHOD PATH [JSON]: one request to field; the body of the reply goes to
 # $work/reply.json and the HTTP status is printed.
 callf() {
-  local args=(-s -o "$work/reply.json" -w '%{http_code}' -X "$2" -H "Host: field.localhost" \
+  local args=(-s --max-time 5 -o "$work/reply.json" -w '%{http_code}' -X "$2" -H "Host: field.localhost" \
     -H "Authorization: token $1")
   if [ -n "${4:-}" ]; then args+=(-H 'Content-Type: application/json' -d "$4"); fi
   curl "${args[@]}" "$base$3"
@@ -330,7 +330,8 @@ wait_meta field.localhost "$field_token" customer custom_region present
 # for the field site) does not have it, and its list of custom fields is empty.
 sleep 1
 meta_has shop.localhost "$admin_token" customer custom_region && fail "shop has the custom field of field"
-[ "$("$bin" customize field list --site shop | grep -c custom_region || true)" = 0 ] || fail "shop lists the custom field of field"
+shop_fields="$("$bin" customize field list --site shop)" || fail "customize field list on shop"
+if printf '%s\n' "$shop_fields" | grep -q custom_region; then fail "shop lists the custom field of field"; fi
 # Write a value through the API and read it back.
 [ "$(callf "$field_token" PATCH /api/v1/resource/customer/ada@field.example \
   '{"version":1,"data":{"custom_region":"North"}}')" = 200 ] || { cat "$work/reply.json" >&2; fail "writing the custom field"; }
@@ -401,10 +402,14 @@ if printf '%s\n' "$after" | grep -qx wholesale@example.com; then fail "bob sees 
 [ "$(call "$bob_token" POST /api/v1/resource/sales_order \
   '{"customer":"wholesale@example.com","items":[{"description":"Pen","qty":1,"rate":"1.25"}]}')" = 422 ] \
   || fail "bob created an order for a customer he cannot see"
+# The refusal is the one of a Link to a name that does not exist, not another validation error.
+jq -e '.error.details | map(select(contains("customer") and contains("does not exist"))) | length > 0' "$work/reply.json" > /dev/null \
+  || { cat "$work/reply.json" >&2; fail "the refusal does not say that the customer does not exist"; }
 # Remove the restriction: the Wholesale customer is visible on the next request.
 "$bin" user permission remove --site shop --user bob --doctype customer_group --value Retail
 "$bin" user permission remove --site shop --user mia --doctype customer_group --value Retail > /dev/null
-[ "$("$bin" user permission list --site shop | grep -c customer_group || true)" = 0 ] || fail "a permission row is left"
+left="$("$bin" user permission list --site shop)" || fail "user permission list"
+if printf '%s\n' "$left" | grep -q customer_group; then fail "a permission row is left"; fi
 customers_of "$bob_token" | grep -qx wholesale@example.com || fail "bob does not see the Wholesale customer after the restriction was removed"
 [ "$(call "$bob_token" GET /api/v1/resource/customer/wholesale@example.com)" = 200 ] || fail "bob cannot get the Wholesale customer after the removal"
 echo "ok: bob, restricted to Retail, saw Retail and no-group customers, 404 for Wholesale, one group and no create; the removal showed Wholesale again"
