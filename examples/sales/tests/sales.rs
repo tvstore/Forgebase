@@ -1426,9 +1426,8 @@ async fn the_summary_pages_through_more_than_one_page_of_orders() {
     let env = env().await;
     customer(&env.manager).await;
     // 1 001 drafts of 2.00 written with SQL (through the API it would take minutes; a Link column
-    // holds the id of the target): two full
-    // pages of 500 and a page of one, which is where a paging mistake shows. One pending order
-    // of 3.00 through the API.
+    // holds the id of the target): two full pages of 500 and a page of one, which is where a
+    // paging mistake shows. One pending order of 3.00 through the API.
     env.db
         .exec(
             "INSERT INTO doc_sales_order

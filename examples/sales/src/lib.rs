@@ -292,7 +292,9 @@ impl JobHandler for LogOrderEvent {
 const STATES: [&str; 4] = ["Draft", "Pending Approval", "Approved", "Cancelled"];
 
 /// The method `sales.order_summary`: how many sales orders there are, their total and how many
-/// are in each workflow state.
+/// are in each workflow state. The counts come from one query per state, so they are **not one
+/// snapshot**: an order that changes state while the method runs may be counted twice or not at
+/// all.
 ///
 /// **Input** (a JSON object, every key optional, any other key is a `400`):
 /// `{"customer": "<customer name>", "from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}`. `from` and `to`
