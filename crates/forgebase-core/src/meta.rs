@@ -9,7 +9,7 @@ use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
 use crate::method::MethodDef;
 use crate::overlay::{CUSTOM_PREFIX, OverlayError};
-use crate::permission::{self, PermissionRule, Right};
+use crate::permission::{self, MAX_PERM_LEVEL, PermissionRule, Right};
 use crate::report::ReportDef;
 use crate::series::{SeriesError, SeriesPattern};
 use crate::workflow::{MAX_NAME_LEN, Move, Workflow};
@@ -125,6 +125,14 @@ pub struct DocField {
     /// refuses caller input for it (UX.1). Not allowed on a Table field, and not together with
     /// `required` (a caller could never provide the value).
     pub read_only: bool,
+    /// The permission level of the field (`perm_level`, M10.2, ADR 0024): 0 to
+    /// [`MAX_PERM_LEVEL`](crate::permission::MAX_PERM_LEVEL), 0 by default. A caller reads or
+    /// writes a field at level `n > 0` only with a `[[permissions]]` rule of `level = n`
+    /// ([`field_access`](crate::permission::field_access)); a field they cannot read is unknown
+    /// to them. Not allowed on a field of a child DocType (protect the whole table with the
+    /// Table field's own level), on the naming field, the `title_field` or a `list_fields`
+    /// column, nor together with `required`.
+    pub perm_level: u8,
 }
 
 /// The closed set of field types. Link arrived in M2.1, Table in M2.2.
@@ -556,6 +564,91 @@ pub enum DefinitionError {
     /// A child DocType has `[[permissions]]`; its rows follow the permissions of the parent.
     #[error("a child doctype has no permission rules (its rows follow the parent's)")]
     ChildWithPermissions,
+    /// A field's `perm_level` is not an integer from 0 to 9.
+    #[error("field `{field}`: perm_level must be an integer from 0 to 9, got {found}")]
+    InvalidPermLevel {
+        /// The field.
+        field: String,
+        /// The rejected value.
+        found: i64,
+    },
+    /// A rule's `level` is not an integer from 0 to 9.
+    #[error("permission rule for role {role:?}: level must be an integer from 0 to 9, got {found}")]
+    InvalidRuleLevel {
+        /// The rule's role.
+        role: String,
+        /// The rejected value.
+        found: i64,
+    },
+    /// A field of a child DocType has a `perm_level` above 0: a table replaces its rows on an
+    /// update, so a hidden column would be wiped. Protect the whole table instead.
+    #[error(
+        "field `{field}`: a field of a child doctype stays at perm_level 0 (give the Table field of the parent a perm_level to protect the whole table)"
+    )]
+    ChildFieldPermLevel {
+        /// The field.
+        field: String,
+    },
+    /// A rule with `level` above 0 grants a right other than `read` and `write`.
+    #[error(
+        "permission rule for role {role:?} at level {level}: `{right}` is a document right decided at level 0; a level above 0 grants read and write only"
+    )]
+    LevelRuleRight {
+        /// The rule's role.
+        role: String,
+        /// The rule's level.
+        level: u8,
+        /// The right that cannot be granted at a level.
+        right: Right,
+    },
+    /// A rule with `level` above 0 has `if_owner`.
+    #[error(
+        "permission rule for role {role:?} at level {level}: if_owner applies to level 0 rules only (the level 0 rule already limits the documents)"
+    )]
+    LevelRuleIfOwner {
+        /// The rule's role.
+        role: String,
+        /// The rule's level.
+        level: u8,
+    },
+    /// A rule with `level` above 0 grants `write` without `read`.
+    #[error(
+        "permission rule for role {role:?} at level {level}: `write` needs `read` (a field that cannot be seen cannot be written)"
+    )]
+    LevelWriteWithoutRead {
+        /// The rule's role.
+        role: String,
+        /// The rule's level.
+        level: u8,
+    },
+    /// Two rules have the same role and the same level above 0; merge them.
+    #[error("more than one permission rule for role {role:?} at level {level}")]
+    DuplicateLevelRule {
+        /// The repeated role.
+        role: String,
+        /// The repeated level.
+        level: u8,
+    },
+    /// A field that a DocType setting names (the naming field, `title_field`, a `list_fields`
+    /// column) has a `perm_level` above 0.
+    #[error(
+        "field `{field}` is {used_as} and must stay at perm_level 0: it is shown to everybody who can read a document"
+    )]
+    KeyFieldPermLevel {
+        /// The field.
+        field: String,
+        /// What names it: `the naming field`, `the title_field` or `a list_fields column`.
+        used_as: &'static str,
+    },
+    /// A `required` field with a `perm_level` above 0: a caller who cannot write it could never
+    /// create a document (there is no default value).
+    #[error(
+        "field `{field}`: a required field must stay at perm_level 0 (a caller who cannot write it could never save a document)"
+    )]
+    RequiredPermLevel {
+        /// The field.
+        field: String,
+    },
     /// A registry already holds a DocType with this name.
     #[error("doctype `{name}` is already registered")]
     DuplicateDocType {
@@ -822,6 +915,12 @@ impl DocType {
         self.fields.iter().find(|f| f.name == name)
     }
 
+    /// Whether any field has a `perm_level` above 0 (M10.2, ADR 0024). A DocType without one
+    /// is never filtered by field levels, whoever the caller is.
+    pub fn has_field_levels(&self) -> bool {
+        self.fields.iter().any(|f| f.perm_level > 0)
+    }
+
     /// The fields that have a column in the DocType's table: every field except Table fields.
     pub fn column_fields(&self) -> impl Iterator<Item = &DocField> {
         self.fields
@@ -918,6 +1017,7 @@ impl DocType {
         }
         self.check_desk_keys(failed, &mut errors);
         self.check_permissions(&mut errors);
+        self.check_field_levels(&mut errors);
         self.check_workflow(failed, &mut errors);
         if self.submittable {
             if self.is_child {
@@ -1037,6 +1137,7 @@ impl DocType {
             errors.push(DefinitionError::ChildWithPermissions);
         }
         let mut seen = BTreeSet::new();
+        let mut seen_levels = BTreeSet::new();
         for rule in &self.permissions {
             let role = || rule.role.clone();
             if let Err(reason) = permission::check_role_name(&rule.role) {
@@ -1058,10 +1159,107 @@ impl DocType {
                     }
                 }
             }
-            if !seen.insert((rule.role.as_str(), rule.if_owner)) {
+            if rule.level > MAX_PERM_LEVEL {
+                errors.push(DefinitionError::InvalidRuleLevel {
+                    role: role(),
+                    found: i64::from(rule.level),
+                });
+            } else if rule.level > 0 {
+                self.check_level_rule(rule, &mut seen_levels, errors);
+            } else if !seen.insert((rule.role.as_str(), rule.if_owner)) {
                 errors.push(DefinitionError::DuplicatePermissionRule {
                     role: role(),
                     if_owner: rule.if_owner,
+                });
+            }
+        }
+    }
+
+    /// The rules of a rule with `level` above 0 (M10.2, ADR 0024): read and write only, no
+    /// `if_owner`, no write without read, and one rule per role and level.
+    fn check_level_rule<'a>(
+        &self,
+        rule: &'a PermissionRule,
+        seen: &mut BTreeSet<(&'a str, u8)>,
+        errors: &mut Vec<DefinitionError>,
+    ) {
+        let role = || rule.role.clone();
+        for right in Right::ALL {
+            if rule.grants(right) && !matches!(right, Right::Read | Right::Write) {
+                errors.push(DefinitionError::LevelRuleRight {
+                    role: role(),
+                    level: rule.level,
+                    right,
+                });
+            }
+        }
+        if rule.if_owner {
+            errors.push(DefinitionError::LevelRuleIfOwner {
+                role: role(),
+                level: rule.level,
+            });
+        }
+        if rule.write && !rule.read {
+            errors.push(DefinitionError::LevelWriteWithoutRead {
+                role: role(),
+                level: rule.level,
+            });
+        }
+        if !seen.insert((rule.role.as_str(), rule.level)) {
+            errors.push(DefinitionError::DuplicateLevelRule {
+                role: role(),
+                level: rule.level,
+            });
+        }
+    }
+
+    /// The `perm_level` of the fields (M10.2, ADR 0024): in range, not on a child DocType, not
+    /// on a field that a DocType setting names, not together with `required`.
+    ///
+    /// The DocType settings that name a field are the naming field, `title_field` and
+    /// `list_fields`; the workflow names no field (its state is the standard column
+    /// `workflow_state`, and a field of that name is refused), and `[[permissions]]`, the
+    /// `icon` and the series pattern name none either.
+    fn check_field_levels(&self, errors: &mut Vec<DefinitionError>) {
+        for field in &self.fields {
+            let field_name = || field.name.clone();
+            if field.perm_level > MAX_PERM_LEVEL {
+                errors.push(DefinitionError::InvalidPermLevel {
+                    field: field_name(),
+                    found: i64::from(field.perm_level),
+                });
+                continue;
+            }
+            if field.perm_level == 0 {
+                continue;
+            }
+            if self.is_child {
+                errors.push(DefinitionError::ChildFieldPermLevel {
+                    field: field_name(),
+                });
+            }
+            if field.required {
+                errors.push(DefinitionError::RequiredPermLevel {
+                    field: field_name(),
+                });
+            }
+            let used_as = if matches!(&self.naming, Naming::Field(n) if *n == field.name) {
+                Some("the naming field")
+            } else if self.title_field.as_deref() == Some(field.name.as_str()) {
+                Some("the title_field")
+            } else if self
+                .list_fields
+                .as_ref()
+                .is_some_and(|list| list.contains(&field.name))
+            {
+                Some("a list_fields column")
+            } else {
+                None
+            };
+            if let Some(used_as) = used_as {
+                errors.push(DefinitionError::KeyFieldPermLevel {
+                    field: field_name(),
+                    used_as,
                 });
             }
         }
@@ -1795,6 +1993,7 @@ mod tests {
             unique: false,
             allow_on_submit: false,
             read_only: false,
+            perm_level: 0,
         }
     }
 

@@ -128,6 +128,9 @@ pub fn field_to_json(field: &DocField) -> serde_json::Value {
             map.insert(key.into(), true.into());
         }
     }
+    if field.perm_level > 0 {
+        map.insert("perm_level".into(), field.perm_level.into());
+    }
     serde_json::Value::Object(map)
 }
 
@@ -436,5 +439,122 @@ mod tests {
                 field: "custom_ref".to_owned()
             })
         );
+    }
+
+    // ----- Field permission levels (M10.2, ADR 0024) ------------------------------------------
+
+    #[test]
+    fn perm_level_round_trips_through_json_and_is_omitted_at_zero() {
+        let field = parse_field_toml("name = \"custom_limit\"\ntype = \"int\"\nperm_level = 2\n")
+            .expect("valid");
+        assert_eq!(field.perm_level, 2);
+        let json = field_to_json(&field);
+        assert_eq!(json["perm_level"], 2);
+        assert_eq!(parse_field_json(&json), Ok(field));
+        let plain = parse_field_toml("name = \"a\"\ntype = \"int\"\n").expect("valid");
+        assert!(field_to_json(&plain).get("perm_level").is_none());
+        // Out of range, wrong kind.
+        for bad in ["perm_level = 10", "perm_level = -1"] {
+            assert!(
+                matches!(
+                    parse_field_toml(&format!("name = \"a\"\ntype = \"int\"\n{bad}\n")),
+                    Err(OverlayError::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            parse_field_json(&serde_json::json!({"name": "a", "type": "int", "perm_level": "1"})),
+            Err(OverlayError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_field_json(&serde_json::json!({"name": "a", "type": "int", "perm_level": 12})),
+            Err(OverlayError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn an_overlay_field_may_carry_a_level_and_the_rules_come_from_the_target() {
+        let mut registry = registry();
+        registry
+            .add_overlay_fields(
+                "ext",
+                "customer",
+                fields("[[fields]]\nname = \"limit\"\ntype = \"int\"\nperm_level = 1\n"),
+            )
+            .expect("added");
+        let customer = registry.get("customer").expect("customer");
+        assert_eq!(customer.field("limit").expect("limit").perm_level, 1);
+        assert!(customer.has_field_levels());
+        // No rule of level 1 exists on the target: only the Administrator and the System see it.
+        // An overlay cannot add rules (it holds [[fields]] only).
+        assert!(matches!(
+            parse_overlay("[[permissions]]\nrole = \"A\"\nlevel = 1\nread = true\n"),
+            Err(OverlayError::Parse(_))
+        ));
+        // A required field with a level is refused like in a DocType file.
+        let err = registry
+            .add_overlay_fields(
+                "ext",
+                "customer",
+                fields("[[fields]]\nname = \"must\"\ntype = \"int\"\nrequired = true\nperm_level = 1\n"),
+            )
+            .expect_err("required");
+        assert!(
+            matches!(&err, OverlayError::Invalid(e) if e == &[DefinitionError::RequiredPermLevel { field: "must".into() }]),
+            "{err}"
+        );
+        assert!(
+            registry
+                .get("customer")
+                .expect("customer")
+                .field("must")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_custom_field_may_carry_a_level_but_still_not_required() {
+        let mut registry = registry();
+        let field = parse_field_json(
+            &serde_json::json!({"name": "custom_limit", "type": "int", "perm_level": 3}),
+        )
+        .expect("parses");
+        registry.add_custom_field("customer", field).expect("added");
+        assert_eq!(
+            registry
+                .get("customer")
+                .expect("customer")
+                .field("custom_limit")
+                .expect("field")
+                .perm_level,
+            3
+        );
+        // The M10.1 rule stays: `required` is refused for a site field, with or without a level.
+        let required = parse_field_json(
+            &serde_json::json!({"name": "custom_req", "type": "int", "perm_level": 1, "required": true}),
+        )
+        .expect("parses");
+        assert_eq!(
+            registry.add_custom_field("customer", required),
+            Err(OverlayError::Required("custom_req".to_owned()))
+        );
+        // A bad level cannot even be parsed into a field.
+        assert!(
+            parse_field_json(
+                &serde_json::json!({"name": "custom_x", "type": "int", "perm_level": 99})
+            )
+            .is_err()
+        );
+        // The table of an order may carry a level, but a site cannot add one: custom Table fields
+        // stay refused, and a child DocType cannot be extended at all.
+        let child = parse_field_json(
+            &serde_json::json!({"name": "custom_y", "type": "int", "perm_level": 1}),
+        )
+        .expect("parses");
+        assert!(matches!(
+            registry.add_custom_field("line", child),
+            Err(OverlayError::ChildDocType(_))
+        ));
     }
 }

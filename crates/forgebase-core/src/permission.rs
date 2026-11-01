@@ -11,15 +11,27 @@
 //! [`evaluate`] is the **only** place that makes a permission decision. It is pure (no I/O, no
 //! clock): `forgebase-db` calls it and turns the [`Access`] it returns into SQL (for read access,
 //! `WHERE owner = $caller`) or into a refusal. Nothing else compares roles.
+//!
+//! **Field levels (M10.2, ADR 0024).** A field has a `perm_level` (0 to 9, 0 by default) and a
+//! rule has a `level`. [`evaluate`] decides about documents with the rules of level 0 only;
+//! [`field_access`] decides which levels of fields a caller reads and writes, and
+//! [`readable_fields`], [`readable_field`] and [`readable_doctype`] apply the answer to the
+//! metadata. A field the caller cannot read is *unknown* to the caller: it is not in the
+//! metadata the caller works with, so every lookup of it fails exactly like a lookup of a name
+//! that does not exist.
 
+use std::borrow::Cow;
 use std::fmt;
 
-use crate::meta::DocType;
+use crate::meta::{DocField, DocType};
 use crate::method::MethodAccess;
 use crate::workflow::Transition;
 
 /// The built-in role that bypasses every permission rule.
 pub const ADMINISTRATOR: &str = "Administrator";
+
+/// The highest permission level of a field or a rule (levels are 0 to 9).
+pub const MAX_PERM_LEVEL: u8 = 9;
 
 /// Longest allowed role name, in characters.
 pub const MAX_ROLE_LEN: usize = 140;
@@ -126,6 +138,11 @@ pub struct PermissionRule {
     /// The rights apply to documents whose `owner` is the caller only. (A create is always for
     /// a new document the caller owns, so `if_owner` does not restrict create.)
     pub if_owner: bool,
+    /// The permission level of the rule (M10.2, ADR 0024), 0 to [`MAX_PERM_LEVEL`], 0 by
+    /// default. A rule at level 0 is a document rule as in ADR 0011. A rule at level `n > 0`
+    /// grants `read` and `write` on the fields marked `perm_level = n` and nothing else (see
+    /// [`field_access`]).
+    pub level: u8,
 }
 
 impl PermissionRule {
@@ -144,6 +161,7 @@ impl PermissionRule {
             export: false,
             import: false,
             if_owner: false,
+            level: 0,
         }
     }
 
@@ -249,7 +267,8 @@ pub fn evaluate(doctype: &DocType, caller: &Caller, right: Right) -> Access {
         return Access::Denied; // unreachable: the system caller bypasses above
     };
     let mut access = Access::Denied;
-    for rule in &doctype.permissions {
+    // Only the rules of level 0 decide about documents; a rule of a higher level is about fields.
+    for rule in doctype.permissions.iter().filter(|rule| rule.level == 0) {
         if rule.grants(right) && roles.contains(&rule.role) {
             if !rule.if_owner {
                 return Access::All;
@@ -258,6 +277,144 @@ pub fn evaluate(doctype: &DocType, caller: &Caller, right: Right) -> Access {
         }
     }
     access
+}
+
+/// Which permission levels of fields a caller may read and write on one DocType, as decided by
+/// [`field_access`]: a bit per level 0 to [`MAX_PERM_LEVEL`].
+///
+/// Level 0 is **not** a filter on the fields: a field at level 0 is governed by the document
+/// rights alone (the caller is refused or not before any field is looked at), so a DocType
+/// without `perm_level` behaves exactly as before. The level 0 bits are the base that the higher
+/// levels need ([`field_access`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldAccess {
+    read: u16,
+    write: u16,
+}
+
+impl FieldAccess {
+    const MASK: u16 = (1 << (MAX_PERM_LEVEL as u16 + 1)) - 1;
+
+    /// Every level readable and writable: what the system context and an administrator have.
+    pub const ALL: FieldAccess = FieldAccess {
+        read: Self::MASK,
+        write: Self::MASK,
+    };
+
+    /// Whether fields at `level` may be read. A level above [`MAX_PERM_LEVEL`] never can.
+    pub fn can_read(self, level: u8) -> bool {
+        level <= MAX_PERM_LEVEL && self.read & (1 << level) != 0
+    }
+
+    /// Whether a field at `level` is shown to the caller: every field at level 0 (the document
+    /// rights decide about those, see the type documentation) and a field at a higher level the
+    /// caller can read. What the helpers that hide fields use, so a DocType without `perm_level`
+    /// is never changed by them.
+    pub fn shows(self, level: u8) -> bool {
+        level == 0 || self.can_read(level)
+    }
+
+    /// Whether fields at `level` may be written. A level above [`MAX_PERM_LEVEL`] never can.
+    pub fn can_write(self, level: u8) -> bool {
+        level <= MAX_PERM_LEVEL && self.write & (1 << level) != 0
+    }
+
+    /// True when every level can be read and written (no field is hidden or protected).
+    pub fn is_all(self) -> bool {
+        self == Self::ALL
+    }
+}
+
+/// Decides which levels of fields `caller` may read and write on `doctype` (M10.2, ADR 0024).
+/// Pure, like [`evaluate`], and built on it:
+///
+/// - The system context and an administrator get every level.
+/// - **Level 0** is readable when [`evaluate`] does not deny `read`, and writable when it does
+///   not deny `write` **or** `create`. Whether the caller may write one particular document is
+///   decided by the document checks of `forgebase-db`, which run first and name their own right
+///   (`create` for an insert, `write` for an update); the bit only says that the caller has one
+///   of them at all, so that the higher levels need it too.
+/// - **Level `n > 0`** is readable when level 0 is readable **and** a role of the caller has a
+///   rule `level = n` with `read`; it is writable when level 0 is writable **and** a role of
+///   the caller has a rule `level = n` with `write`. Rules of a level have no `if_owner` (a
+///   definition error), so `if_owner` at level 0 alone limits the documents a level is seen on:
+///   an owner-only user sees a level on their own documents only.
+/// - A level that no rule names is readable by nobody but the administrator and the system.
+pub fn field_access(doctype: &DocType, caller: &Caller) -> FieldAccess {
+    let Caller::User { roles, .. } = caller else {
+        return FieldAccess::ALL;
+    };
+    if caller.bypasses_permissions() {
+        return FieldAccess::ALL;
+    }
+    let readable = evaluate(doctype, caller, Right::Read) != Access::Denied;
+    let writable = evaluate(doctype, caller, Right::Write) != Access::Denied
+        || evaluate(doctype, caller, Right::Create) != Access::Denied;
+    let mut access = FieldAccess { read: 0, write: 0 };
+    if readable {
+        access.read |= 1;
+    }
+    if writable {
+        access.write |= 1;
+    }
+    for rule in doctype
+        .permissions
+        .iter()
+        .filter(|rule| rule.level > 0 && rule.level <= MAX_PERM_LEVEL)
+    {
+        if !roles.contains(&rule.role) {
+            continue;
+        }
+        if readable && rule.read {
+            access.read |= 1 << rule.level;
+        }
+        if writable && rule.write {
+            access.write |= 1 << rule.level;
+        }
+    }
+    access
+}
+
+/// The fields of `doctype` that `access` lets the caller read, in declaration order.
+pub fn readable_fields(
+    doctype: &DocType,
+    access: FieldAccess,
+) -> impl Iterator<Item = &DocField> + '_ {
+    doctype
+        .fields
+        .iter()
+        .filter(move |f| access.shows(f.perm_level))
+}
+
+/// The field called `name` if the caller may read it. A field the caller cannot read gives
+/// `None`, exactly like a name that is not a field: callers report both as an unknown field, so
+/// that nothing tells a hidden field from a missing one.
+pub fn readable_field<'a>(
+    doctype: &'a DocType,
+    access: FieldAccess,
+    name: &str,
+) -> Option<&'a DocField> {
+    doctype.field(name).filter(|f| access.shows(f.perm_level))
+}
+
+/// `doctype` as the caller sees it: the same DocType without the fields that `access` does not
+/// let it read. Borrowed (no copy) when nothing is hidden, which is always the case for a
+/// DocType without `perm_level`. Everything that reads, filters, sorts, groups or exports on
+/// behalf of a caller works on this, so a hidden field is unknown to it everywhere. **Never use
+/// it for a write**: hooks and the stored document need every field.
+pub fn readable_doctype(doctype: &DocType, access: FieldAccess) -> Cow<'_, DocType> {
+    if doctype.fields.iter().all(|f| access.shows(f.perm_level)) {
+        return Cow::Borrowed(doctype);
+    }
+    let mut visible = doctype.clone();
+    visible.fields.retain(|f| access.shows(f.perm_level));
+    Cow::Owned(visible)
+}
+
+/// [`readable_doctype`] for what [`field_access`] says about `caller`: the DocType as this caller
+/// sees it.
+pub fn readable_doctype_for<'a>(doctype: &'a DocType, caller: &Caller) -> Cow<'a, DocType> {
+    readable_doctype(doctype, field_access(doctype, caller))
 }
 
 /// Whether `caller` may run a query report (M8.4, ADR 0016) that names `roles`: the system
@@ -509,6 +666,191 @@ mod tests {
         for bad in ["", "   ", "a\tb", "a\0b", "\n"] {
             assert!(check_role_name(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// A rule at `level` granting read and/or write.
+    fn at_level(role: &str, level: u8, read: bool, write: bool) -> PermissionRule {
+        PermissionRule {
+            read,
+            write,
+            level,
+            ..PermissionRule::new(role)
+        }
+    }
+
+    /// A DocType with fields at levels 0, 1 and 2.
+    fn leveled(permissions: Vec<PermissionRule>) -> DocType {
+        let mut d = doctype(permissions);
+        for (name, level) in [("plain", 0), ("limit", 1), ("secret", 2)] {
+            d.fields.push(DocField {
+                name: name.into(),
+                label: name.into(),
+                field_type: crate::meta::FieldType::Int,
+                required: false,
+                unique: false,
+                allow_on_submit: false,
+                read_only: false,
+                perm_level: level,
+            });
+        }
+        d
+    }
+
+    #[test]
+    fn a_rule_of_a_level_grants_no_document_right() {
+        // Level 1 rules with read and write, and nothing at level 0: no document access at all.
+        let d = leveled(vec![at_level("Clerk", 1, true, true)]);
+        for right in Right::ALL {
+            assert_eq!(evaluate(&d, &user(&["Clerk"]), right), Access::Denied);
+        }
+        // Next to a level 0 rule the level 1 rule changes nothing about the document rights.
+        let d = leveled(vec![
+            only("Clerk", Right::Read, true),
+            at_level("Clerk", 1, true, true),
+        ]);
+        assert_eq!(
+            evaluate(&d, &user(&["Clerk"]), Right::Read),
+            Access::OwnerOnly
+        );
+        assert_eq!(
+            evaluate(&d, &user(&["Clerk"]), Right::Write),
+            Access::Denied
+        );
+    }
+
+    #[test]
+    fn field_access_system_and_administrator_have_every_level() {
+        let d = leveled(vec![]);
+        for caller in [user(&[ADMINISTRATOR]), Caller::system("cli")] {
+            let access = field_access(&d, &caller);
+            assert!(access.is_all());
+            for level in 0..=MAX_PERM_LEVEL {
+                assert!(access.can_read(level) && access.can_write(level), "{level}");
+            }
+        }
+        // Even with rules that name only another role and level.
+        let d = leveled(vec![at_level("Clerk", 1, true, true)]);
+        assert!(field_access(&d, &user(&[ADMINISTRATOR])).is_all());
+    }
+
+    #[test]
+    fn field_access_matrix_of_level_zero_rights_if_owner_and_level_rules() {
+        // Level 0: which rights the caller has; level 1: which of read/write the rule grants.
+        for (r0, w0, c0) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, true, false),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            for if_owner in [false, true] {
+                for (r1, w1) in [(false, false), (true, false), (true, true), (false, true)] {
+                    let mut level0 = PermissionRule::new("Clerk");
+                    level0.read = r0;
+                    level0.write = w0;
+                    level0.create = c0;
+                    level0.if_owner = if_owner;
+                    // An empty rule would be a definition error, but the evaluator does not care.
+                    let rules = vec![level0, at_level("Clerk", 1, r1, w1)];
+                    let d = leveled(rules);
+                    let access = field_access(&d, &user(&["Clerk"]));
+                    let label =
+                        format!("r0={r0} w0={w0} c0={c0} if_owner={if_owner} r1={r1} w1={w1}");
+                    // Level 0 follows the rights; if_owner changes nothing about fields.
+                    assert_eq!(access.can_read(0), r0, "{label}");
+                    assert_eq!(access.can_write(0), w0 || c0, "{label}");
+                    // Level 1 needs level 0 and the rule.
+                    assert_eq!(access.can_read(1), r0 && r1, "{label}");
+                    assert_eq!(access.can_write(1), (w0 || c0) && w1, "{label}");
+                    // No rule names level 2, and the other levels are closed.
+                    for level in 2..=MAX_PERM_LEVEL {
+                        assert!(
+                            !access.can_read(level) && !access.can_write(level),
+                            "{label}"
+                        );
+                    }
+                    // Without the role nothing is granted, at any level.
+                    let other = field_access(&d, &user(&["Other"]));
+                    for level in 0..=MAX_PERM_LEVEL {
+                        assert!(!other.can_read(level) && !other.can_write(level), "{label}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn field_access_unions_roles_and_levels_are_independent() {
+        let d = leveled(vec![
+            only("Reader", Right::Read, false),
+            only("Writer", Right::Write, false),
+            at_level("Lead", 1, true, false),
+            at_level("Boss", 1, true, true),
+            at_level("Boss", 2, true, false),
+            at_level("Spy", 2, true, true),
+        ]);
+        // A level rule alone gives nothing without a level 0 right.
+        let spy = field_access(&d, &user(&["Spy"]));
+        assert!(!spy.can_read(2) && !spy.can_write(2) && !spy.can_read(0));
+        // Reader + Lead: reads level 1 but cannot write it.
+        let a = field_access(&d, &user(&["Reader", "Lead"]));
+        assert!(a.can_read(1) && !a.can_write(1) && !a.can_read(2));
+        // Reader + Writer + Boss: level 1 read and write, level 2 read only (the rule), level 0 both.
+        let b = field_access(&d, &user(&["Reader", "Writer", "Boss"]));
+        assert!(b.can_read(1) && b.can_write(1));
+        assert!(b.can_read(2) && !b.can_write(2));
+        assert!(b.can_read(0) && b.can_write(0));
+        // Roles of different levels add up.
+        let c = field_access(&d, &user(&["Reader", "Writer", "Lead", "Spy"]));
+        assert!(c.can_read(1) && !c.can_write(1) && c.can_read(2) && c.can_write(2));
+        // A level above the maximum is never accessible, and the bit helpers do not overflow.
+        assert!(!FieldAccess::ALL.can_read(10) && !FieldAccess::ALL.can_write(200));
+    }
+
+    #[test]
+    fn readable_fields_and_names_hide_what_the_caller_cannot_read() {
+        let d = leveled(vec![
+            only("Reader", Right::Read, false),
+            at_level("Reader", 1, true, false),
+        ]);
+        let access = field_access(&d, &user(&["Reader"]));
+        let names: Vec<&str> = readable_fields(&d, access)
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, ["plain", "limit"]);
+        assert!(readable_field(&d, access, "limit").is_some());
+        // A hidden field is exactly like a name that is not a field.
+        assert!(readable_field(&d, access, "secret").is_none());
+        assert!(readable_field(&d, access, "nope").is_none());
+        let plain_reader = field_access(&d, &user(&[]));
+        let names: Vec<&str> = readable_fields(&d, plain_reader)
+            .map(|f| f.name.as_str())
+            .collect();
+        // Level 0 is never hidden by field levels (the document rights decide about it).
+        assert_eq!(names, ["plain"]);
+        assert!(plain_reader.shows(0) && !plain_reader.shows(1) && !plain_reader.can_read(0));
+        // The caller's DocType has the readable fields only, and borrows when nothing is hidden.
+        let view = readable_doctype(&d, access);
+        assert_eq!(view.fields.len(), 2);
+        assert!(view.field("secret").is_none());
+        assert!(matches!(
+            readable_doctype(&d, FieldAccess::ALL),
+            Cow::Borrowed(_)
+        ));
+        let plain = doctype(vec![only("Reader", Right::Read, false)]);
+        assert!(matches!(
+            readable_doctype_for(&plain, &user(&["Nobody"])),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(readable_doctype_for(&d, &user(&["Reader"])).fields.len(), 2);
+        assert_eq!(
+            readable_doctype_for(&d, &Caller::system("cli"))
+                .fields
+                .len(),
+            3
+        );
     }
 
     fn with_workflow(permissions: Vec<PermissionRule>) -> DocType {
