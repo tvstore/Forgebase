@@ -65,6 +65,7 @@ mod database;
 mod document;
 mod error;
 mod export;
+mod fixtures;
 mod ident;
 mod import;
 pub mod jobs;
@@ -92,6 +93,7 @@ pub use deadpool_postgres::Pool;
 pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
 pub use error::DbError;
 pub use export::{Export, ExportQuery, PAGE_ROWS, begin_export};
+pub use fixtures::{AppFixtures, FixtureRecord};
 pub use forgebase_core::permission::Caller;
 pub use ident::quote_ident;
 pub use import::{ImportError, ImportMode, ImportOutcome, ImportRow, MAX_REPORTED_ERRORS, import};
@@ -168,6 +170,17 @@ pub struct MigrateReport {
     /// with documents in a state its workflow no longer defines. Empty in a dry run (nothing is
     /// backfilled) and when there is nothing to say.
     pub workflow_warnings: Vec<String>,
+    /// What the fixtures of each app that has any did (M9.4, ADR 0022), in app order; with a dry
+    /// run, what they would do. Apps without fixture records are not listed.
+    pub fixtures: Vec<AppFixtures>,
+    /// False in a dry run while framework migrations are pending: the fixtures are listed, but
+    /// only with their number of records, because the plan needs tables those migrations create.
+    pub fixtures_planned: bool,
+    /// The fixtures of one app were refused ([`DbError::FixtureFailed`]): that app's fixtures were
+    /// rolled back (unless the commit itself failed: its outcome is then unknown), the later apps' were not tried, and everything else in this report was
+    /// committed. `migrate` still returns the report, so that the caller can show what was
+    /// applied before it reports the failure. **A caller must check it.**
+    pub fixtures_failure: Option<DbError>,
 }
 
 /// Applies the framework migrations, then syncs the DocType schema. Same as [`migrate_apps`]
@@ -200,6 +213,11 @@ pub async fn migrate(
 /// an app's migrations, `fb_app` is upserted with the app's name and version (apps that are not
 /// in `apps` are left as they are).
 ///
+/// After the app migrations, the workflow backfill and the schedules, the fixtures of every app
+/// are applied (ADR 0022), in app order, one transaction per app (a failing record rolls back
+/// that app's fixtures, unless the commit itself failed, whose outcome is unknown, and is [`DbError::FixtureFailed`], returned in
+/// [`MigrateReport::fixtures_failure`] together with the report of what was applied).
+///
 /// With `dry_run` nothing is kept: the report lists the pending framework and app migrations
 /// and the sync plan. While framework migrations are pending the sync plan is `None`. The app
 /// migrations are still verified and listed when `fb_app_migration` exists; before migration 0004
@@ -217,6 +235,9 @@ pub async fn migrate_apps(
 /// schedules the binary declares ([`schedule::sync`]) when `schedules` is `Some`: schedules the
 /// binary does not declare are **deleted**, so the binary that migrates is the source of truth.
 /// With `None` the schedule table is left alone.
+///
+/// A refused fixture is not an `Err`: it is [`MigrateReport::fixtures_failure`] in the returned
+/// report, which also says what was committed. **Check it.**
 pub async fn migrate_all(
     pool: &Pool,
     registry: &Registry,
@@ -295,6 +316,20 @@ async fn migrate_locked(
             app_migrations,
             schedules: Vec::new(),
             workflow_warnings: Vec::new(),
+            fixtures: apps
+                .iter()
+                .filter(|a| !a.fixtures.is_empty())
+                .map(|a| AppFixtures {
+                    app: a.name.to_owned(),
+                    records: a.fixtures.len(),
+                    inserted: 0,
+                    updated: 0,
+                    kept: 0,
+                    unchanged: 0,
+                })
+                .collect(),
+            fixtures_planned: false,
+            fixtures_failure: None,
         });
     }
     let pending = app_migrations::pending(client, apps).await?;
@@ -322,11 +357,32 @@ async fn migrate_locked(
     } else {
         workflow::backfill_workflow_states(client, registry).await?
     };
+    // Last, after the app migrations (which may create what a record links to) and the backfill:
+    // one transaction per app, in app order. A failure leaves everything above applied.
+    let mut fixtures = Vec::new();
+    let mut fixtures_failure = None;
+    for app in apps.iter().filter(|a| !a.fixtures.is_empty()) {
+        if options.dry_run {
+            fixtures.push(fixtures::plan(client, app).await?);
+            continue;
+        }
+        match fixtures::apply(client, registry, app, options.lock_timeout).await {
+            Ok(done) => fixtures.push(done),
+            Err(error @ DbError::FixtureFailed { .. }) => {
+                fixtures_failure = Some(error);
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     Ok(MigrateReport {
         migrations,
         sync: Some(sync),
         app_migrations,
         schedules,
         workflow_warnings,
+        fixtures,
+        fixtures_planned: true,
+        fixtures_failure,
     })
 }

@@ -287,7 +287,7 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 10 pending"), "{text}");
+    assert!(text.contains("framework migrations: 11 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
@@ -333,7 +333,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 10 applied"), "{text}");
+    assert!(text.contains("framework migrations: 11 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")

@@ -37,6 +37,11 @@
 //!   migration, or a new one numbered below an applied one, is refused. `fb_app` records which
 //!   app and version were migrated. App code is trusted: the SQL runs with the database role
 //!   of the binary.
+//! - **Fixtures.** Records an app ships ([`App::fixtures`], files embedded with [`fixtures!`]):
+//!   one JSON file per DocType with field naming, applied by `migrate` after the app migrations,
+//!   in app order, through the document pipeline, one transaction per app. A record is inserted
+//!   if missing and updated only when the app changes it (a checksum per record in `fb_fixture`),
+//!   so a site's edits survive until then; nothing is ever deleted. See ADR 0022.
 //! - **Startup errors.** All of the above is checked before anything runs; every problem is
 //!   reported together ([`StartupError`], exit code 1).
 //!
@@ -102,6 +107,7 @@ mod data_cmd;
 mod doctypes;
 mod documents;
 mod error;
+mod fixtures;
 mod job_cmd;
 mod jobs;
 mod methods;
@@ -117,7 +123,7 @@ mod worker;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use app::{App, DocTypeFile, MigrationFile};
+pub use app::{App, DocTypeFile, FixtureFile, MigrationFile};
 pub use builder::Forgebase;
 pub use compose::StartupError;
 pub use documents::{DocError, Documents, FilterOp, ListQuery, StoredDocument};

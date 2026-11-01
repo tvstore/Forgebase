@@ -28,6 +28,7 @@ async fn migrates_empty_database_and_is_idempotent() {
             vec!["8".to_owned(), "workflow_log".into(), "64".into()],
             vec!["9".to_owned(), "saved_views".into(), "64".into()],
             vec!["10".to_owned(), "webhooks".into(), "64".into()],
+            vec!["11".to_owned(), "fixtures".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -43,7 +44,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["10".to_owned()]]
+        vec![vec!["11".to_owned()]]
     );
 }
 
@@ -94,7 +95,7 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY fb_migration.version")
@@ -109,7 +110,8 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
             vec!["7".into()],
             vec!["8".into()],
             vec!["9".into()],
-            vec!["10".into()]
+            vec!["10".into()],
+            vec!["11".into()]
         ]
     );
     assert_eq!(
@@ -126,7 +128,7 @@ async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![3, 4, 5, 6, 7, 8, 9, 10]
+        vec![3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     assert_eq!(applied[0].name, "auth");
     for table in [
@@ -379,5 +381,36 @@ async fn migration_9_creates_the_saved_views() {
             vec!["fb_saved_view_private_label".to_owned()],
             vec!["fb_saved_view_shared_label".to_owned()]
         ]
+    );
+}
+
+#[tokio::test]
+async fn migration_11_creates_the_fixture_table() {
+    let db = TestDb::migrated().await;
+    assert_eq!(
+        db.columns("fb_fixture").await,
+        vec![
+            ("doctype".to_owned(), "text/NO".to_owned()),
+            ("name".to_owned(), "text/NO".to_owned()),
+            ("app".to_owned(), "text/NO".to_owned()),
+            ("checksum".to_owned(), "text/NO".to_owned()),
+            (
+                "applied_at".to_owned(),
+                "timestamp with time zone/NO".to_owned()
+            ),
+        ]
+    );
+    // One row per (doctype, name).
+    db.exec("INSERT INTO fb_fixture (doctype, name, app, checksum) VALUES ('d', 'n', 'a', 'c')")
+        .await;
+    let client = db.pool.get().await.unwrap();
+    assert!(
+        client
+            .execute(
+                "INSERT INTO fb_fixture (doctype, name, app, checksum) VALUES ('d', 'n', 'b', 'c')",
+                &[]
+            )
+            .await
+            .is_err()
     );
 }

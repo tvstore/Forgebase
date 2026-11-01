@@ -447,6 +447,10 @@ Owner decision 9 of the M9 plan, 2026-10-30 (*"setuju semua rencana mu"*; [ADR 0
 - **MSRV:** `cargo +1.97 check --workspace --all-targets --all-features --locked` passes (`csv` declares 1.73).
 - **Desk:** no new npm dependency.
 
+### 16. Fixtures (M9.4): no new package
+
+Owner decision 10 of the M9 plan, 2026-10-30 ([ADR 0022](../adr/0022-fixtures.md)). **No dependency is added and the lockfile does not change.** The checksum of a fixture record is SHA-256 of its canonical JSON (the compact form with sorted keys), computed with `sha2`, which `forgebase` has depended on directly since M9.2 (the webhook signature); the JSON is read with `serde_json`, already a dependency of every crate. The canonical text is produced entirely by a small function in `forgebase`: sorted keys, its own string escapes, integers by `Display`, floats from Rust's `{:e}` digits in a fixed form. It depends neither on `serde_json`'s features (`preserve_order`, `arbitrary_precision`, `float_roundtrip`; open question 11) nor on its version (its float formatter changed from `ryu` to `zmij`). The parser is still `serde_json`'s, so numbers are **restricted at startup** (no negative zero, no integer outside `i64`/`u64`, floats with at most 15 significant digits and a decimal exponent within ±15, below 2^63): if two builds both accept a number its canonical text is the same, and a number one build accepts may be a startup error in another (fail-closed, never a silent overwrite). `forgebase-db` does not need `sha2`: it gets the checksum as text.
+
 ## Recommended baseline
 
 Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 0005); everything else is Proposed.

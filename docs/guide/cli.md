@@ -138,6 +138,18 @@ cargo run -p sales -- data import customer new-customers.csv --format csv --acto
 - **`--upsert`** updates the document that a row's `name` names and inserts the rows whose name does not exist, when the DocType's naming allows a given name (a DocType named by a field takes the name that equals the field's value; random and series naming give their own names, so such a row is an error). A DocType named by a field cannot be renamed: the row's naming field must equal the name.
 - **Time.** The transaction is as long as the file: about 37 seconds for 10 000 rows of a simple DocType (measured with a debug build on a local PostgreSQL; the export of the same rows takes half a second). Run big imports when the site is quiet.
 
+## Migrate and fixtures (M9.4)
+
+`forgebase migrate` applies the framework migrations, the schema sync, the app migrations and then the **fixtures** of the apps that have any ([first-app guide, section 9](first-app.md#9-fixtures)). It prints one line per app with fixtures:
+
+```
+fixtures: sales: 2 inserted, 1 updated, 0 kept, 5 unchanged
+```
+
+*inserted* are records written as new documents (also a record the site deleted that the app has since changed), *updated* are records whose new version was applied to the existing document, *kept* are records whose document the site had made before the app shipped it (left as it is, tracked from now on), and *unchanged* are records that did not change since they were last applied (nothing is read or written for them). `migrate --dry-run` prints the plan and writes nothing: `fixtures: sales: would insert 2, update 1, keep 0, 5 unchanged`. While framework migrations are pending (a fresh database) it cannot plan them and says `fixtures: sales: 8 record(s), not planned yet`.
+
+A record the document pipeline refuses (a hook, a missing link, a value that is too long) fails `migrate` with `fixtures of app sales were not applied: fixtures/customer_group.json: record 2 (Wholesale): ...`; the fixtures of that app are rolled back as a whole, what was applied before stays, and `migrate` can be run again after the fix. A fixture insert or update fires the webhooks of its DocType, as any write does. Each site applies its own fixtures.
+
 ## Sites
 
 One deployment can serve several **sites**, each with its own database (ADR 0014). A single-site setup needs nothing new: without a config file there is one site, `default`, from `FORGEBASE_DATABASE_URL`. For several sites, write a `forgebase.toml` (no secrets: the database URLs come from environment variables) and pass it with `--config forgebase.toml` or `FORGEBASE_CONFIG=forgebase.toml` (it is never searched for in the current directory):

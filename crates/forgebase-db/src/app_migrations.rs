@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio_postgres::Client;
 
 use crate::error::DbError;
+use crate::fixtures::FixtureRecord;
 use crate::migrate::checksum;
 use crate::sync::lock_timeout_setting;
 
@@ -34,6 +35,8 @@ pub struct AppSpec<'a> {
     pub version: Option<&'a str>,
     /// The migrations, in the order they run (strictly increasing versions).
     pub migrations: &'a [AppMigration<'a>],
+    /// The fixture records of the app, in the order they are applied (M9.4, ADR 0022).
+    pub fixtures: &'a [FixtureRecord<'a>],
 }
 
 /// An app migration that was applied (in a dry run: would be applied).

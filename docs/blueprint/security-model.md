@@ -130,6 +130,16 @@ Routes, statuses and the error envelope: [architecture, section 7](architecture.
 - **The dry run changes nothing and says so.** `dry_run=1` runs every row, including the hooks, in the one transaction and always rolls it back: no documents, no outbox jobs, no webhook deliveries (tested: the same file for real enqueues them, the dry run does not). A hook that does something outside the transaction would do it on a dry run too; the hook API cannot reach the database, but app code is trusted code. The dry run returns what each row would have caused, including the names it would have chosen: it needs the same rights as the import itself.
 - **Errors do not widen what a caller learns.** A row error is the error the document API gives for that row; an unreadable link is reported like a missing one; a file-level error names a column of the caller's own file. The error list has at most 100 entries.
 
+## Fixtures (M9.4, ADR 0022)
+
+[ADR 0022](../adr/0022-fixtures.md). Fixtures are data an app compiles in and `migrate` writes, so they are as trusted as the app (ADR 0006, ADR 0012), and the operator who runs `migrate` is trusted to run them.
+
+- **No bypass of the pipeline.** A fixture record is inserted or updated through the document functions as `Caller::System` (actor `fixture:<app>`), so hooks, validation, naming, links and webhooks apply; the system context skips only the permission rules, as for every other system write. The actor is recorded as `owner` and `modified_by`.
+- **Webhooks fire.** A fixture insert or update enqueues the deliveries of the webhooks of its DocType, like any write. A site that must not send deliveries for them disables the webhook around `migrate`.
+- **No fixtures for a document lifecycle.** Submittable DocTypes and DocTypes with a workflow are refused, so a fixture cannot write fields of a document that the lifecycle or the workflow roles lock, and cannot change a workflow state.
+- **A site's data wins until the app changes the record.** An unchanged record never touches the document (not even a read); an existing document is adopted, not overwritten; nothing is deleted. A changed record overwrites **only the fields it has**, so a fixture cannot reset a field the app did not ship.
+- **`fb_fixture` is bookkeeping, not authority.** It holds a checksum, an app name and a time per record; deleting a row only makes the next `migrate` check that record again.
+
 ## Multi-site isolation (M7.1, Accepted, ADR 0014)
 
 Decision record: [ADR 0014](../adr/0014-multi-site-database-per-site.md). Design and decisions: [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014). Security properties (M7.1, and M7.2 where marked):

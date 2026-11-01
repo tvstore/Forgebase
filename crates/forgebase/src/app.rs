@@ -49,6 +49,46 @@ impl DocTypeFile {
     }
 }
 
+/// A fixture file embedded in the binary: its path (for error messages) and its JSON text. Build
+/// the list with [`fixtures!`](crate::fixtures); by hand (in a test, for example) with
+/// [`FixtureFile::new`].
+///
+/// One file holds the records of one DocType:
+/// `{"doctype": "customer_group", "records": [{"title": "Retail"}]}`. See
+/// [`App::fixtures`] for the rules.
+///
+/// The fields are private and the type is `#[non_exhaustive]`, like [`DocTypeFile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FixtureFile {
+    path: &'static str,
+    json: &'static str,
+}
+
+impl FixtureFile {
+    /// A file from its path (only used in messages; use the path as you would write it in
+    /// [`fixtures!`](crate::fixtures), relative to the app crate's root) and its JSON text.
+    pub const fn new(path: &'static str, json: &'static str) -> Self {
+        Self { path, json }
+    }
+
+    /// Used by [`fixtures!`](crate::fixtures). Not part of the API: it may change with the macro.
+    #[doc(hidden)]
+    pub const fn __new(path: &'static str, json: &'static str) -> Self {
+        Self { path, json }
+    }
+
+    /// The path as written in the macro, relative to the app crate's root.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    /// The file's contents.
+    pub const fn json(&self) -> &'static str {
+        self.json
+    }
+}
+
 /// An app data migration embedded in the binary. Build the list with
 /// [`migrations!`](crate::migrations); by hand with [`MigrationFile::new`].
 ///
@@ -147,6 +187,26 @@ macro_rules! doctypes {
     };
 }
 
+/// Embeds fixture files (JSON), with paths relative to **the root of the crate that calls the
+/// macro** (its `CARGO_MANIFEST_DIR`). Gives a `&'static [FixtureFile]` for [`App::fixtures`].
+///
+/// ```ignore
+/// App::new("sales").fixtures(forgebase::fixtures![
+///     "fixtures/customer_group.json",
+/// ])
+/// ```
+#[macro_export]
+macro_rules! fixtures {
+    ($($path:literal),* $(,)?) => {
+        const {
+            &[$($crate::FixtureFile::__new(
+                $path,
+                ::core::include_str!(::core::concat!(::core::env!("CARGO_MANIFEST_DIR"), "/", $path)),
+            )),*]
+        }
+    };
+}
+
 /// Embeds app data migrations (SQL files), with paths relative to **the root of the crate that
 /// calls the macro**. Each entry is `(version, name, path)`. Gives a
 /// `&'static [MigrationFile]` for [`App::migrations`].
@@ -201,6 +261,8 @@ macro_rules! migrations {
 /// - declare SQL data migrations;
 /// - register background jobs ([`App::job`]), which hooks, other jobs and the command line can
 ///   enqueue, and run them on a [`Schedule`] ([`App::schedule`]);
+/// - ship fixtures ([`App::fixtures`]): records that `migrate` inserts and updates when the app
+///   ships a new version of them, and never deletes;
 /// - define query reports ([`App::report`]): SQL compiled into the binary, run read-only for the
 ///   roles it names;
 /// - define methods ([`App::method`]): functions a client calls over HTTP, as the caller.
@@ -216,6 +278,7 @@ pub struct App {
     pub(crate) doctypes: Vec<DocTypeFile>,
     pub(crate) hooks: Vec<(String, Arc<dyn DocTypeHooks>)>,
     pub(crate) migrations: Vec<MigrationFile>,
+    pub(crate) fixtures: Vec<FixtureFile>,
     pub(crate) jobs: Vec<(String, Arc<dyn JobHandler>, JobOptions)>,
     pub(crate) schedules: Vec<(String, Schedule)>,
     pub(crate) reports: Vec<(String, Report)>,
@@ -238,6 +301,7 @@ impl fmt::Debug for App {
             .field("doctypes", &self.doctypes)
             .field("hooks", &hooked)
             .field("migrations", &self.migrations)
+            .field("fixtures", &self.fixtures)
             .field(
                 "jobs",
                 &self
@@ -286,6 +350,7 @@ impl App {
             doctypes: Vec::new(),
             hooks: Vec::new(),
             migrations: Vec::new(),
+            fixtures: Vec::new(),
             jobs: Vec::new(),
             schedules: Vec::new(),
             reports: Vec::new(),
@@ -335,6 +400,26 @@ impl App {
     /// own transaction. The SQL runs with the database role of the binary: app code is trusted.
     pub fn migrations(mut self, files: &'static [MigrationFile]) -> Self {
         self.migrations.extend_from_slice(files);
+        self
+    }
+
+    /// Adds fixture files, from [`fixtures!`](crate::fixtures) (or built by hand). Calling it
+    /// again adds more files.
+    ///
+    /// A fixture file holds the records of one DocType (`{"doctype": "...", "records": [...]}`,
+    /// each record shaped like the body of `POST /api/v1/resource/<doctype>`). `forgebase migrate`
+    /// applies them after the app migrations, in app order, then file order, then record order,
+    /// through the document pipeline as the system caller `fixture:<app>`, in one transaction per
+    /// app. A record is inserted if it is missing; it is updated only when the app ships a new
+    /// version of that record, so edits made on the site survive until then; nothing is ever
+    /// deleted. See ADR 0022 for the exact rules.
+    ///
+    /// Only a DocType with **field naming** may have fixtures (the name is the identity of a
+    /// record); a DocType with a workflow, a submittable one and a child DocType are refused, and
+    /// so are DocTypes of apps this app does not depend on. Every problem is a startup error, like
+    /// the other mistakes of an app.
+    pub fn fixtures(mut self, files: &'static [FixtureFile]) -> Self {
+        self.fixtures.extend_from_slice(files);
         self
     }
 

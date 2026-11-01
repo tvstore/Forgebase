@@ -17,12 +17,15 @@ use std::sync::Arc;
 use forgebase_core::ident::validate_doctype_name;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType, Registry};
 use forgebase_db::schedule::{Declared, Spec};
-use forgebase_db::{AppMigration, AppSpec, DbError, MigrateReport, Pool, SyncOptions};
+use forgebase_db::{
+    AppMigration, AppSpec, DbError, FixtureRecord, MigrateReport, Pool, SyncOptions,
+};
 
 use crate::app::{App, MigrationFile};
 use crate::builtin;
 use crate::doctypes::read_dir;
 use crate::error::bullets;
+use crate::fixtures::{self, OwnedRecord};
 use crate::methods::{MethodHandler, Methods};
 use crate::worker::JobDef;
 
@@ -38,7 +41,7 @@ pub(crate) const LOCAL_APP: &str = "local";
 /// each naming its file).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupError {
-    apps: Vec<String>,
+    pub(crate) apps: Vec<String>,
     files: Vec<String>,
 }
 
@@ -98,6 +101,7 @@ struct AppInfo {
     name: String,
     version: Option<&'static str>,
     migrations: Vec<MigrationFile>,
+    fixtures: Vec<OwnedRecord>,
 }
 
 impl Composed {
@@ -109,6 +113,16 @@ impl Composed {
     /// True when the app `name` is one of the composed apps (not `local`).
     pub fn has_app(&self, name: &str) -> bool {
         self.apps.iter().any(|a| a.name == name)
+    }
+
+    /// The fixture records of the app `name`, in the order they are applied (empty for an app
+    /// without fixtures or an unknown one).
+    #[cfg(test)]
+    pub(crate) fn fixture_records(&self, name: &str) -> &[OwnedRecord] {
+        self.apps
+            .iter()
+            .find(|a| a.name == name)
+            .map_or(&[], |a| &a.fixtures)
     }
 
     /// How many reports the composed apps define.
@@ -128,8 +142,10 @@ impl Composed {
         forgebase_db::check_reports(&mut client, &reports).await
     }
 
-    /// Framework migrations, schema sync, the app migrations in app order, then the sync of the
-    /// declared schedules ([`forgebase_db::migrate_all`]).
+    /// Framework migrations, schema sync, the app migrations in app order, the sync of the
+    /// declared schedules and then the fixtures of the apps in app order
+    /// ([`forgebase_db::migrate_all`]). A refused fixture is `MigrateReport::fixtures_failure`
+    /// in the `Ok` report, not an `Err`: the caller prints what was applied, then the failure.
     pub async fn migrate(
         &self,
         pool: &Pool,
@@ -149,14 +165,21 @@ impl Composed {
                     .collect()
             })
             .collect();
+        let fixtures: Vec<Vec<FixtureRecord<'_>>> = self
+            .apps
+            .iter()
+            .map(|app| app.fixtures.iter().map(OwnedRecord::view).collect())
+            .collect();
         let specs: Vec<AppSpec<'_>> = self
             .apps
             .iter()
             .zip(&migrations)
-            .map(|(app, migrations)| AppSpec {
+            .zip(&fixtures)
+            .map(|((app, migrations), fixtures)| AppSpec {
                 name: &app.name,
                 version: app.version,
                 migrations,
+                fixtures,
             })
             .collect();
         let declared: Vec<Declared<'_>> = self
@@ -225,10 +248,12 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
 
     // Only when everything loaded: a Link to a DocType from a broken file would be reported
     // twice, and a hook on one as an unknown DocType.
+    let mut fixtures: Vec<Vec<OwnedRecord>> = vec![Vec::new(); apps.len()];
     if errors.files.is_empty() {
         check_references(&registry, &defined_in, &reach, &local_reach, &mut errors);
         check_hooks(apps, &reach, &mut registry, &mut errors);
         check_reports(apps, &reach, &mut registry, &mut errors);
+        fixtures = fixtures::check(apps, &reach, &registry, &mut errors);
     }
     // Jobs do not depend on the DocType files, so their problems are reported with the others.
     let jobs = check_jobs(apps, &mut registry, &mut errors);
@@ -245,10 +270,12 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
         methods: Methods::new(methods),
         apps: apps
             .iter()
-            .map(|a| AppInfo {
+            .zip(fixtures)
+            .map(|(a, fixtures)| AppInfo {
                 name: a.name.clone(),
                 version: a.version,
                 migrations: a.migrations.clone(),
+                fixtures,
             })
             .collect(),
     })
