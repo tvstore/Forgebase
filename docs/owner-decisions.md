@@ -383,6 +383,19 @@ M9.5 implements owner decision 11 of the M9 plan (*"M9 is split into M9.1 to M9.
 | **11** (M9 split into M9.1 to M9.5; M9.5 touches no file under `crates/`): recorded by M9.1, #43; kept by M9.5, whose diff has no file under `crates/`. | [M9.1 section](#m91-app-method-endpoints-2026-10-31-working-session), [milestones](blueprint/milestones.md#m9-integration) |
 | **M9 is Done (2026-11-01).** Delivered by #42 (M9.0), #43, #44, #45, #46 and the M9.5 pull request. The exit criteria of the plan, with their evidence and what is only partly evidenced, are in the milestones. The next milestone, M10, has not started. | [milestones](blueprint/milestones.md#m9-exit-criteria-and-evidence) |
 
-## M10 Customization plan approved (2026-10-31; information session)
+### M10 Customization (2026-10-31, "setuju semua rencana mu"; information session)
 
-The owner approved the M10 plan in the information session on 2026-10-31: *"setuju semua rencana mu"*. The plan covers app overlays and site custom fields, field-level permissions (levels 0 to 9) and user permissions, split into M10.1 to M10.4; it starts after M9 Done. Its ten decisions are recorded, with their quotes and links, by the pull requests that implement them (M10.1 onward). This entry only records that the plan is approved and not started.
+The owner approved the M10 plan in the information session on 2026-10-31: *"setuju semua rencana mu"* (all ten decisions). **M10 starts after M9 is Done** and has not started; this section is the only record of its decisions until the M10 pull requests land.
+
+| Decision | Recorded in |
+|---|---|
+| 1: app overlays (an app adds fields to a DocType of an app it depends on) and site custom fields (per site, at runtime). | planned: the M10.1 pull request |
+| 2: overlays only add fields (every type except Table); no property setters in M10. | planned: the M10.1 pull request |
+| 3: site custom field names start with `custom_`. | planned: the M10.1 pull request |
+| 4: disabling a site custom field hides it everywhere; its column and data are kept. | planned: the M10.1 pull request |
+| 5: running `serve` and `worker` pick up site changes without a restart, within about 10 seconds (a per-site metadata version, an atomic swap of that site's registry). | planned: the M10.1 pull request |
+| 6: field levels 0 to 9 (`perm_level`, a rule's `level = n`); fields above the caller's levels are omitted everywhere and cannot be filtered, sorted or grouped by; query reports are exempt. | planned: the M10.2 pull request |
+| 7: user permissions: for a restricted user every non-empty Link to the target DocType must point to an allowed value (empty links stay visible), applied in SQL on every path; query reports are exempt. | planned: the M10.3 pull request |
+| 8: customization through the CLI and an Administrator-only API; no admin UI. | planned: the M10.1 and M10.3 pull requests |
+| 9: sharing is Later. | planned: [milestones](blueprint/milestones.md) |
+| 10: M10 is split into M10.1 to M10.4, and M10.4 (desk checks, example apps and the guide) touches no file under `crates/`. | planned: [milestones](blueprint/milestones.md) |

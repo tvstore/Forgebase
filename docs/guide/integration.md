@@ -144,7 +144,7 @@ The import is **all or nothing**: one transaction, and if any row has an error n
 {"data":{"dry_run":true,"error_count":1,"errors":[{"code":"validation_failed","details":["field `full_name` is required","field `customer_group`: customer_group `Nowhere` does not exist"],"line":2,"message":"validation failed","name":"z@example.com","row":1}],...}}
 ```
 
-The same from the command line, as the trusted system context (no permission rules; `--actor` names who is recorded as owner), and the same in the desk, where the list's **Export** menu and the **Import** page (Validate, then Import) do it without curl:
+The same from the command line (an alternative to the curl calls: on a site where the curl import already ran, use a new file or `--upsert`), as the trusted system context (no permission rules; `--actor` names who is recorded as owner), and the same in the desk, where the list's **Export** menu and the **Import** page (Validate, then Import) do it without curl:
 
 ```sh
 cargo run -p sales -- data export customer --format csv --fields name,full_name,tier --out customers-cli.csv
@@ -176,7 +176,7 @@ app migrations: 1 applied
 fixtures: sales: 1 inserted, 0 updated, 2 kept, 0 unchanged
 ```
 
-(abridged: the lines of the framework migrations, the schema sync and the schedules are left out)
+(abridged: the lines of the framework migrations, the schema sync, the schedules and the reports check are left out)
 
 `Online` was missing, so it was **inserted**. `Retail` and `Wholesale` existed already, so they were **kept**: left exactly as they are and tracked from now on (the site's data wins). The next `migrate` finds all three **unchanged** and writes nothing:
 
