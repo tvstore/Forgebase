@@ -195,9 +195,10 @@ fn write_float(f: f64, out: &mut String) {
 /// one build may be a startup error in another; that is fail-closed. Accepted: an integer in the
 /// `i64` or `u64` range, and a number written as a float (a fraction, an exponent, or an
 /// integer above that range) whose shortest `f64` text has at most 15 significant digits and a
-/// decimal exponent within ±15, and which is below 2^63 in magnitude. Those parse to the same
-/// `f64` in every mode. Refused: negative zero (`-0` is `-0.0` by default and `0` with
-/// `arbitrary_precision`; also a negative number that underflows to `-0.0`), a number that is not
+/// decimal exponent within ±15, and which is below 2^63 in magnitude. The test is applied to
+/// the **parsed** value, so a long or very small input may be refused by one build (whose
+/// parser rounded it differently) and accepted by another; that is fail-closed. Refused: negative zero (`-0` is `-0.0` by default and, in some `serde_json` versions, `0`
+/// with `arbitrary_precision`; also a negative number that underflows to `-0.0`), a number that is not
 /// finite, a non-zero number that underflows to zero, an integer beyond the `i64`/`u64` range,
 /// and any number with more digits or a larger exponent. A number out of range for `f64`
 /// (`1e400`) is a parse error by default and refused here when it parses under
@@ -651,7 +652,7 @@ mod tests {
             "0.1234567890123456",
             "100000000000000000000000.5",
             "2.2250738585072011e-308",
-            // beyond the exponent range of the exact fast path
+            // a decimal exponent beyond ±15
             "1e23",
             "1e-23",
             "1e16",

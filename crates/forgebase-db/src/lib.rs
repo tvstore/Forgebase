@@ -177,7 +177,7 @@ pub struct MigrateReport {
     /// only with their number of records, because the plan needs tables those migrations create.
     pub fixtures_planned: bool,
     /// The fixtures of one app were refused ([`DbError::FixtureFailed`]): that app's fixtures were
-    /// rolled back, the later apps' were not tried, and everything else in this report was
+    /// rolled back (unless the commit itself failed: its outcome is then unknown), the later apps' were not tried, and everything else in this report was
     /// committed. `migrate` still returns the report, so that the caller can show what was
     /// applied before it reports the failure. **A caller must check it.**
     pub fixtures_failure: Option<DbError>,
@@ -215,7 +215,7 @@ pub async fn migrate(
 ///
 /// After the app migrations, the workflow backfill and the schedules, the fixtures of every app
 /// are applied (ADR 0022), in app order, one transaction per app (a failing record rolls back
-/// that app's fixtures and is [`DbError::FixtureFailed`], returned in
+/// that app's fixtures, unless the commit itself failed, whose outcome is unknown, and is [`DbError::FixtureFailed`], returned in
 /// [`MigrateReport::fixtures_failure`] together with the report of what was applied).
 ///
 /// With `dry_run` nothing is kept: the report lists the pending framework and app migrations
