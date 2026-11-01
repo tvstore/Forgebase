@@ -35,6 +35,8 @@ name = "credit_limit"
 type = "decimal"
 precision = 12
 scale = 2
+# Level 1 (M10.2, ADR 0024: docs/adr/0024-field-permission-levels.md): only a rule with `level = 1` below reads or writes it, so a Sales User does not even see that it exists.
+perm_level = 1
 
 [[fields]]
 name = "active"
@@ -74,3 +76,10 @@ create = true
 delete = true
 export = true
 import = true
+
+# Level 1: the Sales Manager reads and writes `credit_limit` (ADR 0024). A Sales User has no level 1 rule.
+[[permissions]]
+role = "Sales Manager"
+level = 1
+read = true
+write = true

@@ -69,12 +69,13 @@ All guides are indexed in [docs/README.md](docs/README.md). The main ones:
 
 - [Getting started](docs/guide/getting-started.md), [Your first app](docs/guide/first-app.md) and [the command-line tool](docs/guide/cli.md)
 - [HTTP API](docs/guide/http-api.md), [Desk](docs/guide/desk.md) and [Workflow, saved views and reports](docs/guide/workflow-and-reports.md)
+- [Customizing and restricting data](docs/guide/customizing.md) (overlays, site custom fields, field permission levels, user permissions)
 - [Webhooks](docs/guide/webhooks.md), [Integrating with other systems](docs/guide/integration.md), [Operating Forgebase](docs/guide/operations.md) and [Deploy](docs/guide/deploy.md)
 - The blueprint: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [security model](docs/blueprint/security-model.md), [dependency evaluation](docs/blueprint/dependency-evaluation.md) and the [ADRs](docs/adr/README.md)
 
 ## Status and roadmap
 
-Milestones M0 to M9 are done: documents, auth and permissions, the REST API, the desk, apps, jobs, multi-site, workflow and reports, and integration (TLS to PostgreSQL, app method endpoints, outgoing webhooks, import and export, fixtures, and the example apps with the [integration guide](docs/guide/integration.md)). M10 (customization) is in progress: M10.1 (metadata overlays: app overlays, site custom fields and live reload) M10.2 (field permission levels) and M10.3 (user permissions) are delivered, and M10.4 is approved and not started. The details and the roadmap are in [docs/blueprint/milestones.md](docs/blueprint/milestones.md); the full status is in [docs/README.md](docs/README.md#project-status). The repository is public and the project is open source.
+Milestones M0 to M10 are done: documents, auth and permissions, the REST API, the desk, apps, jobs, multi-site, workflow and reports, and integration (TLS to PostgreSQL, app method endpoints, outgoing webhooks, import and export, fixtures, and the example apps with the [integration guide](docs/guide/integration.md)). Customization (M10) adds fields to another app's DocType (overlays) and to one site (custom fields, live), field permission levels and user permissions, with the walkthrough [Customizing and restricting data](docs/guide/customizing.md). No next milestone is approved yet: the next one is to be planned. The details and the roadmap are in [docs/blueprint/milestones.md](docs/blueprint/milestones.md); the full status is in [docs/README.md](docs/README.md#project-status). The repository is public and the project is open source.
 
 ## Contributing
 

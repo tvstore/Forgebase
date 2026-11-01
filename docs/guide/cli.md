@@ -25,6 +25,8 @@ Five consecutive failed logins for a username (each within 15 minutes of the pre
 
 ### User permissions (M10.3)
 
+Walkthrough: [Customizing and restricting data](customizing.md#user-permissions).
+
 `user permission` restricts what a user sees: of a DocType the user is restricted on, only the documents you allow, and of every other DocType only the documents whose Links to it are empty or allowed ([ADR 0025](../adr/0025-user-permissions.md); the rule is explained in [getting started](getting-started.md#user-permissions)). The commands run as the system context like the other `user` commands, and the same operations are available to an Administrator over [HTTP](http-api.md#user-permissions-m103).
 
 ```sh
@@ -161,6 +163,8 @@ cargo run -p sales -- data import customer new-customers.csv --format csv --acto
 - **Time.** The transaction is as long as the file: about 37 seconds for 10 000 rows of a simple DocType (measured with a debug build on a local PostgreSQL; the export of the same rows takes half a second). Run big imports when the site is quiet.
 
 ## Customize field commands (M10.1)
+
+Walkthrough: [Customizing and restricting data](customizing.md#site-custom-fields).
 
 A **site custom field** is a field one site adds to a DocType in its own database, without a rebuild ([ADR 0023](../adr/0023-metadata-overlays.md); an app adds fields with an [overlay](first-app.md#add-a-field-to-another-apps-doctype-overlays) instead). The command line is the tool for the operator; the same operations are available to an Administrator over [HTTP](http-api.md#customize-fields-m101).
 

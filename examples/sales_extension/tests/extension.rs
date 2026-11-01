@@ -346,6 +346,50 @@ async fn the_overlay_field_is_a_field_of_customer() {
 }
 
 #[tokio::test]
+async fn the_overlay_field_exists_only_where_the_extension_app_is_installed() {
+    // `sales` alone (what the site `shop` of examples/sites installs): no column, no field in the
+    // metadata, and a document has no such value.
+    let sales_only = Forgebase::new().app(sales::app());
+    let db = TestDb::new().await;
+    db.migrate(&sales_only, false).await.expect("migrate");
+    db.create_user("max", &["Sales Manager"]).await;
+    let client = db.client(&sales_only);
+    let manager = client.login("max").await;
+    let created = manager
+        .post(
+            "/api/v1/resource/customer",
+            json!({"email": "ada@example.com", "full_name": "Ada Lovelace"}),
+        )
+        .await;
+    assert_eq!(created.status, 201, "{:?}", created.body);
+    assert!(created.data().get("loyalty_tier").is_none());
+    let meta = manager.get("/api/v1/meta/customer").await;
+    assert_eq!(meta.status, 200, "{:?}", meta.body);
+    assert!(
+        !meta.body.to_string().contains("loyalty_tier"),
+        "{:?}",
+        meta.body
+    );
+    assert!(
+        db.rows(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_name = 'doc_customer' AND column_name = 'loyalty_tier'"
+        )
+        .await
+        .is_empty()
+    );
+    // Sending the field is an unknown field, not a stored value.
+    let refused = manager
+        .patch(
+            "/api/v1/resource/customer/ada@example.com",
+            json!({"version": 1, "data": {"loyalty_tier": "Gold"}}),
+        )
+        .await;
+    assert_eq!(refused.status, 422, "{:?}", refused.body);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_user_without_a_sales_role_cannot_create_a_visit() {
     let env = env().await;
     let denied = env
