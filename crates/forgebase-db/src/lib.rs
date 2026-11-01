@@ -3,7 +3,7 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1, M8.3 and M9.0):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1, M8.3, M9.0 and M10.1):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL follows the `sslmode` of the URL (M9.0,
 //!   ADR 0018): none by default, `sslmode=require` for TLS with full verification (rustls with
@@ -28,6 +28,11 @@
 //!   private per user or shared (Administrator only), on the table of migration 0009; and
 //!   [`summary`], the group-by summary of a list, which takes its read scope and filters from
 //!   the list code (`views` and `summary` module documentation).
+//! - [`add_custom_field`], [`set_custom_field_enabled`], [`list_custom_fields`] and
+//!   [`effective_registry`] (M10.1, ADR 0023): site custom fields on the tables of migration 0012,
+//!   changed in one transaction under the migrate lock with the statements of the schema sync;
+//!   [`RegistryHolder`] keeps a site's registry (the apps' plus its enabled custom fields) behind
+//!   an atomically swapped `Arc`, rebuilt when `fb_meta_version` changes.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
 //!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own

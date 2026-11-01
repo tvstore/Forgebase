@@ -138,7 +138,7 @@ pub struct AppConfig {
     /// How often a site checks `fb_meta_version` and rebuilds its registry when a custom field
     /// was added, disabled or enabled by another process (M10.1, ADR 0023). Default 10 seconds;
     /// `Duration::ZERO` turns the check off (the registry then changes only through
-    /// [`AppState::reload_registry`], which the customize routes call after a change).
+    /// `AppState::reload_registry`, which the customize routes call after a change).
     pub meta_reload_interval: std::time::Duration,
 }
 
