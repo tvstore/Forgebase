@@ -148,6 +148,10 @@ impl Command {
             }) => Some(doctypes),
             // Only `webhook add` needs the DocTypes (to check the DocType of the webhook).
             Command::Webhook(WebhookCommand::Add { doctypes, .. }) => Some(doctypes),
+            // Only `user permission add` needs the DocTypes (the DocType must be one of the site's).
+            Command::User(UserCommand::Permission(PermissionCommand::Add { doctypes, .. })) => {
+                Some(doctypes)
+            }
             // Only `customize field add` needs the DocTypes (to check the field against them).
             Command::Customize(CustomizeCommand::Field(FieldCommand::Add { doctypes, .. })) => {
                 Some(doctypes)
@@ -410,6 +414,8 @@ pub enum PermissionCommand {
         /// The name of the document the user may see.
         #[arg(long, value_name = "NAME")]
         value: String,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
     },
     /// Take one restriction from a user. With the last one of a DocType the user is no longer
     /// restricted on it. Removing a row that does not exist succeeds and says so.

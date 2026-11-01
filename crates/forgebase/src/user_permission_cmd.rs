@@ -33,6 +33,7 @@ pub(crate) async fn permission(
             user,
             doctype,
             value,
+            ..
         } => {
             if add_user_permission(client, registry, &user, &doctype, &value).await? {
                 format!(

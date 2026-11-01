@@ -17,7 +17,7 @@ use forgebase_http::{AppConfig, AppState, Sites};
 use crate::app::App;
 use crate::args::{
     ActorArg, Cli, Command, CustomizeCommand, DataCommand, DocCommand, DocTypesDir, FieldCommand,
-    SiteCommand, TokenCommand, UserCommand, VersionArg, WebhookCommand,
+    PermissionCommand, SiteCommand, TokenCommand, UserCommand, VersionArg, WebhookCommand,
 };
 use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
@@ -115,7 +115,13 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             crate::data_cmd::execute(&ctx, prepared).await
         }
         Command::User(command) => {
-            let registry = site_registry(site, apps)?;
+            // `user permission add` checks the DocType against the `--doctypes` directory too.
+            let registry = match &command {
+                UserCommand::Permission(PermissionCommand::Add { doctypes, .. }) => {
+                    Arc::new(site_composed(site, apps, doctypes)?.registry)
+                }
+                _ => site_registry(site, apps)?,
+            };
             // Standard input is read before the database is opened.
             let password = read_user_password(&command)?;
             let ctx = site.context(registry, None).await?;
