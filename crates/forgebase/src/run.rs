@@ -27,6 +27,7 @@ use crate::error::CliError;
 use crate::job_cmd::{job, read_payload};
 use crate::new_app::new_app;
 use crate::report::migrate_report;
+use crate::user_permission_cmd::permission as user_permission;
 use crate::webhook_cmd::{read_secret, webhook};
 use crate::worker::{Worker, WorkerConfig, run_worker, worker_id};
 use forgebase_http::json::{
@@ -718,6 +719,9 @@ fn read_user_password(command: &UserCommand) -> Result<String, CliError> {
 /// Runs a `user` command with the `password` already read from standard input; it is never
 /// printed.
 async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Result<(), CliError> {
+    if let UserCommand::Permission(command) = command {
+        return user_permission(site, &site.registry, command).await;
+    }
     let mut client = site.pool.get().await.map_err(DbError::from)?;
     let client = &mut **client;
     let text = match command {
@@ -752,6 +756,7 @@ async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Resul
             auth::set_enabled(client, &username, true).await?;
             format!("enabled user {username}\n")
         }
+        UserCommand::Permission(_) => unreachable!("handled above"),
     };
     write_stdout(&text)
 }

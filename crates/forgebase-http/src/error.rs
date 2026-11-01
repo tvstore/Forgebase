@@ -499,6 +499,13 @@ impl From<AuthError> for ApiError {
                 "invalid username or password",
             ),
             AuthError::Db(error) => error.into(),
+            // User permissions (M10.3): the routes are for the Administrator, who is told what
+            // is wrong.
+            AuthError::UserNotFound(_) => Self::not_found("user not found"),
+            AuthError::InvalidUserPermission(message) => Self::validation(vec![message]),
+            AuthError::InvalidUsername(problem) => {
+                Self::validation(vec![format!("invalid username: {problem}")])
+            }
             other => Self::internal(&other),
         }
     }

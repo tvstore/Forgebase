@@ -89,6 +89,7 @@ mod scope;
 mod summary;
 mod sync;
 pub mod tls;
+pub mod user_permissions;
 mod value;
 mod views;
 pub mod webhooks;
