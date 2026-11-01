@@ -23,6 +23,28 @@ cargo run -p sales -- token revoke <key>
 Five consecutive failed logins for a username (each within 15 minutes of the previous one) lock it for 15 minutes; see [ADR 0010](../adr/0010-authentication-and-sessions.md) and the [security model](../blueprint/security-model.md).
 
 
+### User permissions (M10.3)
+
+`user permission` restricts what a user sees: of a DocType the user is restricted on, only the documents you allow, and of every other DocType only the documents whose Links to it are empty or allowed ([ADR 0025](../adr/0025-user-permissions.md); the rule is explained in [getting started](getting-started.md#user-permissions)). The commands run as the system context like the other `user` commands, and the same operations are available to an Administrator over [HTTP](http-api.md#user-permissions-m103).
+
+```sh
+# Ann (role Sales) may see only the customer group Retail, and so only the customers and orders of that group
+cargo run -p sales -- user permission add --user ann --doctype customer_group --value Retail --site main
+# restricted user ann to customer_group Retail; it applies on the user's next request (at most 1000 per DocType)
+cargo run -p sales -- user permission add --user ann --doctype customer_group --value Online --site main   # allow a second group
+cargo run -p sales -- user permission list --site main                      # every row, sorted by user, DocType and value
+cargo run -p sales -- user permission list --user ann --doctype customer_group --site main
+# USER  DOCTYPE         VALUE   ADDED
+# ann   customer_group  Online  2026-11-01T09:30:12.123456Z
+# ann   customer_group  Retail  2026-11-01T09:30:05.654321Z
+cargo run -p sales -- user permission remove --user ann --doctype customer_group --value Online --site main
+```
+
+- **`add`** needs the user, the DocType (one of the site's, custom fields included; not a child DocType: restrict the parent) and the document to exist when it is added (it is looked up as the system context). Adding a row that exists succeeds and says `already`. At most **1000** documents per user and DocType: the 1001st is refused with a message that says so. `--doctypes DIR` is accepted like for `webhook add`.
+- **`remove`** of a row that is not there succeeds and says so; it does not check that the DocType or the document still exist, so a stale row can always be removed. **`list`** shows rows for a DocType the site no longer has too (they are ignored when reading).
+- A user with **no** row for a DocType is not restricted on it. Users with the `Administrator` role and the system context (`forgebase doc`, jobs) are never restricted, whatever rows exist. Changes apply on the user's **next request**: no restart, no reload.
+- A user restricted on a DocType cannot create (or amend) documents of it. Query reports, webhook payloads and the `doc` and `data` commands are not restricted by user permissions.
+
 ## Background jobs
 
 An app registers a job with `App::job`; a hook, another job or the command line enqueues it, and `forgebase worker` runs it. A job runs in **one database transaction together with its completion**; a failure is retried (5 attempts, 30 s doubling up to 1 h, 5 min timeout) and then the job is `dead`. Delivery is at-least-once, so effects outside the database must be safe to repeat. A hook's `ctx.enqueue(..)` is written in the same transaction as the document change (the transactional outbox), so the job exists if and only if the change is committed. Never put a secret in a payload: it is stored in clear text. Design: [ADR 0013](../adr/0013-jobs-scheduler-and-transactional-outbox.md).

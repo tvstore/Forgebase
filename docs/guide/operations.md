@@ -172,6 +172,8 @@ A unit for `serve` is the same without `%i` and `--site`. The worker does not mi
 
 Schema changes are additive and refused when they would lose data; the command lists the conflicts and changes nothing.
 
+Framework migration 0013 (M10.3) adds `fb_user_permission`, the user permissions of a site ([ADR 0025](../adr/0025-user-permissions.md)). Until a site has run `migrate`, a newer binary serves its users **without** restrictions (there can be none yet). The rows are in the site's database, so [backups](#backups) and [restores](#restoring) carry them, and `forgebase user permission list --site NAME` shows them; see [the CLI guide](cli.md#user-permissions-m103). They are read with the roles of every request, so a change needs no restart.
+
 ## Backups
 
 ```sh
