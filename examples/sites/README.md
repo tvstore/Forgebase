@@ -3,7 +3,7 @@
 Two sites on one server, a backup restored into a new database ([ADR 0014](../../docs/adr/0014-multi-site-database-per-site.md), M7.3), (M9.5) a webhook delivered to a test receiver, and (M10.4) a site custom field and a restricted Sales User. It uses the composed binary of [`sales_extension`](../sales_extension/README.md).
 
 - [`forgebase.toml`](forgebase.toml): the site `shop` (the `sales` app only), the site `field` (every app) and `restore_check` (the target of the restore).
-- [`ci.sh`](ci.sh): creates the sites, serves them, checks that each answers for its own host with its own users and apps (and that an unknown host is 404), then backs up `shop`, restores it into `restore_check` and compares the documents. The script then proves, on `shop`:
+- [`ci.sh`](ci.sh): creates the sites, serves them, checks that each answers for its own host with its own users and apps (and that an unknown host is 404), then backs up `shop`, restores it into `restore_check` and compares the documents. The script then proves, on `shop` unless a bullet names another site:
   - the approval workflow and a shared saved view over HTTP (M8.5);
   - the fixture of the sales app (M9.4): the first `migrate` kept the two customer groups the SQL migration made and inserted `Online`, and a second `migrate` finds the three unchanged;
   - **a webhook** (M9.5, [ADR 0020](../../docs/adr/0020-outgoing-webhooks.md)): it adds a webhook on `sales_order` for `submit`, approves an order, runs the worker until the delivery arrives (at most 30 seconds) and checks that the receiver recorded exactly one verified `submit` delivery of that order. It also checks that a forged signature is refused and that `webhook test` exits 0.
