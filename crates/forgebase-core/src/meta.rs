@@ -8,6 +8,7 @@ use crate::document::DocStatus;
 use crate::hooks::DocTypeHooks;
 use crate::ident::{self, IdentError};
 use crate::method::MethodDef;
+use crate::overlay::{CUSTOM_PREFIX, OverlayError};
 use crate::permission::{self, PermissionRule, Right};
 use crate::report::ReportDef;
 use crate::series::{SeriesError, SeriesPattern};
@@ -1329,6 +1330,15 @@ impl DocField {
     }
 }
 
+/// Who added a field to a DocType that it was not defined with (M10.1, ADR 0023).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldSource {
+    /// An app overlay: the name of the app that owns the field.
+    App(String),
+    /// A site custom field.
+    Site,
+}
+
 /// A set of DocTypes keyed by name, an optional owner tag per DocType, and the lifecycle hooks
 /// the app registered for them.
 ///
@@ -1340,6 +1350,9 @@ pub struct Registry {
     /// DocType name -> the tag of the app that owns it (only for DocTypes added with
     /// [`Registry::add_owned`]).
     owners: BTreeMap<String, String>,
+    /// (DocType, field) -> who added the field after the DocType was defined: an app overlay or
+    /// the site (M10.1, ADR 0023). Fields of the DocType file itself are not listed.
+    added_fields: BTreeMap<(String, String), FieldSource>,
     hooks: BTreeMap<String, Vec<Arc<dyn DocTypeHooks>>>,
     /// The full names (`<app>.<job>`) of the background jobs the binary knows. Names only: the
     /// registry knows nothing about handlers.
@@ -1470,6 +1483,118 @@ impl Registry {
     /// [`Registry::add`] (and for an unknown name).
     pub fn owner(&self, doctype: &str) -> Option<&str> {
         self.owners.get(doctype).map(String::as_str)
+    }
+
+    /// Who added `field` to `doctype` after its definition: `None` for a field of the DocType's
+    /// own definition (and for an unknown name).
+    pub fn field_source(&self, doctype: &str, field: &str) -> Option<&FieldSource> {
+        self.added_fields
+            .get(&(doctype.to_owned(), field.to_owned()))
+    }
+
+    /// The app that owns `field` of `doctype`: the app that added it by an overlay, else the
+    /// owner of the DocType; `None` for a site custom field or an unknown name.
+    pub fn field_owner(&self, doctype: &str, field: &str) -> Option<&str> {
+        match self.field_source(doctype, field) {
+            Some(FieldSource::App(app)) => Some(app),
+            Some(FieldSource::Site) => None,
+            None => self.owner(doctype),
+        }
+    }
+
+    /// Adds the fields of an app overlay to DocType `target`, after its own fields and in the
+    /// given order, and records `owner` as the owner of each (M10.1, ADR 0023). All or nothing:
+    /// on an error the registry is unchanged.
+    ///
+    /// Refused: an unknown target, a child DocType, a Table field, a name the DocType has
+    /// already ([`OverlayError::Collision`], also between two fields of `fields`), a name that
+    /// starts with [`CUSTOM_PREFIX`], and whatever the DocType's own validation refuses with the
+    /// fields added. Whether the owner may extend this DocType (it must depend on the app that
+    /// owns it) is the caller's rule, not this crate's. Call [`Registry::check_references`] after
+    /// the last overlay: a Link field may name a DocType that is added later.
+    pub fn add_overlay_fields(
+        &mut self,
+        owner: &str,
+        target: &str,
+        fields: Vec<DocField>,
+    ) -> Result<(), OverlayError> {
+        for field in &fields {
+            if field.name.starts_with(CUSTOM_PREFIX) {
+                return Err(OverlayError::ReservedPrefix(field.name.clone()));
+            }
+        }
+        self.append_fields(&FieldSource::App(owner.to_owned()), target, fields)
+    }
+
+    /// Adds a site custom field to DocType `target` (M10.1, ADR 0023), after the fields it has.
+    ///
+    /// The rules of a site field on top of those of [`Registry::add_overlay_fields`]: the name
+    /// starts with [`CUSTOM_PREFIX`], and the field is neither `required` nor `read_only`.
+    /// Unlike an overlay, a Link target is checked here (it must exist and not be a child
+    /// DocType), because a site field is added to a registry that is complete.
+    pub fn add_custom_field(&mut self, target: &str, field: DocField) -> Result<(), OverlayError> {
+        if !field.name.starts_with(CUSTOM_PREFIX) {
+            return Err(OverlayError::MissingPrefix(field.name));
+        }
+        if field.required {
+            return Err(OverlayError::Required(field.name));
+        }
+        if field.read_only {
+            return Err(OverlayError::ReadOnly(field.name));
+        }
+        if let FieldType::Link { target: link } = &field.field_type {
+            let problem = match self.doctypes.get(link) {
+                None => Some(DefinitionError::UnknownLinkTarget {
+                    doctype: target.to_owned(),
+                    field: field.name.clone(),
+                    target: link.clone(),
+                }),
+                Some(t) if t.is_child => Some(DefinitionError::LinkToChild {
+                    doctype: target.to_owned(),
+                    field: field.name.clone(),
+                    target: link.clone(),
+                }),
+                Some(_) => None,
+            };
+            if let Some(problem) = problem {
+                return Err(OverlayError::Invalid(vec![problem]));
+            }
+        }
+        self.append_fields(&FieldSource::Site, target, vec![field])
+    }
+
+    fn append_fields(
+        &mut self,
+        source: &FieldSource,
+        target: &str,
+        fields: Vec<DocField>,
+    ) -> Result<(), OverlayError> {
+        let Some(found) = self.doctypes.get(target) else {
+            return Err(OverlayError::UnknownDocType(target.to_owned()));
+        };
+        if found.is_child {
+            return Err(OverlayError::ChildDocType(target.to_owned()));
+        }
+        let mut extended = found.clone();
+        for field in &fields {
+            if matches!(field.field_type, FieldType::Table { .. }) {
+                return Err(OverlayError::TableField(field.name.clone()));
+            }
+            if extended.field(&field.name).is_some() {
+                return Err(OverlayError::Collision {
+                    doctype: target.to_owned(),
+                    field: field.name.clone(),
+                });
+            }
+            extended.fields.push(field.clone());
+        }
+        extended.validate().map_err(OverlayError::Invalid)?;
+        for field in fields {
+            self.added_fields
+                .insert((target.to_owned(), field.name), source.clone());
+        }
+        self.doctypes.insert(target.to_owned(), extended);
+        Ok(())
     }
 
     /// Registers a hook set for a DocType. The DocType must already be in the registry

@@ -513,6 +513,39 @@ fn unique_index_sql(table: &str, column: &str) -> String {
     )
 }
 
+/// The steps that give one field added to an existing table its column (M10.1): the column, the
+/// foreign key and index of a Link, and the unique index of a unique field, in the order the
+/// sync applies them. Built from the same statements the sync uses, so a field added by hand and
+/// a field added by `migrate` end up with the same schema.
+pub(crate) fn field_steps(doctype: &str, field: &DocField) -> Vec<Step> {
+    let table = table_name(doctype);
+    let mut steps = vec![Step::AddColumn {
+        doctype: doctype.to_owned(),
+        column: field.name.clone(),
+        sql: add_column_sql(&table, field),
+    }];
+    if let FieldType::Link { target } = &field.field_type {
+        steps.push(Step::AddForeignKeys {
+            doctype: doctype.to_owned(),
+            sql: add_foreign_keys_sql(&table, &[(&field.name, target, "RESTRICT")]),
+        });
+    }
+    if field.unique {
+        steps.push(Step::CreateUniqueIndex {
+            doctype: doctype.to_owned(),
+            column: field.name.clone(),
+            sql: unique_index_sql(&table, &field.name),
+        });
+    } else if matches!(field.field_type, FieldType::Link { .. }) {
+        steps.push(Step::CreateIndex {
+            doctype: doctype.to_owned(),
+            column: field.name.clone(),
+            sql: link_index_sql(&table, &field.name),
+        });
+    }
+    steps
+}
+
 /// Steps grouped by phase. Order of execution: all new tables, then their primary and unique
 /// keys, then their foreign keys (every primary key exists by then), then added columns, then
 /// the foreign keys of added Link columns, then late unique and Link indexes, then registration.

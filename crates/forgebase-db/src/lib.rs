@@ -61,6 +61,7 @@
 mod app_migrations;
 pub mod auth;
 mod backup;
+mod custom_fields;
 mod database;
 mod document;
 mod error;
@@ -74,6 +75,7 @@ mod link_titles;
 mod list;
 mod migrate;
 mod plan;
+mod registry_holder;
 mod reports;
 pub mod schedule;
 mod summary;
@@ -88,6 +90,10 @@ pub use app_migrations::{
     AppMigration, AppSpec, AppliedAppMigration, tables_exist as app_migration_tables_exist,
 };
 pub use backup::{DatabaseInfo, EMPTY_CHECK_SQL, inspect_database, pg_environment};
+pub use custom_fields::{
+    CustomField, Effective, add_custom_field, effective_registry, list_custom_fields, meta_version,
+    set_custom_field_enabled,
+};
 pub use database::{DEFAULT_MAINTENANCE_DB, create_database, recorded_apps};
 pub use deadpool_postgres::Pool;
 pub use document::{StoredDocument, amend, cancel, delete, get, insert, submit, update};
@@ -103,6 +109,7 @@ pub use list::{
 };
 pub use migrate::{MIGRATIONS, Migration, migrate_framework};
 pub use plan::{Conflict, Step, Warning};
+pub use registry_holder::RegistryHolder;
 pub use reports::{ReportConnection, ReportResult, check_reports, report_link_titles, run_report};
 pub use summary::{AggregateFn, Group, MAX_AGGREGATES, MAX_GROUPS, Summary, SummaryQuery, summary};
 pub use sync::{SyncOptions, SyncReport, sync};
@@ -333,7 +340,13 @@ async fn migrate_locked(
         });
     }
     let pending = app_migrations::pending(client, apps).await?;
-    let sync = sync(client, registry, options).await?;
+    // Every stored custom field, enabled or disabled, keeps its column: the sync works from the
+    // registry of the apps plus those fields (M10.1). Fields that no longer validate are skipped.
+    let stored = custom_fields::schema_registry(client, registry).await?;
+    for warning in &stored.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let sync = sync(client, &stored.registry, options).await?;
     let mut app_migrations = Vec::new();
     if options.dry_run {
         app_migrations.extend(pending.iter().map(|(app, m)| applied(app, m)));

@@ -29,6 +29,7 @@ async fn migrates_empty_database_and_is_idempotent() {
             vec!["9".to_owned(), "saved_views".into(), "64".into()],
             vec!["10".to_owned(), "webhooks".into(), "64".into()],
             vec!["11".to_owned(), "fixtures".into(), "64".into()],
+            vec!["12".to_owned(), "custom_fields".into(), "64".into()],
         ]
     );
     assert_eq!(
@@ -44,7 +45,7 @@ async fn migrates_empty_database_and_is_idempotent() {
     );
     assert_eq!(
         db.rows("SELECT count(*)::text FROM fb_migration").await,
-        vec![vec!["11".to_owned()]]
+        vec![vec!["12".to_owned()]]
     );
 }
 
@@ -95,7 +96,7 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
     assert_eq!(
         db.rows("SELECT version::text FROM fb_migration ORDER BY fb_migration.version")
@@ -111,7 +112,8 @@ async fn a_database_at_migration_1_is_upgraded_to_the_latest() {
             vec!["8".into()],
             vec!["9".into()],
             vec!["10".into()],
-            vec!["11".into()]
+            vec!["11".into()],
+            vec!["12".into()]
         ]
     );
     assert_eq!(
@@ -128,7 +130,7 @@ async fn a_database_at_migration_2_is_upgraded_to_the_latest() {
     let applied = migrate_framework(&mut client, false).await.unwrap();
     assert_eq!(
         applied.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![3, 4, 5, 6, 7, 8, 9, 10, 11]
+        vec![3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
     assert_eq!(applied[0].name, "auth");
     for table in [

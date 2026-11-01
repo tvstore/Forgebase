@@ -8,6 +8,7 @@ use tokio_postgres::error::SqlState;
 use forgebase_core::document::{DocStatus, ValidationError};
 use forgebase_core::ident::TABLE_PREFIX;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType};
+use forgebase_core::overlay::OverlayError;
 use forgebase_core::permission::Right;
 
 use crate::plan::Conflict;
@@ -359,6 +360,36 @@ pub enum DbError {
     /// view (that one is [`DbError::NotFound`]).
     #[error("permission denied: {0}")]
     ViewDenied(&'static str),
+    /// A site custom field cannot be added (M10.1, ADR 0023): the field breaks a rule (the
+    /// prefix, `required`, a Table type, a name the DocType has, ...) or the DocType is unknown
+    /// or a child. Nothing was written.
+    #[error("custom field: {0}")]
+    CustomField(OverlayError),
+    /// A custom field with this name exists on the DocType already, enabled or disabled (enable a
+    /// disabled one instead of adding it again).
+    #[error(
+        "custom field `{name}` already exists on DocType `{doctype}` (a disabled field is brought back with `enable`)"
+    )]
+    CustomFieldExists {
+        /// DocType name.
+        doctype: String,
+        /// Field name.
+        name: String,
+    },
+    /// No custom field has this name on this DocType.
+    #[error("custom field `{name}` of DocType `{doctype}` not found")]
+    CustomFieldNotFound {
+        /// DocType name.
+        doctype: String,
+        /// Field name.
+        name: String,
+    },
+    /// The table of the DocType does not exist yet, so a column cannot be added to it.
+    #[error("the table of DocType `{doctype}` does not exist; run `forgebase migrate` first")]
+    DocTypeNotMigrated {
+        /// DocType name.
+        doctype: String,
+    },
     /// A job cannot be enqueued, or a job command is wrong: the job name is not one of the
     /// binary's jobs, the payload is too large or has a NUL character, an id is not a UUID. For
     /// a hook that enqueues it fails the whole operation, and nothing is written. It is a

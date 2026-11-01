@@ -23,6 +23,8 @@
 //! - [`workflow`]: the states and transitions of a DocType's `[workflow]` (M8.1, ADR 0015); who
 //!   may take a transition is [`transition_access`](permission::transition_access).
 //!
+//! - [`overlay`]: fields that an app adds to a dependency's DocType and fields that a site adds
+//!   to its own DocTypes (M10.1, ADR 0023).
 //! - [`method`]: the definition of an app method endpoint (M9.1, ADR 0019); who may call one is
 //!   [`can_call_method`](permission::can_call_method).
 //!
@@ -34,6 +36,7 @@ pub mod hooks;
 pub mod ident;
 pub mod meta;
 pub mod method;
+pub mod overlay;
 pub mod permission;
 pub mod report;
 pub mod series;
