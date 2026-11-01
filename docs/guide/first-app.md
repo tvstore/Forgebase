@@ -358,6 +358,57 @@ pub fn app() -> App {
 - A person without a role of the method, an unknown method and a method of an app that the site does not install all get the same 404.
 - **Test it** with `forgebase::testing`: `db.client(&binary).login("ann").await.post("/api/v1/method/sales.orders_of", json!({"customer": "ada@example.com"}))`, and `db.create_token(user)` with `client.with_token(..)` for a token call. The route, its statuses and a curl call are in the [HTTP API guide](http-api.md#app-methods).
 
+## 9. Fixtures
+
+Some records should exist on every site that installs your app: the customer groups, the territories, a default price list. Ship them as a **fixture**: a JSON file with the records of one DocType, listed in `src/lib.rs`.
+
+`fixtures/customer_group.json` (for a `customer_group` DocType with the naming field `title` and a `description` field):
+
+```json
+{
+  "doctype": "customer_group",
+  "records": [
+    {"title": "Retail"},
+    {"title": "Wholesale", "description": "Volume customers"}
+  ]
+}
+```
+
+```rust
+.fixtures(forgebase::fixtures![
+    "fixtures/customer_group.json",
+])
+```
+
+Each record has the shape of the body of `POST /api/v1/resource/customer_group`: field values by name, a Link as the name of the target, a Table field as an array of row objects. The paths are relative to your crate's root, like `doctypes!` and `migrations!`, and the list is explicit.
+
+`forgebase migrate` applies fixtures **after the app migrations**, in app order (an app's dependencies first), then file order, then record order. Every record goes through the same pipeline as any other write, as the system caller `fixture:<app>`: hooks, validation, naming, links and **webhooks** all run, so a webhook on `customer_group` is called for each record that `migrate` writes. All the fixtures of one app run in **one transaction**: a record that fails (a field that is too long, a link to a document that does not exist) rolls back that app's fixtures, and `migrate` stops with a message that names the app, the file and the record. `migrate` prints one line per app that has fixtures:
+
+```
+fixtures: sales: 2 inserted, 1 updated, 0 kept, 5 unchanged
+```
+
+`migrate --dry-run` prints the plan (`would insert 2, update 1, keep 0, 5 unchanged`) and writes nothing.
+
+**The rules, in plain words.** Forgebase remembers a checksum of each record as you shipped it (table `fb_fixture`), so it can tell your changes from the site's:
+
+| Situation | What `migrate` does |
+|---|---|
+| The record is new and the document does not exist | Inserts it. |
+| The record is new and the site already has a document with that name | Leaves the document as it is (**kept**) and tracks the record from now on. The site's data wins. |
+| You did not change the record | **Nothing**, even if the site edited or deleted the document. The site's decision stands. |
+| You changed the record and the document exists | Updates **only the fields the record has** (a table the record has replaces the rows). Other fields, and everything else the site changed, stay. |
+| You changed the record and the site deleted the document | Inserts it again: you shipped a new version. |
+| You removed the record from the file | **Nothing.** Fixtures never delete; the document stays. |
+
+So a site's edit survives until you ship a new version of that record. To let sites change a value freely, leave it out of the record, or never change the record after you ship it. To bring back something a site deleted, change the record.
+
+**Which DocTypes.** Only a DocType with **field naming** (`naming = { field = "title" }`), because the name must be the same on every site: a random or series name is different each time. A record must have a non-empty text value for the naming field. **Not allowed:** a DocType with random or series naming, a submittable one, one with a workflow (a fixture update must not fight the lifecycle), and a child DocType (put its rows in the parent's table field). The DocType must belong to your app or to an app you depend on, and one file may hold the records of one DocType (one file per DocType per app). Two apps may not ship the same record. Every one of these mistakes, a key that is not a field, a read-only field and a value of the wrong JSON type is a **startup error**, reported with the other problems of your app. Whether a value is valid (a required field, a length, a link that exists) is checked when the record is applied, because a hook may fill or change fields.
+
+**Tests.** `TestDb::migrate` applies fixtures too, and `Migrated::fixtures` has the counts of each app, so you can test that your records exist after `db.migrate(&binary, false)`. Each site applies its own fixtures: the fixtures of an app that a site does not install are not applied there.
+
+The design and the alternatives are in [ADR 0022](../adr/0022-fixtures.md).
+
 Running your app for real (several sites, a reverse proxy, workers, upgrades, backups and restores) is in the [operations guide](operations.md).
 
 ## The public API boundary

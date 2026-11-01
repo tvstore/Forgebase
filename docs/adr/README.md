@@ -51,3 +51,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0019](0019-app-method-endpoints.md) | App method endpoints | Accepted (amended by M9.2: reads run in a savepoint) |
 | [0020](0020-outgoing-webhooks.md) | Outgoing webhooks | Accepted (amended by M9.3: 16-byte secrets, an unavailable snapshot, the Azure WireServer) |
 | [0021](0021-import-and-export.md) | Import and export | Accepted |
+| [0022](0022-fixtures.md) | Fixtures | Accepted |

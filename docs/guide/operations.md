@@ -167,7 +167,7 @@ A unit for `serve` is the same without `%i` and `--site`. The worker does not mi
 1. **Back up** every site (see [Backups](#backups)).
 2. Deploy the new binary (and the new desk directory).
 3. Stop the web server and the workers of the old binary.
-4. Run `myapp migrate --site NAME` **for each site** (there is no "all sites" mode). `migrate --dry-run` prints what would change.
+4. Run `myapp migrate --site NAME` **for each site** (there is no "all sites" mode). `migrate --dry-run` prints what would change. `migrate` also applies the **fixtures** of the apps (records the app ships; [first-app guide, section 9](first-app.md#9-fixtures)) and prints one line per app, for example `fixtures: sales: 2 inserted, 1 updated, 0 kept, 5 unchanged`: a record is inserted if missing, updated only when the new binary ships a new version of it (so edits made on the site survive), and never deleted. They go through the normal write path, so **webhooks fire** for them: disable a webhook around the upgrade if you do not want deliveries for the records `migrate` writes. If a record is refused, `migrate` fails after everything else was applied, naming the app, file and record; fix the file and run `migrate` again.
 5. Start the web server and the workers.
 
 Schema changes are additive and refused when they would lose data; the command lists the conflicts and changes nothing.
@@ -243,4 +243,5 @@ Delete the app from the site's `apps` list (and from the list of every site that
 | `refusing to overwrite FILE` | A backup never overwrites. Choose a new file name. |
 | `permission denied to create database` | The role in the URL lacks `CREATEDB`. Create the database as an administrator (see [Database roles](#database-roles)) and use `migrate --site`. |
 | `the database URL uses the option `...`, which cannot be passed to pg_dump` | Remove that option from the URL, or take the backup with `pg_dump` yourself. |
+| `fixtures of app `sales` were not applied: fixtures/customer_group.json: record 2 (...)` | A fixture record was refused by validation, a hook or a link. The migrations before it stay applied and none of that app's fixtures was kept; fix the file in the app and run `migrate` again. |
 | `database for site `acme` already exists; run `forgebase migrate --site acme`` | `site create` never migrates an existing database. Run `migrate --site acme`. |

@@ -116,6 +116,19 @@ The definition types (`ReportDef` and the rest of `forgebase-core::report`) and 
 
 The `forgebase` crate now depends on `axum` and `tower` without the `testing` feature (they were optional); both were already compiled in through `forgebase-http`.
 
+### Public surface update (M9.4)
+
+Amendment of 2026-11-01 (the text above is unchanged). [ADR 0022](0022-fixtures.md) (the M9 plan, owner decision 10 of 2026-10-30) adds these items; nothing else becomes public and nothing breaks.
+
+| Item | Purpose |
+|---|---|
+| `App::fixtures(&'static [FixtureFile])` | Adds fixture files: records the app ships, applied by `migrate` through the document pipeline (inserted if missing, updated only when the app changes the record, never deleted). Calling it again adds more files. |
+| `fixtures!` | Embeds JSON files with `include_str!`, paths relative to the calling crate's root, like `doctypes!` and `migrations!`. |
+| `FixtureFile` (`new(path, json)`, `path()`, `json()`; `#[non_exhaustive]`, no public fields) | One fixture file, for the macro and for tests. |
+| `testing::Migrated::fixtures` and `testing::AppliedFixtures` (`app`, `inserted`, `updated`, `kept`, `unchanged`; `#[non_exhaustive]`; feature `testing`) | What `TestDb::migrate` did with the fixtures of each app that has any. `TestDb::migrate` applies fixtures like `forgebase migrate`. |
+
+Every mistake in a fixture file that needs no database is a startup error with the other app problems (`StartupError`).
+
 ## Implementation details (M5.1)
 
 These were chosen while implementing M5.1; they are to be reviewed with that change, not owner decisions.
