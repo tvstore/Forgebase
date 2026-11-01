@@ -608,6 +608,192 @@ async fn permissions_are_enforced() {
     env.db.cleanup().await;
 }
 
+// --- credit_limit is a level 1 field (M10.2, ADR 0024) -------------------------------------------
+
+const CUSTOMERS: &str = "/api/v1/resource/customer";
+
+/// Percent-encodes a query value (the filters are JSON).
+fn enc(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// A customer with a credit limit, made by the manager; the name is the email.
+async fn customer_with_limit(env: &Env) {
+    let created = env
+        .manager
+        .post(
+            CUSTOMERS,
+            json!({"email": "ada@example.com", "full_name": "Ada Lovelace", "credit_limit": "1250.50"}),
+        )
+        .await;
+    assert_eq!(created.status, 201, "{:?}", created.body);
+    assert_eq!(created.data()["credit_limit"], "1250.50");
+}
+
+fn field_names(meta: &forgebase::testing::Reply) -> Vec<String> {
+    meta.data()["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .map(|f| f["name"].as_str().expect("name").to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_sales_user_does_not_see_the_credit_limit_anywhere() {
+    let env = env().await;
+    customer_with_limit(&env).await;
+
+    let got = env.user.get(&format!("{CUSTOMERS}/ada@example.com")).await;
+    assert_eq!(got.status, 200, "{:?}", got.body);
+    assert!(got.data().get("credit_limit").is_none(), "{:?}", got.body);
+    assert_eq!(got.data()["full_name"], "Ada Lovelace");
+
+    let list = env.user.get(CUSTOMERS).await;
+    assert_eq!(list.status, 200, "{:?}", list.body);
+    assert_eq!(list.data().as_array().expect("rows").len(), 1);
+    assert!(
+        !list.body.to_string().contains("credit_limit") && !list.body.to_string().contains("1250"),
+        "{:?}",
+        list.body
+    );
+
+    let meta = env.user.get("/api/v1/meta/customer").await;
+    assert_eq!(meta.status, 200, "{:?}", meta.body);
+    assert!(!field_names(&meta).contains(&"credit_limit".to_owned()));
+    assert!(field_names(&meta).contains(&"loyalty_points".to_owned()));
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sales_user_cannot_filter_by_the_credit_limit() {
+    let env = env().await;
+    customer_with_limit(&env).await;
+    let filters = enc(&json!([{"field": "credit_limit", "op": ">", "value": "1"}]).to_string());
+    let refused = env
+        .user
+        .get(&format!("{CUSTOMERS}?filters={filters}"))
+        .await;
+    assert_eq!(refused.status, 400, "{:?}", refused.body);
+    assert_eq!(refused.error_code(), Some("invalid_query"));
+    // Refused like a name that is no field at all: no oracle for the hidden field.
+    let nonsense = enc(&json!([{"field": "nonsense", "op": ">", "value": "1"}]).to_string());
+    let other = env
+        .user
+        .get(&format!("{CUSTOMERS}?filters={nonsense}"))
+        .await;
+    assert_eq!(other.status, 400, "{:?}", other.body);
+    assert_eq!(
+        refused
+            .error_message()
+            .map(|m| m.replace("credit_limit", "nonsense")),
+        other.error_message().map(str::to_owned)
+    );
+    // The manager may.
+    let allowed = env
+        .manager
+        .get(&format!("{CUSTOMERS}?filters={filters}"))
+        .await;
+    assert_eq!(allowed.status, 200, "{:?}", allowed.body);
+    assert_eq!(allowed.data().as_array().expect("rows").len(), 1);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sales_user_cannot_send_the_credit_limit() {
+    let env = env().await;
+    customer_with_limit(&env).await;
+    // A Sales User has no write right on `customer` at all, so the right is refused first (403)
+    // and the field is never looked at: sending `credit_limit` changes nothing, and neither does
+    // any other field. The refusal of a hidden field as an unknown field (422), and the update
+    // that keeps the stored value, need a role that writes level 0 but not level 1; the `sales`
+    // app has none, and crates/forgebase-http/tests/field_levels.rs covers both.
+    for data in [
+        json!({"credit_limit": "1.00"}),
+        json!({"loyalty_points": 9}),
+    ] {
+        let denied = env
+            .user
+            .patch(
+                &format!("{CUSTOMERS}/ada@example.com"),
+                json!({"version": 1, "data": data}),
+            )
+            .await;
+        assert_eq!(denied.status, 403, "{:?}", denied.body);
+        assert_eq!(denied.error_code(), Some("permission_denied"));
+    }
+    let read = env
+        .manager
+        .get(&format!("{CUSTOMERS}/ada@example.com"))
+        .await;
+    assert_eq!(read.data()["credit_limit"], "1250.50");
+    assert_eq!(read.data()["version"], 1);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sales_manager_reads_and_writes_the_credit_limit() {
+    let env = env().await;
+    customer_with_limit(&env).await;
+    let got = env
+        .manager
+        .get(&format!("{CUSTOMERS}/ada@example.com"))
+        .await;
+    assert_eq!(got.data()["credit_limit"], "1250.50");
+    let meta = env.manager.get("/api/v1/meta/customer").await;
+    assert!(field_names(&meta).contains(&"credit_limit".to_owned()));
+    let field = meta.data()["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .find(|f| f["name"] == "credit_limit")
+        .expect("credit_limit")
+        .clone();
+    assert_eq!(field["read_only"], false);
+
+    let updated = env
+        .manager
+        .patch(
+            &format!("{CUSTOMERS}/ada@example.com"),
+            json!({"version": 1, "data": {"credit_limit": "3000.00"}}),
+        )
+        .await;
+    assert_eq!(updated.status, 200, "{:?}", updated.body);
+    assert_eq!(updated.data()["credit_limit"], "3000.00");
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_update_without_the_credit_limit_keeps_the_stored_value() {
+    let env = env().await;
+    customer_with_limit(&env).await;
+    // The manager changes another field: the limit stays.
+    let updated = env
+        .manager
+        .patch(
+            &format!("{CUSTOMERS}/ada@example.com"),
+            json!({"version": 1, "data": {"loyalty_points": 5}}),
+        )
+        .await;
+    assert_eq!(updated.status, 200, "{:?}", updated.body);
+    assert_eq!(updated.data()["credit_limit"], "1250.50");
+    let read = env
+        .manager
+        .get(&format!("{CUSTOMERS}/ada@example.com"))
+        .await;
+    assert_eq!(read.data()["credit_limit"], "1250.50");
+    assert_eq!(read.data()["loyalty_points"], 5);
+    env.db.cleanup().await;
+}
+
 // --- The approval workflow ----------------------------------------------------------------------
 
 /// The `fb_workflow_log` rows of an order as "action: from -> to by actor", oldest first.
