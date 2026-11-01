@@ -48,7 +48,7 @@ export interface Crumb {
   href?: string;
 }
 
-/** App / DocType / Document for a list, new or form route; Reports / report for a report; nothing for the other routes. */
+/** App / DocType / Document for a list, new or form route (App / DocType / Import for the import page); Reports / report for a report; nothing for the other routes. */
 export function breadcrumbs(
   route: Route,
   doctypes: DocTypeSummary[],
@@ -58,13 +58,14 @@ export function breadcrumbs(
     const label = reports.find((r) => r.name === route.report)?.label ?? route.report;
     return [{ label: REPORTS_LABEL, href: homeHref() }, { label }];
   }
-  if (route.name !== 'list' && route.name !== 'new' && route.name !== 'form') return [];
+  if (route.name !== 'list' && route.name !== 'new' && route.name !== 'form' && route.name !== 'import') return [];
   const known = doctypes.find((d) => d.name === route.doctype);
   const crumbs: Crumb[] = [];
   if (known) crumbs.push({ label: appLabel(known.app), href: homeHref() });
   const label = known?.label ?? route.doctype;
   if (route.name === 'list') return [...crumbs, { label }];
   crumbs.push({ label, href: listHref(route.doctype) });
+  if (route.name === 'import') return [...crumbs, { label: 'Import' }];
   if (route.name === 'new') return [...crumbs, { label: 'New' }];
   return [...crumbs, { label: route.docName }];
 }

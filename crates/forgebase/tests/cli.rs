@@ -2453,6 +2453,44 @@ fn a_secret_from_standard_input_is_used_and_not_printed_and_rotation_prints_once
         stderr(&empty)
     );
 
+    // A secret of less than 16 bytes is refused, by `add` and by `rotate-secret`, and changes nothing.
+    args[2] = "w3";
+    let short = db.forgebase_with_stdin(&args, Some("fifteen-bytes!!\n"));
+    assert_eq!(code(&short), Some(1));
+    assert!(
+        stderr(&short).contains("at least 16 bytes"),
+        "{}",
+        stderr(&short)
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_webhook")
+            .as_deref(),
+        Some("1")
+    );
+    let short = db.forgebase_with_stdin(
+        &["webhook", "rotate-secret", "w", "--secret-stdin"],
+        Some("too short\n"),
+    );
+    assert_eq!(code(&short), Some(1));
+    assert!(
+        stderr(&short).contains("at least 16 bytes"),
+        "{}",
+        stderr(&short)
+    );
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook").as_deref(),
+        Some("my own secret value")
+    );
+    let sixteen = db.forgebase_with_stdin(
+        &["webhook", "rotate-secret", "w", "--secret-stdin"],
+        Some("exactly-16-bytes\n"),
+    );
+    assert_eq!(code(&sixteen), Some(0), "{}", stderr(&sixteen));
+    assert_eq!(
+        db.scalar("SELECT secret FROM fb_webhook").as_deref(),
+        Some("exactly-16-bytes")
+    );
+
     let rotated = db.forgebase(&["webhook", "rotate-secret", "w"]);
     assert_eq!(code(&rotated), Some(0), "{}", stderr(&rotated));
     let new = printed_secret(&stdout(&rotated));
@@ -2461,7 +2499,7 @@ fn a_secret_from_standard_input_is_used_and_not_printed_and_rotation_prints_once
         db.scalar("SELECT secret FROM fb_webhook").as_deref(),
         Some(new.as_str())
     );
-    assert!(!stdout(&rotated).contains("my own secret value"));
+    assert!(!stdout(&rotated).contains("exactly-16-bytes"));
 }
 
 #[test]
@@ -2586,4 +2624,242 @@ fn a_document_written_by_the_cli_enqueues_the_delivery() {
         "{}",
         stdout(&listed)
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `data export` and `data import` (M9.3, ADR 0021)
+// ---------------------------------------------------------------------------------------------
+
+/// A scratch directory for the files of one test, removed when dropped.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "fb_cli_data_{}_{nanos}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        Self(dir)
+    }
+
+    fn file(&self, name: &str, content: &str) -> String {
+        let path = self.0.join(name);
+        std::fs::write(&path, content).expect("write file");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn path(&self, name: &str) -> String {
+        self.0.join(name).to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn insert_customer(db: &TestDb, email: &str, name: &str, points: i64) {
+    let data = serde_json::json!({"email": email, "full_name": name, "loyalty_points": points})
+        .to_string();
+    let out = db.forgebase(&[
+        "doc",
+        "insert",
+        "customer",
+        "--doctypes",
+        DOCTYPES,
+        "--data",
+        &data,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn data_export_writes_csv_and_json_to_stdout_or_a_new_file() {
+    let db = migrated_db();
+    insert_customer(&db, "a@x.y", "Ann, \"A\"", 30);
+    insert_customer(&db, "b@x.y", "=Bob", -5);
+    insert_customer(&db, "c@x.y", "Cy", 20);
+    let export = |extra: &[&str]| {
+        let mut args = vec!["data", "export", "customer", "--doctypes", DOCTYPES];
+        args.extend_from_slice(extra);
+        db.forgebase(&args)
+    };
+
+    let out = export(&[
+        "--fields",
+        "name,full_name,loyalty_points",
+        "--sort",
+        "loyalty_points:desc",
+        "--filter",
+        r#"[{"field":"loyalty_points","op":">","value":0}]"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "name,full_name,loyalty_points\r\na@x.y,\"Ann, \"\"A\"\"\",30\r\nc@x.y,Cy,20\r\n"
+    );
+    // The formula mitigation applies to text, not to the number -5.
+    let out = export(&["--fields", "full_name,loyalty_points", "--sort", "name"]);
+    assert!(stdout(&out).contains("'=Bob,-5\r\n"), "{}", stdout(&out));
+    // JSON: an array of documents.
+    let out = export(&["--format", "json", "--sort", "name"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let documents = json(&out);
+    assert_eq!(documents.as_array().map(Vec::len), Some(3));
+    assert_eq!(documents[0]["name"], "a@x.y");
+    assert_eq!(documents[0]["full_name"], "Ann, \"A\"");
+
+    // --out writes a new file and never overwrites; a bad option writes nothing.
+    let scratch = Scratch::new();
+    let path = scratch.path("customers.csv");
+    let out = export(&["--out", &path, "--fields", "name"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("wrote 3 row(s)"), "{}", stdout(&out));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "name\r\na@x.y\r\nb@x.y\r\nc@x.y\r\n"
+    );
+    let again = export(&["--out", &path]);
+    assert_eq!(code(&again), Some(1));
+    assert!(
+        stderr(&again).contains("cannot create"),
+        "{}",
+        stderr(&again)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 4);
+    for bad in [
+        &["--fields", "nope"][..],
+        &["--fields", "name,name"],
+        &["--filter", "notjson"],
+        &["--sort", "nope"],
+    ] {
+        let out = export(bad);
+        assert_eq!(code(&out), Some(1), "{bad:?}");
+        assert_eq!(stdout(&out), "", "{bad:?}");
+    }
+    // The limit refuses before anything is written, and --limit-override raises it.
+    let out = export(&["--limit-override", "2"]);
+    assert_eq!(code(&out), Some(1));
+    assert_eq!(stdout(&out), "");
+    assert!(
+        stderr(&out).contains("3 rows, over the limit of 2"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(code(&export(&["--limit-override", "3"])), Some(0));
+}
+
+#[test]
+fn data_import_dry_run_failure_exit_code_and_success() {
+    let db = migrated_db();
+    let scratch = Scratch::new();
+    let import = |file: &str, extra: &[&str]| {
+        let mut args = vec!["data", "import", "customer", file, "--doctypes", DOCTYPES];
+        args.extend_from_slice(extra);
+        db.forgebase(&args)
+    };
+    let count = || {
+        db.scalar("SELECT count(*)::text FROM doc_customer")
+            .unwrap()
+    };
+    let good = scratch.file(
+        "good.csv",
+        "email,full_name,loyalty_points\r\na@x.y,Ann,3\r\nb@x.y,Bob,\r\n",
+    );
+    let bad = scratch.file(
+        "bad.csv",
+        "email,full_name,loyalty_points\r\na@x.y,Ann,3\r\nb@x.y,,x\r\nc@x.y,Cy,1\r\n",
+    );
+
+    // A dry run keeps nothing, exit 0.
+    let out = import(&good, &["--format", "csv", "--dry-run"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let summary = json(&out);
+    assert_eq!(summary["dry_run"], true);
+    assert_eq!(
+        (summary["rows"].as_u64(), summary["inserted"].as_u64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(count(), "0");
+
+    // A failing file: the summary with the row errors on stdout, exit 1, nothing imported.
+    let out = import(&bad, &["--format", "csv"]);
+    assert_eq!(code(&out), Some(1));
+    let summary = json(&out);
+    assert_eq!(summary["error_count"], 1);
+    assert_eq!(summary["errors"][0]["row"], 2);
+    assert_eq!(summary["errors"][0]["name"], "b@x.y");
+    assert_eq!(summary["errors"][0]["line"], 3);
+    assert!(
+        stderr(&out).contains("nothing was imported"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(count(), "0");
+    // A dry run of a failing file also exits 1.
+    assert_eq!(
+        code(&import(&bad, &["--format", "csv", "--dry-run"])),
+        Some(1)
+    );
+
+    // The real import, recorded as --actor.
+    let out = import(&good, &["--format", "csv", "--actor", "importer"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(json(&out)["inserted"], 2);
+    assert_eq!(count(), "2");
+    assert_eq!(
+        db.scalar("SELECT owner FROM doc_customer WHERE name = 'a@x.y'")
+            .as_deref(),
+        Some("importer")
+    );
+
+    // An upsert updates by name (the empty cell is null) and inserts the rest.
+    let upsert = scratch.file(
+        "upsert.csv",
+        "name,full_name,loyalty_points\r\na@x.y,Ann B,\r\nz@x.y,Zed,9\r\n",
+    );
+    let out = import(&upsert, &["--format", "csv", "--upsert"]);
+    assert_eq!(code(&out), Some(1), "z@x.y has no email: {}", stdout(&out));
+    let upsert = scratch.file(
+        "upsert2.csv",
+        "name,email,full_name,loyalty_points\r\na@x.y,a@x.y,Ann B,\r\nz@x.y,z@x.y,Zed,9\r\n",
+    );
+    let out = import(&upsert, &["--format", "csv", "--upsert"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let summary = json(&out);
+    assert_eq!(
+        (summary["updated"].as_u64(), summary["inserted"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        db.scalar("SELECT full_name || '/' || coalesce(loyalty_points::text, 'null') FROM doc_customer WHERE name = 'a@x.y'")
+            .as_deref(),
+        Some("Ann B/null")
+    );
+
+    // A JSON file; a file the format does not fit and a missing file are refused before the
+    // database is touched.
+    let json_file = scratch.file("docs.json", r#"[{"email":"j@x.y","full_name":"Jay"}]"#);
+    assert_eq!(code(&import(&json_file, &["--format", "json"])), Some(0));
+    assert_eq!(count(), "4");
+    let out = import(&json_file, &["--format", "csv"]);
+    assert_eq!(code(&out), Some(1));
+    assert!(
+        stderr(&out).contains("the file cannot be imported"),
+        "{}",
+        stderr(&out)
+    );
+    let out = import(&scratch.path("missing.csv"), &["--format", "csv"]);
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("cannot read"), "{}", stderr(&out));
+    // --format is required.
+    assert_eq!(code(&import(&good, &[])), Some(2));
+    assert_eq!(count(), "4");
 }

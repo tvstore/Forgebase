@@ -33,8 +33,9 @@
 //! document API ([`crate::json::document_to_json`]): **all fields, child rows included, not
 //! filtered by the permissions of the caller**. A webhook is configured by an operator, who
 //! decides where the data goes. A snapshot that does not fit a job payload (64 KiB) is replaced
-//! by `"data": null` and `"truncated": true`: a webhook never makes a business write fail
-//! because of its size.
+//! by `"data": null` and `"truncated": true`, and one that cannot be written as JSON (a stored
+//! value with no JSON form) by `"data": null` and `"unavailable": true`: a webhook never makes a
+//! business write fail because of its size or its content.
 
 use forgebase_core::hooks::check_job_payload;
 use forgebase_core::ident::validate_doctype_name;
@@ -63,6 +64,10 @@ pub const EVENTS: [&str; 6] = [
 /// The length of a generated secret in bytes (it is written as 64 hex characters), the same as
 /// an API token secret.
 const SECRET_BYTES: usize = 32;
+
+/// The shortest secret a caller may give (`--secret-stdin`), in bytes: the signature is only as
+/// strong as the secret.
+pub const MIN_SECRET_BYTES: usize = 16;
 
 /// A webhook as the delivery needs it, with its secret. It has no `Debug` output of the secret.
 #[derive(Clone, PartialEq, Eq)]
@@ -183,12 +188,7 @@ pub async fn add(
     if webhook.url.is_empty() {
         return Err(fail("the URL is empty"));
     }
-    let secret = match secret {
-        Some("") => return Err(fail("the secret is empty")),
-        Some(secret) => secret.to_owned(),
-        None => crate::auth::random_hex(SECRET_BYTES)
-            .map_err(|_| fail("cannot get random bytes from the operating system"))?,
-    };
+    let secret = secret_or_random(secret)?;
     let inserted = client
         .execute(
             "INSERT INTO fb_webhook (name, doctype, events, url, secret, allow_private, insecure_http) \
@@ -292,12 +292,7 @@ pub async fn rotate_secret(
     name: &str,
     secret: Option<&str>,
 ) -> Result<String, DbError> {
-    let secret = match secret {
-        Some("") => return Err(fail("the secret is empty")),
-        Some(secret) => secret.to_owned(),
-        None => crate::auth::random_hex(SECRET_BYTES)
-            .map_err(|_| fail("cannot get random bytes from the operating system"))?,
-    };
+    let secret = secret_or_random(secret)?;
     let changed = client
         .execute(
             "UPDATE fb_webhook SET secret = $2, modified_at = now() WHERE name = $1",
@@ -306,6 +301,21 @@ pub async fn rotate_secret(
         .await?;
     found(changed, name)?;
     Ok(secret)
+}
+
+/// The secret a caller gave, checked (not empty, at least [`MIN_SECRET_BYTES`] bytes), or a new
+/// random one.
+fn secret_or_random(secret: Option<&str>) -> Result<String, DbError> {
+    match secret {
+        Some("") => Err(fail("the secret is empty")),
+        Some(secret) if secret.len() < MIN_SECRET_BYTES => Err(fail(format!(
+            "the secret must be at least {MIN_SECRET_BYTES} bytes long, this one has {} (a short secret is easy to guess; leave it out to get 32 random bytes)",
+            secret.len()
+        ))),
+        Some(secret) => Ok(secret.to_owned()),
+        None => crate::auth::random_hex(SECRET_BYTES)
+            .map_err(|_| fail("cannot get random bytes from the operating system")),
+    }
 }
 
 fn found(changed: u64, name: &str) -> Result<(), DbError> {
@@ -341,8 +351,10 @@ pub(crate) async fn enqueue(
     if rows.is_empty() {
         return Ok(());
     }
-    let snapshot =
-        document_to_json(doc).map_err(|e| DbError::Job(format!("webhook snapshot: {e}")))?;
+    // A stored value with no JSON form (a datetime before the year 0, which PostgreSQL has and
+    // RFC 3339 has not) makes the snapshot unavailable: the delivery is sent with `"data": null`
+    // and `"unavailable": true`. The write never fails because of a webhook.
+    let snapshot = document_to_json(doc).ok();
     for row in &rows {
         let name: String = row.try_get(0)?;
         let listens: Vec<String> = row.try_get(1)?;
@@ -358,6 +370,9 @@ pub(crate) async fn enqueue(
                 "data": snapshot,
                 "occurred_at": occurred_at,
             });
+            if snapshot.is_none() {
+                payload["unavailable"] = serde_json::Value::Bool(true);
+            }
             if check_job_payload(&payload).is_err() {
                 payload["data"] = serde_json::Value::Null;
                 payload["truncated"] = serde_json::Value::Bool(true);

@@ -99,7 +99,7 @@ impl Changes {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationError {
     /// The document has a value for a field the DocType does not define.
-    #[error("unknown field `{field}`")]
+    #[error("unknown field `{}`", crate::shorten(.field))]
     UnknownField {
         /// The field.
         field: String,
@@ -131,7 +131,7 @@ pub enum ValidationError {
         max: u32,
     },
     /// A Select value is not one of the options.
-    #[error("field `{field}`: `{value}` is not one of the allowed options")]
+    #[error("field `{field}`: `{}` is not one of the allowed options", crate::shorten(.value))]
     InvalidOption {
         /// The field.
         field: String,
@@ -173,7 +173,7 @@ pub enum ValidationError {
     },
     /// A Link value names a document that does not exist. Not produced by [`validate`] (which
     /// does no I/O): `forgebase-db` reports it when it resolves the link.
-    #[error("field `{field}`: {target} `{name}` does not exist")]
+    #[error("field `{field}`: {target} `{}` does not exist", crate::shorten(.name))]
     LinkNotFound {
         /// The field.
         field: String,

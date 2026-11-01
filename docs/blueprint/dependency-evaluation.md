@@ -429,6 +429,24 @@ Owner decision 6 of the M9 plan, 2026-10-30 (*"setuju semua rencana mu"*; [ADR 0
 - **MSRV:** `cargo +1.97 check --workspace --all-targets --all-features --locked` passes (`hyper-rustls` 0.27.10 declares 1.85).
 - **Test tooling:** the TLS tests need the `openssl` command-line tool (to make a throwaway CA); it is not a dependency of the build. CI images have it.
 
+### 15. Import and export (M9.3)
+
+Owner decision 9 of the M9 plan, 2026-10-30 (*"setuju semua rencana mu"*; [ADR 0021](../adr/0021-import-and-export.md)): **the `csv` crate reads CSV** (reading only; the writer is hand-written, about thirty lines, because the formula mitigation and the quoting rule need control over each cell).
+
+| Crate | Version | Licence | How |
+|---|---|---|---|
+| **`csv`** | 1.4.0 | Unlicense OR MIT | **new direct dependency** of `forgebase-http` (workspace, default features; it has none that matter). MSRV 1.73. By BurntSushi; the de facto Rust CSV reader. |
+| `csv-core` | 0.1.13 | Unlicense OR MIT | new transitive crate (the state machine under `csv`) |
+| `itoa`, `ryu`, `memchr`, `serde_core` | | MIT OR Apache-2.0 (`memchr`: Unlicense OR MIT) | **already in the tree** (serde_json, axum): no new entry |
+| `http-body-util` | 0.1.5 | MIT | already in the tree; now also a direct dependency of `forgebase-http`, with its **`channel` feature** (it adds `tokio` to that crate's own edges; no new crate): the body of a streamed export |
+
+`Verified (local measurement)`, 2026-10-31, from `Cargo.lock`, `cargo tree` and `cargo deny`:
+
+- **The lockfile grows by two package entries (+2):** `csv` and `csv-core` (the plan expected `csv` with `csv-core`, `itoa` and `ryu`; the last two were already there).
+- **Licences:** `cargo deny --locked check` passes with the existing allow-list: the licences of the new crates are `MIT` or `Unlicense OR MIT`, so the MIT arm is used and `deny.toml` is unchanged.
+- **MSRV:** `cargo +1.97 check --workspace --all-targets --all-features --locked` passes (`csv` declares 1.73).
+- **Desk:** no new npm dependency.
+
 ## Recommended baseline
 
 Rows or parts marked (Accepted) are owner-accepted directions (ADRs 0002, 0004, 0005); everything else is Proposed.

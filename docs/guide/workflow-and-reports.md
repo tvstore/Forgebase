@@ -235,7 +235,7 @@ curl -s -X POST -H "Authorization: token $MANAGER_TOKEN" -H 'Content-Type: appli
 # {"data": {"columns": [...], "rows": [["bob@example.com", 1, "40.00", "2026-10-03"], ...], "truncated": false}}
 ```
 
-There is no CSV export and there are no charts yet.
+**Export.** In the desk the result has an **Export** menu (CSV or JSON): it runs the report again with the same parameters and saves the file. Over HTTP, `POST /api/v1/report/<app>.<name>/export?format=csv|json` takes the same body as a run and answers the file (CSV has the column names as its header; JSON is `{"columns", "rows", "truncated"}`); it is for the same roles, with the report's own row limit and time limit, and `X-Forgebase-Truncated: true` marks a result that was cut at the limit ([ADR 0021](../adr/0021-import-and-export.md)). Text that a spreadsheet could take for a formula gets a leading `'` in CSV; numbers and dates never change. There are no charts yet.
 
 ## 4. Test it
 

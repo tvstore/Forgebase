@@ -433,7 +433,8 @@ fn column_allowed(doctype: &DocType, name: &str) -> Result<(), String> {
     }
     match doctype.field(name).map(|f| &f.field_type) {
         None => Err(format!(
-            "unknown column {name:?} for DocType `{}`",
+            "unknown column {:?} for DocType `{}`",
+            forgebase_core::shorten(name),
             doctype.name
         )),
         Some(FieldType::Table { .. }) => Err(format!(
@@ -469,7 +470,8 @@ fn check_definition(doctype: &DocType, definition: &ViewDefinition) -> Result<()
         .find(|k| !matches!(k.as_str(), "filters" | "sort" | "columns"))
     {
         return Err(invalid(format!(
-            "unknown key {key:?} in the definition (use filters, sort, columns)"
+            "unknown key {:?} in the definition (use filters, sort, columns)",
+            forgebase_core::shorten(key)
         )));
     }
     if definition.json.to_string().len() > MAX_DEFINITION_BYTES {

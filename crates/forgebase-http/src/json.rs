@@ -44,7 +44,7 @@ pub enum JsonError {
     #[error("the data must be a JSON object")]
     NotAnObject,
     /// A value does not fit its field.
-    #[error("field `{field}`: {problem}")]
+    #[error("field `{}`: {problem}", forgebase_core::shorten(.field))]
     Field {
         /// The field name.
         field: String,
@@ -167,7 +167,11 @@ fn to_rows(
     Ok(rows)
 }
 
-fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, JsonError> {
+pub(crate) fn to_value(
+    name: &str,
+    field_type: &FieldType,
+    json: &Json,
+) -> Result<Value, JsonError> {
     if json.is_null() {
         return Ok(Value::Null);
     }
@@ -190,10 +194,15 @@ fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, Js
             _ => Err(expected("an integer")),
         },
         FieldType::Decimal { .. } => match json {
-            Json::String(s) => s
-                .parse::<Decimal>()
-                .map(Value::Decimal)
-                .map_err(|e| bad(name, format!("`{s}` is not a decimal number: {e}"))),
+            Json::String(s) => s.parse::<Decimal>().map(Value::Decimal).map_err(|e| {
+                bad(
+                    name,
+                    format!(
+                        "`{}` is not a decimal number: {e}",
+                        forgebase_core::shorten(s)
+                    ),
+                )
+            }),
             Json::Number(_) => Err(bad(
                 name,
                 "a decimal must be a JSON string such as \"12.50\", not a number",
@@ -207,9 +216,15 @@ fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, Js
         FieldType::Date => {
             let s = json.as_str().ok_or_else(|| expected("a date string"))?;
             let format = date_format().map_err(|e| bad(name, e.to_string()))?;
-            Date::parse(s, &format)
-                .map(Value::Date)
-                .map_err(|_| bad(name, format!("`{s}` is not a date in the form YYYY-MM-DD")))
+            Date::parse(s, &format).map(Value::Date).map_err(|_| {
+                bad(
+                    name,
+                    format!(
+                        "`{}` is not a date in the form YYYY-MM-DD",
+                        forgebase_core::shorten(s)
+                    ),
+                )
+            })
         }
         FieldType::Table { .. } => Err(bad(
             name,
@@ -225,7 +240,8 @@ fn to_value(name: &str, field_type: &FieldType, json: &Json) -> Result<Value, Js
                     bad(
                         name,
                         format!(
-                            "`{s}` is not an RFC 3339 date and time, e.g. 2024-03-15T10:20:30Z"
+                            "`{}` is not an RFC 3339 date and time, e.g. 2024-03-15T10:20:30Z",
+                            forgebase_core::shorten(s)
                         ),
                     )
                 })
@@ -312,7 +328,10 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
             .keys()
             .find(|k| !matches!(k.as_str(), "field" | "op" | "value"))
         {
-            return Err(place(format!("unknown key `{key}` (use field, op, value)")));
+            return Err(place(format!(
+                "unknown key `{}` (use field, op, value)",
+                forgebase_core::shorten(key)
+            )));
         }
         let field = object
             .get("field")
@@ -325,11 +344,17 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
         let value = object.get("value");
         let field_type = forgebase_db::column_type(doctype, field).ok_or_else(|| {
             place(format!(
-                "unknown field {field:?} (table fields cannot be filtered)"
+                "unknown field {:?} (table fields cannot be filtered)",
+                forgebase_core::shorten(field)
             ))
         })?;
         let one = || -> Result<Value, JsonError> {
-            let json = value.ok_or_else(|| place(format!("operator `{op}` needs a `value`")))?;
+            let json = value.ok_or_else(|| {
+                place(format!(
+                    "operator `{}` needs a `value`",
+                    forgebase_core::shorten(op)
+                ))
+            })?;
             to_value(field, &field_type, json)
         };
         let op = match op {
@@ -356,13 +381,17 @@ pub fn parse_filters(doctype: &DocType, text: &str) -> Result<Vec<Filter>, JsonE
             },
             "is null" | "is not null" => {
                 if value.is_some() {
-                    return Err(place(format!("operator `{op}` takes no `value`")));
+                    return Err(place(format!(
+                        "operator `{}` takes no `value`",
+                        forgebase_core::shorten(op)
+                    )));
                 }
                 FilterOp::IsNull(op == "is null")
             }
             other => {
                 return Err(place(format!(
-                    "unknown operator `{other}` (use =, !=, <, <=, >, >=, in, like, is null, is not null)"
+                    "unknown operator `{}` (use =, !=, <, <=, >, >=, in, like, is null, is not null)",
+                    forgebase_core::shorten(other)
                 )));
             }
         };
@@ -380,7 +409,8 @@ pub fn parse_sort(specs: &[String]) -> Result<Vec<Sort>, JsonError> {
             Some((field, "asc")) => Ok(Sort::asc(field)),
             Some((field, "desc")) => Ok(Sort::desc(field)),
             Some(_) => Err(JsonError::Query(format!(
-                "invalid sort {spec:?}: use FIELD, FIELD:asc or FIELD:desc"
+                "invalid sort {:?}: use FIELD, FIELD:asc or FIELD:desc",
+                forgebase_core::shorten(spec)
             ))),
         })
         .collect()

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formHref, listHref, newHref, parseHash, reportHref } from './router';
+import { formHref, importHref, listHref, newHref, parseHash, reportHref } from './router';
 
 describe('parseHash', () => {
   it('parses the home and login routes', () => {
@@ -40,6 +40,12 @@ describe('parseHash', () => {
     expect(parseHash(formHref('note', 'a/b'))).toEqual({ name: 'form', doctype: 'note', docName: 'a/b' });
   });
 
+  it('parses the import page of a DocType', () => {
+    expect(parseHash('#/import/customer')).toEqual({ name: 'import', doctype: 'customer' });
+    expect(parseHash(importHref('sales order'))).toEqual({ name: 'import', doctype: 'sales order' });
+    expect(importHref('a b')).toBe('#/import/a%20b');
+  });
+
   it('parses a report with its parameters', () => {
     const route = parseHash('#/report/sales.by_customer?from=2026-10-01&customer=A%20B');
     expect(route.name).toBe('report');
@@ -61,6 +67,10 @@ describe('parseHash', () => {
       '#/form/a',
       '#/form/a/b/c',
       '#/new',
+      '#/import',
+      '#/import/',
+      '#/import/a/b',
+      '#/import/%E0%A4%A',
       '#/login/x',
       '#/list/%E0%A4%A',
       '#/form/a/%',

@@ -52,6 +52,9 @@
 //! | `GET /summary/{doctype}?group_by=FIELD&aggregates=sum:amount,...&filters=...` (M8.3) | 200 `{"data": {"groups": [{"key", "count", "values"}], "truncated"}}`, at most 500 groups, over the documents the caller may read |
 //! | `GET /report` (M8.4) | 200 `{"data": [{"name", "app", "label", "params": [{"name", "label", "kind", "required", "default", "doctype"?, "options"?}], "columns": [{"name", "label", "kind", "doctype"?}]}]}`: the query reports the caller may run (by role), by label; never the SQL |
 //! | `POST /report/{app}.{name}` body `{"params"?: {..}}` (M8.4; `?link_titles=1`) | 200 `{"data": {"columns", "rows": [[..]], "truncated"}}` (plus `link_titles`); 404 for a report that does not exist or that the caller may not run, 422 for the parameters (`details` per parameter), 504 `report_timeout` |
+//! | `GET /export/{doctype}?format=csv\|json&filters=&sort=&fields=` (M9.3, ADR 0021) | 200, a streamed file (`text/csv; charset=utf-8` or `application/json`, `Content-Disposition: attachment`, `X-Forgebase-Row-Count`); needs the `read` and `export` rights (403 `permission_denied`); 422 `export_too_large` over the row limit |
+//! | `POST /report/{app}.{name}/export?format=csv\|json` body `{"params"?: {..}}` (M9.3) | 200, a file; the report's own access rules (404) and limits; `X-Forgebase-Truncated: true` when cut at the row limit |
+//! | `POST /import/{doctype}?format=csv\|json&mode=insert\|upsert&dry_run=1` body: the file (M9.3) | 200 `{"data": {"dry_run", "mode", "rows", "inserted", "updated", "errors", "error_count"}}`; 422 `import_failed` (the same summary in `details`) when a row fails, 422 `invalid_import` / `import_too_large`, 415 for the wrong `Content-Type`, 413 over `import_body_limit_bytes`; needs `import` and `create` (and `write` for an upsert) |
 //! | `POST /method/{app}.{method}` body: a JSON object, optional (M9.1, ADR 0019) | 200 `{"data": <what the handler returned>}`; an empty body is `{}`, a body that is not a JSON object 400, another content type 415, over the limit 413, query parameters 400 `invalid_query`; **404** for a method that does not exist, is not installed on the site or that the caller may not call (by role; one answer for all three); 400 or 422 `method_error` (the app's message), the document API's own status and code for a document error (403 `permission_denied`, 404, 409, 422, ...), 500 `internal` with no detail; one transaction, rolled back on every error |
 //!
 //! Anything else is 404, a wrong method is 405.
@@ -70,6 +73,8 @@ mod meta;
 mod methods;
 mod reports;
 mod routes;
+pub mod transfer;
+mod transfer_routes;
 mod views;
 
 use std::collections::HashMap;
@@ -112,6 +117,20 @@ pub struct AppConfig {
     /// The directory of the built desk (`desk/dist`) to serve under `/desk/`, or `None` (the
     /// default) to serve no desk: `/desk/*` is then a 404. See the `desk` module.
     pub desk_dir: Option<PathBuf>,
+    /// The most rows an export may have (M9.3, ADR 0021); more is `422 export_too_large`.
+    /// Default 100 000.
+    pub export_max_rows: u64,
+    /// The most data rows an import file may have; more is `422 import_too_large`, before
+    /// anything runs. Default 10 000.
+    pub import_max_rows: usize,
+    /// How long an export waits for the client to take one chunk of the body. A client that
+    /// stops reading would otherwise hold a pooled connection and a `REPEATABLE READ` snapshot
+    /// for as long as it likes; when the time passes the body is aborted and both are released.
+    /// Default 30 seconds.
+    pub export_send_timeout: std::time::Duration,
+    /// The largest body of an import request in bytes: the import route has its own limit, and
+    /// the other routes keep `body_limit_bytes`. Default 16 MiB.
+    pub import_body_limit_bytes: usize,
 }
 
 impl Default for AppConfig {
@@ -122,6 +141,10 @@ impl Default for AppConfig {
             body_limit_bytes: 1024 * 1024,
             max_concurrent_logins: 8,
             desk_dir: None,
+            export_max_rows: 100_000,
+            import_max_rows: 10_000,
+            export_send_timeout: std::time::Duration::from_secs(30),
+            import_body_limit_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -382,6 +405,18 @@ fn site_router(state: AppState) -> Router {
         .route("/api/v1/summary/{doctype}", get(views::summary))
         .route("/api/v1/report", get(reports::list))
         .route("/api/v1/report/{name}", post(reports::run))
+        .route(
+            "/api/v1/report/{name}/export",
+            post(transfer_routes::report_export),
+        )
+        .route("/api/v1/export/{doctype}", get(transfer_routes::export))
+        .route(
+            "/api/v1/import/{doctype}",
+            // Its own, larger body limit: the layer of the route wins over the one of the router.
+            post(transfer_routes::import).layer(DefaultBodyLimit::max(
+                state.config().import_body_limit_bytes,
+            )),
+        )
         .route("/api/v1/method/{name}", post(methods::call));
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {

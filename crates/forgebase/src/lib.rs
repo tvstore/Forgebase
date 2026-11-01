@@ -98,6 +98,7 @@ mod builder;
 mod builtin;
 mod compose;
 mod config;
+mod data_cmd;
 mod doctypes;
 mod documents;
 mod error;

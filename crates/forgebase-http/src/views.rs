@@ -62,7 +62,8 @@ fn definition(doctype: &DocType, json: Json) -> Result<ViewDefinition, ApiError>
         .find(|k| !matches!(k.as_str(), "filters" | "sort" | "columns"))
     {
         return Err(ApiError::validation(vec![format!(
-            "unknown key {key:?} in `definition` (use filters, sort, columns)"
+            "unknown key {:?} in `definition` (use filters, sort, columns)",
+            forgebase_core::shorten(key)
         )]));
     }
     let list = |key: &str| match map.get(key) {
@@ -236,12 +237,14 @@ fn aggregates(text: &str) -> Result<Vec<(AggregateFn, String)>, ApiError> {
         .map(|item| {
             let (function, field) = item.split_once(':').ok_or_else(|| {
                 ApiError::invalid_query(format!(
-                    "invalid aggregate {item:?}: use FUNCTION:FIELD, for example sum:amount"
+                    "invalid aggregate {:?}: use FUNCTION:FIELD, for example sum:amount",
+                    forgebase_core::shorten(item)
                 ))
             })?;
             let function = AggregateFn::from_name(function).ok_or_else(|| {
                 ApiError::invalid_query(format!(
-                    "unknown aggregate function {function:?} (use sum, avg, min or max; the count is always included)"
+                    "unknown aggregate function {:?} (use sum, avg, min or max; the count is always included)",
+                    forgebase_core::shorten(function)
                 ))
             })?;
             Ok((function, field.to_owned()))

@@ -76,3 +76,12 @@ These were chosen while implementing M3.2; they are to be reviewed with that cha
   - Rights are per DocType, not per field; list results include every column field.
 - The system context is a bypass by design. Misuse (building it from request data) would defeat the model, so the HTTP layer must only ever build `Caller::User` from a validated session or token, and a review of M3.3 must check it.
 - Decisions deferred: field-level permissions, user permissions, sharing, a read-only role, `/api/v1/method`, per-row child permissions, list results with child tables, aggregation and grouping.
+
+## Amendment (2026-10-31, M9.3): the `export` and `import` rights
+
+Owner decision 7 of the M9 plan adds two rights to the list above, `export` and `import`, as keys of `[[permissions]]` (`false` by default) and as `Right::Export` and `Right::Import` of the one evaluator. The rest of this ADR is unchanged: no inheritance, no deny rules, `if_owner` as before, deny by default, so **an existing DocType gives nobody the new rights** (migration note: grant `export = true` to roles that should export). They are not lifecycle rights: they are valid on every DocType, submittable or not, and the metadata API reports them for all.
+
+- **Export** needs `read` and `export`; if either comes from an `if_owner` rule the export is limited to the caller's own documents, by the same `WHERE "owner" = $n` of the list query.
+- **Import** needs `import` and `create`, and `write` for an upsert; every row then runs through `insert` or `update`, which check their own rights per row.
+
+The details are in [ADR 0021](0021-import-and-export.md).

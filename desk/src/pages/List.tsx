@@ -3,6 +3,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ApiError, createView, deleteView, getDocTypeMeta, listDocumentsWithTitles, listViews, updateView } from '../api';
 import { Badge } from '../components/Badge';
 import { ColumnsMenu } from '../components/ColumnsMenu';
+import { ExportMenu } from '../components/ExportMenu';
 import { Dialog } from '../components/Dialog';
 import { EmptyState } from '../components/EmptyState';
 import { FilterBar } from '../components/FilterBar';
@@ -43,7 +44,8 @@ import { initials } from '../people';
 import { stateBadge } from '../status';
 import { exactTime, relativeTime } from '../time';
 import type { ListState } from '../listing';
-import { formHref, listHref, navigate, newHref } from '../router';
+import { formHref, importHref, listHref, navigate, newHref } from '../router';
+import { canExport, canImport, exportFields, exportHref } from '../transfer';
 import { withGroupFilter } from '../summary';
 import type { GroupField } from '../summary';
 import type { DocTypeMeta, DocumentRow } from '../types';
@@ -322,6 +324,8 @@ export function List({ doctype, params, username, isAdmin }: Props) {
   const hasNext = (answer?.rows?.length ?? 0) > PAGE_SIZE;
   const filtered = state.q.trim() !== '' || filtersText !== null;
   const mayCreate = meta.rights.create !== 'none';
+  const mayImport = canImport(meta.rights);
+  const mayExport = canExport(meta.rights);
   const empty = !!answer?.rows && shown.length === 0 && shownOffset === 0 && !answer.error;
 
   const titles = answer?.titles ?? NO_TITLES;
@@ -333,11 +337,20 @@ export function List({ doctype, params, username, isAdmin }: Props) {
         title={<h1>{meta.label}</h1>}
         meta={currentView ? <span className="view-label">{viewTitle(currentView)}</span> : undefined}
         actions={
-          mayCreate ? (
-            <a className="btn btn-primary" href={newHref(doctype)}>
-              <PlusIcon size={16} />
-              New
-            </a>
+          mayCreate || mayImport ? (
+            <>
+              {mayImport ? (
+                <a className="btn" href={importHref(doctype)}>
+                  Import
+                </a>
+              ) : null}
+              {mayCreate ? (
+                <a className="btn btn-primary" href={newHref(doctype)}>
+                  <PlusIcon size={16} />
+                  New
+                </a>
+              ) : null}
+            </>
           ) : null
         }
       />
@@ -415,6 +428,22 @@ export function List({ doctype, params, username, isAdmin }: Props) {
               }
               onReset={() => go(state, { ...vs, columns: null })}
             />
+            {mayExport ? (
+              <ExportMenu
+                heading="Export this list"
+                href={(format) =>
+                  exportHref(doctype, format, {
+                    filters: requestFilters,
+                    sort,
+                    fields: exportFields(
+                      columns.map((c) => c.key),
+                      meta.title_field,
+                    ),
+                  })
+                }
+                note="The current filters and sort, and the shown columns."
+              />
+            ) : null}
             <button
               type="button"
               ref={summaryButton}

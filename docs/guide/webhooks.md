@@ -52,7 +52,7 @@ The body is compact JSON:
 ```
 
 - `data` is the document **as the document API shows it** (`GET /api/v1/resource/<doctype>/<name>`): the standard columns, `docstatus` and `workflow_state` where they apply, every field, and the rows of every table. It is the document **after** the operation, except for `delete`, where it is the document as it was. It is **not filtered by anybody's permissions**: a webhook is configured by an operator, and it carries every field.
-- A snapshot over 64 KiB is sent as `"data": null` with `"truncated": true`; fetch the document by `doctype` and `name` if you need it.
+- A snapshot over 64 KiB is sent as `"data": null` with `"truncated": true`; fetch the document by `doctype` and `name` if you need it. A snapshot that cannot be written as JSON at all (a stored value with no JSON form, for example a datetime before the year 0) is sent as `"data": null` with `"unavailable": true`: the write that caused it is never refused because of a webhook, and you can read the document through the API.
 - `occurred_at` is the time of the transaction, in UTC.
 - `data.version` increases with every change. Deliveries can arrive out of order (retries), so **ignore a delivery whose version is older** than what you have.
 - The response body of your receiver is ignored (at most 64 KiB are read). Redirects are **not followed**: a 3xx answer is a permanent failure, so give the final URL.
@@ -131,7 +131,7 @@ Do not use these flags in production: see below. A receiver with a self-made cer
 The worker is the thing that opens the connection, so it is strict (the SSRF guard):
 
 - **`https://` only**, unless the webhook was added with `--insecure-http`. No `user:password@` in the URL.
-- **The host is resolved by Forgebase and every address must be public.** Loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, with the cloud metadata address `169.254.169.254`, and `fe80::/10`), carrier-grade NAT (`100.64/10`), multicast, reserved and the other special ranges are refused, and so are IPv4-mapped and NAT64 forms of them. One bad address in the answer refuses the delivery. The refusal is **permanent**: the job is `dead` after one attempt, and the message says to use `--allow-private` if you mean it.
+- **The host is resolved by Forgebase and every address must be public.** The Azure WireServer `168.63.129.16`, reachable from Azure virtual machines, is refused as an explicit extra. Loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, with the cloud metadata address `169.254.169.254`, and `fe80::/10`), carrier-grade NAT (`100.64/10`), multicast, reserved and the other special ranges are refused, and so are IPv4-mapped and NAT64 forms of them. One bad address in the answer refuses the delivery. The refusal is **permanent**: the job is `dead` after one attempt, and the message says to use `--allow-private` if you mean it.
 - **The connection goes to the addresses that were checked**, and the name is not resolved a second time, so a DNS record that changes in between cannot send the request elsewhere.
 - **Redirects are not followed** and a 3xx answer is a permanent failure.
 - **10 seconds** for the lookup, the connection, TLS, the request and the answer. A timeout is retried.

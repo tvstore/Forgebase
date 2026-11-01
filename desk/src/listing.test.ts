@@ -49,7 +49,7 @@ const meta = (fields: FieldMeta[], submittable = false, extra: Partial<DocTypeMe
   list_fields: null,
   fields,
   rights: {
-    read: 'all', write: 'all', create: 'all', delete: 'all', submit: 'none', cancel: 'none', amend: 'none',
+    read: 'all', write: 'all', create: 'all', delete: 'all', submit: 'none', cancel: 'none', amend: 'none', export: 'none', import: 'none',
   },
   ...extra,
 });

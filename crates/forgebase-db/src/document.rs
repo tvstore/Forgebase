@@ -1873,6 +1873,45 @@ async fn load_tables(
     Ok(tables)
 }
 
+/// The rows of every Table field of **several** documents at once, one query per child table
+/// (the export's pages, M9.3): the rows of each parent in order, by the parent's id. A parent
+/// without rows has an empty list for every Table field.
+pub(crate) async fn load_tables_for(
+    client: &impl GenericClient,
+    registry: &Registry,
+    doctype: &DocType,
+    parents: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, BTreeMap<String, Vec<Row>>>, DbError> {
+    let mut all: std::collections::HashMap<Uuid, BTreeMap<String, Vec<Row>>> = parents
+        .iter()
+        .map(|id| {
+            let empty = doctype
+                .table_fields()
+                .map(|(field, _)| (field.name.clone(), Vec::new()))
+                .collect();
+            (*id, empty)
+        })
+        .collect();
+    for (field, target) in doctype.table_fields() {
+        let child = lookup_doctype(registry, target)?;
+        let sql = format!(
+            "SELECT \"parent_id\", {} FROM {} WHERE \"parent_id\" = ANY($1::uuid[]) ORDER BY \"idx\"",
+            field_items(child).join(", "),
+            quote_ident(&table_name(&child.name))
+        );
+        for row in client.query(&sql, &[&parents]).await? {
+            let parent: Uuid = row.try_get(0)?;
+            if let Some(tables) = all.get_mut(&parent) {
+                tables
+                    .entry(field.name.clone())
+                    .or_default()
+                    .push(decode_fields(child, &row, 1)?);
+            }
+        }
+    }
+    Ok(all)
+}
+
 /// The bound parameter for one field: the resolved `id` for a Link, else the value itself.
 fn sql_param<'a>(
     field_type: &FieldType,

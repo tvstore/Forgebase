@@ -15,12 +15,15 @@ workspace = true
 forgebase-core.workspace = true
 forgebase-db.workspace = true
 axum.workspace = true
+csv.workspace = true
+# `channel` (no new crate): the body of a streamed export (M9.3).
+http-body-util = { workspace = true, features = ["channel"] }
 rust_decimal.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing", "formatting"] }
 tower.workspace = true
-tokio = { workspace = true, features = ["fs", "net", "sync"] }
+tokio = { workspace = true, features = ["fs", "net", "sync", "time"] }
 
 [dev-dependencies]
 deadpool-postgres.workspace = true

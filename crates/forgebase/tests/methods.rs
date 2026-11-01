@@ -125,6 +125,7 @@ enum Behavior {
     UpdateNote,
     /// Insert a note, ignore a read that the server refuses, insert another note.
     SwallowedRead,
+    SwallowedGet,
     /// Insert the ticket `code`.
     AddTicket,
     /// Take the workflow action "Close" on the ticket `name` at `version`.
@@ -208,6 +209,10 @@ impl MethodHandler for Shop {
                     swallowed_read(&mut ctx.documents(), &code).await?;
                     Ok(json!({"swallowed": true}))
                 }
+                Behavior::SwallowedGet => {
+                    swallowed_get(&mut ctx.documents(), &code).await?;
+                    Ok(json!({"swallowed": true}))
+                }
                 Behavior::AddTicket => {
                     let stored = ctx.documents().insert("ticket", doc(&code)).await?;
                     Ok(json!({"name": stored.name(), "version": stored.version()}))
@@ -253,6 +258,22 @@ async fn swallowed_read(
     assert!(
         docs.list("note", &refused).await.is_err(),
         "the server refuses the pattern"
+    );
+    docs.insert("note", doc(&format!("{code}-2"))).await?;
+    Ok(())
+}
+
+/// Like [`swallowed_read`] with `get` of a DocType without Table fields (a single statement, given
+/// its own savepoint by the documents handle): a name with a NUL character, which PostgreSQL
+/// refuses, is read and the error ignored; then `<code>-2` is inserted.
+async fn swallowed_get(
+    docs: &mut forgebase::Documents<'_>,
+    code: &str,
+) -> Result<(), forgebase::DocError> {
+    docs.insert("note", doc(&format!("{code}-1"))).await?;
+    assert!(
+        docs.get("note", "bad\0name").await.is_err(),
+        "the server refuses a name with a NUL character"
     );
     docs.insert("note", doc(&format!("{code}-2"))).await?;
     Ok(())
@@ -326,6 +347,7 @@ fn shop() -> App {
         )
         .method("update_note", m(Behavior::UpdateNote).roles(&writers))
         .method("swallowed_read", m(Behavior::SwallowedRead).roles(&writers))
+        .method("swallowed_get", m(Behavior::SwallowedGet).roles(&writers))
         .method("add_ticket", m(Behavior::AddTicket).roles(&["Agent"]))
         .method(
             "close_ticket",
@@ -589,6 +611,19 @@ async fn a_read_the_server_refuses_and_the_handler_ignores_loses_nothing() {
     let run = run_jobs(&binary(), &db).await;
     assert_eq!((run.done(), run.retried(), run.dead()), (1, 0, 0));
     assert_eq!(codes(&db).await, ["job-1", "job-2", "n-1", "n-2"]);
+    db.cleanup().await;
+}
+
+/// M9.2 review, carry-over: the same for `get` of a DocType without tables (the savepoint branch of
+/// `Documents::get`): a read the server refuses and the handler ignores loses no write.
+#[tokio::test]
+async fn a_get_the_server_refuses_and_the_handler_ignores_loses_nothing() {
+    let db = ready().await;
+    let ann = login(&db, "ann").await;
+    let reply = ann.post(&call("swallowed_get"), json!({"code": "g"})).await;
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    assert_eq!(reply.data(), &json!({"swallowed": true}));
+    assert_eq!(codes(&db).await, ["g-1", "g-2"]);
     db.cleanup().await;
 }
 

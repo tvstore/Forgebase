@@ -4,10 +4,12 @@ import {
   ApiError,
   createDocument,
   deleteDocument,
+  exportReport,
   getDocTypeMeta,
   getDocument,
   getDocumentWithTitles,
   getSession,
+  importFile,
   listDocuments,
   listDocumentsWithTitles,
   login,
@@ -334,5 +336,78 @@ describe('link titles', () => {
     mockFetch(() => json(200, { data: [] }));
     await listDocuments('order', { limit: 5, offset: 0 });
     expect(calls[0]?.url).not.toContain('link_titles');
+  });
+});
+
+describe('import and export (M9.3)', () => {
+  it('sends an import file as it is, with its content type, the options in the address and the CSRF header', async () => {
+    setCsrfToken('tok');
+    const summary = { dry_run: true, mode: 'upsert', rows: 2, inserted: 1, updated: 1, errors: [], error_count: 0 };
+    mockFetch(() => json(200, { data: summary }));
+    const file = new Blob(['a,b\r\n1,2\r\n'], { type: 'text/plain' });
+    const answer = await importFile('sales order', file, { format: 'csv', mode: 'upsert', dryRun: true });
+    expect(answer.ok).toBe(true);
+    expect(answer.summary).toMatchObject({ dryRun: true, mode: 'upsert', rows: 2, updated: 1 });
+    expect(calls[0]?.url).toBe('/api/v1/import/sales%20order?format=csv&mode=upsert&dry_run=1');
+    expect(calls[0]?.init.method).toBe('POST');
+    expect(calls[0]?.init.body).toBe(file);
+    expect(header(calls[0], 'Content-Type')).toBe('text/csv');
+    expect(header(calls[0], 'X-Forgebase-CSRF')).toBe('tok');
+    mockFetch(() => json(200, { data: { ...summary, dry_run: false } }));
+    await importFile('a', file, { format: 'json', mode: 'insert', dryRun: false });
+    expect(calls[0]?.url).toBe('/api/v1/import/a?format=json&mode=insert');
+    expect(header(calls[0], 'Content-Type')).toBe('application/json');
+  });
+
+  it('returns the summary of a failed import instead of throwing, and throws any other error', async () => {
+    const summary = {
+      dry_run: false, mode: 'insert', rows: 3, inserted: 2, updated: 0, error_count: 1,
+      errors: [{ row: 2, name: null, code: 'hook_rejected', message: 'no' }],
+    };
+    mockFetch(() => json(422, { error: { code: 'import_failed', message: '1 row(s) have errors', details: summary } }));
+    const answer = await importFile('a', new Blob(['x']), { format: 'csv', mode: 'insert', dryRun: false });
+    expect(answer.ok).toBe(false);
+    expect(answer.summary.errors[0]?.row).toBe(2);
+
+    mockFetch(() => json(422, { error: { code: 'invalid_import', message: 'the file cannot be imported', details: ['unknown column `x`'] } }));
+    const error = await importFile('a', new Blob(['x']), { format: 'csv', mode: 'insert', dryRun: true }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe('invalid_import');
+    expect((error as ApiError).details).toEqual(['unknown column `x`']);
+    mockFetch(() => json(403, { error: { code: 'permission_denied', message: 'permission denied' } }));
+    await expect(importFile('a', new Blob(['x']), { format: 'csv', mode: 'insert', dryRun: true })).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('keeps the object details of an error', async () => {
+    mockFetch(() => json(422, { error: { code: 'export_too_large', message: 'too many', details: { count: 5, limit: 3 } } }));
+    const error = await getDocument('a', 'b').catch((e: unknown) => e);
+    expect((error as ApiError).details).toEqual([]);
+    expect((error as ApiError).rawDetails).toEqual({ count: 5, limit: 3 });
+  });
+
+  it('downloads a report export with the CSRF token and reads the file name and the truncation', async () => {
+    setCsrfToken('tok');
+    mockFetch(
+      () =>
+        new Response('a,b\r\n', {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="sales.by_customer-20261031T101500Z.csv"',
+            'X-Forgebase-Truncated': 'true',
+          },
+        }),
+    );
+    const download = await exportReport('sales.by_customer', { from: '2026-01-01' }, 'csv');
+    expect(calls[0]?.url).toBe('/api/v1/report/sales.by_customer/export?format=csv');
+    expect(calls[0]?.init.method).toBe('POST');
+    expect(header(calls[0], 'X-Forgebase-CSRF')).toBe('tok');
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ params: { from: '2026-01-01' } });
+    expect(download.filename).toBe('sales.by_customer-20261031T101500Z.csv');
+    expect(download.truncated).toBe(true);
+    expect(await download.blob.text()).toBe('a,b\r\n');
+    // An error is still the envelope.
+    mockFetch(() => json(404, { error: { code: 'not_found', message: 'report not found' } }));
+    await expect(exportReport('x.y', {}, 'json')).rejects.toBeInstanceOf(ApiError);
   });
 });

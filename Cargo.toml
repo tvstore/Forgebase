@@ -43,5 +43,6 @@ rustls-native-certs = "0.8"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
+csv = "1.4"
 hmac = "0.13"
 sha2 = "0.11"

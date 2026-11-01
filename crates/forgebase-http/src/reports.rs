@@ -9,7 +9,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Json as AxumJson, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use forgebase_core::permission::can_run_report;
+use forgebase_core::permission::{Caller, can_run_report};
 use forgebase_core::report::{ColumnKind, ParamKind, ReportColumn, ReportDef, ReportParam};
 use forgebase_core::value::Value;
 use forgebase_db::ReportConnection;
@@ -57,7 +57,7 @@ fn column_json(column: &ReportColumn) -> Json {
     Json::Object(map)
 }
 
-fn columns_json(report: &ReportDef) -> Json {
+pub(crate) fn columns_json(report: &ReportDef) -> Json {
     Json::Array(report.columns.iter().map(column_json).collect())
 }
 
@@ -97,27 +97,27 @@ pub async fn list(
     Ok(data(StatusCode::OK, Json::Array(items)))
 }
 
-/// `POST /api/v1/report/{app}.{name}` with `{"params": {..}}` (optional): runs the report and
-/// returns `{"data": {"columns", "rows", "truncated"}}`. `?link_titles=1` adds the titles of the
-/// Link columns as a sibling `link_titles` key, under the caller's read rules.
-pub async fn run(
-    State(state): State<AppState>,
-    authenticated: Authenticated,
-    path: Result<Path<String>, PathRejection>,
-    query: RawQuery,
-    ApiJson(body): ApiJson,
-) -> Reply {
-    let (Path(name), Query(query)) = (path?, query?);
-    let caller = authenticated.caller();
-    // Before the body is mapped: the parameter names of a report the caller may not run are not
-    // for them. This asks the one evaluator of `forgebase-core`; `forgebase-db` checks again.
-    let report = state
+/// The report `name` if the caller may run it, else the one `not_found` of every report that
+/// does not exist or is not for them. Before the body is mapped: the parameter names of a report
+/// the caller may not run are not for them. This asks the one evaluator of `forgebase-core`;
+/// `forgebase-db` checks again.
+pub(crate) fn find_report<'a>(
+    state: &'a AppState,
+    name: &str,
+    caller: &Caller,
+) -> Result<&'a ReportDef, ApiError> {
+    state
         .registry()
-        .report(&name)
-        .filter(|report| can_run_report(&report.roles, &caller))
-        .ok_or_else(|| ApiError::not_found("report not found"))?;
-    let query = params(query, &["link_titles"])?;
-    let titles = link_titles_flag(&query)?;
+        .report(name)
+        .filter(|report| can_run_report(&report.roles, caller))
+        .ok_or_else(|| ApiError::not_found("report not found"))
+}
+
+/// The parameter values of a report run from its request body `{"params": {..}}` (optional).
+pub(crate) fn report_params(
+    report: &ReportDef,
+    body: Json,
+) -> Result<BTreeMap<String, Value>, ApiError> {
     let mut map = object(body, &["params"])?;
     let given = match map.remove("params") {
         None | Some(Json::Null) => Map::new(),
@@ -143,6 +143,25 @@ pub async fn run(
     if !problems.is_empty() {
         return Err(ApiError::validation(problems));
     }
+    Ok(values)
+}
+
+/// `POST /api/v1/report/{app}.{name}` with `{"params": {..}}` (optional): runs the report and
+/// returns `{"data": {"columns", "rows", "truncated"}}`. `?link_titles=1` adds the titles of the
+/// Link columns as a sibling `link_titles` key, under the caller's read rules.
+pub async fn run(
+    State(state): State<AppState>,
+    authenticated: Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    query: RawQuery,
+    ApiJson(body): ApiJson,
+) -> Reply {
+    let (Path(name), Query(query)) = (path?, query?);
+    let caller = authenticated.caller();
+    let report = find_report(&state, &name, &caller)?;
+    let query = params(query, &["link_titles"])?;
+    let titles = link_titles_flag(&query)?;
+    let values = report_params(report, body)?;
     // A connection that is closed afterwards, not pooled: the report's SQL may leave session
     // state behind (`ReportConnection`).
     let mut client = ReportConnection::get(state.pool()).await?;

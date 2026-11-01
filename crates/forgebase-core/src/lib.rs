@@ -41,3 +41,32 @@ pub mod value;
 pub mod workflow;
 
 mod load;
+
+/// How many characters of user input an error message repeats.
+pub const ECHO_CHARS: usize = 64;
+
+/// `text` shortened for an error message: at most [`ECHO_CHARS`] characters (cut on a character
+/// boundary) and `…` if something was cut. Input that an error repeats (a column name, a cell, a
+/// rejected option) can be megabytes long, and a message must not grow with it.
+pub fn shorten(text: &str) -> String {
+    match text.char_indices().nth(ECHO_CHARS) {
+        None => text.to_owned(),
+        Some((end, _)) => format!("{}…", &text[..end]),
+    }
+}
+
+#[cfg(test)]
+mod shorten_tests {
+    use super::{ECHO_CHARS, shorten};
+
+    #[test]
+    fn long_input_is_cut_on_a_character_boundary() {
+        assert_eq!(shorten("short"), "short");
+        let exact = "x".repeat(ECHO_CHARS);
+        assert_eq!(shorten(&exact), exact);
+        assert_eq!(shorten(&"x".repeat(ECHO_CHARS + 1)), format!("{exact}…"));
+        let wide = "é".repeat(1000);
+        assert_eq!(shorten(&wide).chars().count(), ECHO_CHARS + 1);
+        assert!(shorten(&"\u{1}".repeat(1_000_000)).len() < 100);
+    }
+}

@@ -133,6 +133,10 @@ struct RawPermission {
     #[serde(default)]
     amend: bool,
     #[serde(default)]
+    export: bool,
+    #[serde(default)]
+    import: bool,
+    #[serde(default)]
     if_owner: bool,
 }
 
@@ -147,6 +151,8 @@ impl From<RawPermission> for PermissionRule {
             submit: raw.submit,
             cancel: raw.cancel,
             amend: raw.amend,
+            export: raw.export,
+            import: raw.import,
             if_owner: raw.if_owner,
         }
     }
@@ -1082,6 +1088,24 @@ type = "date"
 
     fn rule(body: &str) -> String {
         format!("[[permissions]]\n{body}\n")
+    }
+
+    #[test]
+    fn export_and_import_are_rights_of_a_rule_and_false_by_default() {
+        let text = format!(
+            "{PLAIN}{}{}",
+            rule("role = \"Exporter\"\nread = true\nexport = true"),
+            rule("role = \"Importer\"\ncreate = true\nimport = true\nif_owner = true")
+        );
+        let d = from_toml_str(&text).unwrap();
+        let exporter = &d.permissions[0];
+        assert!(exporter.read && exporter.export && !exporter.import && !exporter.create);
+        let importer = &d.permissions[1];
+        assert!(importer.create && importer.import && !importer.export && importer.if_owner);
+        // A rule that grants only export or only import is not an empty rule.
+        assert!(from_toml_str(&format!("{PLAIN}{}", rule("role = \"A\"\nexport = true"))).is_ok());
+        assert!(from_toml_str(&format!("{PLAIN}{}", rule("role = \"A\"\nimport = true"))).is_ok());
+        // Neither needs a submittable DocType.
     }
 
     #[test]

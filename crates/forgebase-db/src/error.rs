@@ -371,6 +371,15 @@ pub enum DbError {
     /// never by a document operation. The message never contains the secret.
     #[error("webhook: {0}")]
     Webhook(String),
+    /// An export would have more rows than the limit (M9.3, ADR 0021); nothing was written.
+    /// The caller can narrow the filters.
+    #[error("the export would have {count} rows, over the limit of {limit}; narrow the filters")]
+    ExportTooLarge {
+        /// The number of rows the filters match (that the caller may read).
+        count: u64,
+        /// The limit.
+        limit: u64,
+    },
     /// The report does not exist, or the caller may not run it (the same error for both, so a
     /// caller learns nothing about reports they may not run).
     #[error("report `{report}` not found")]

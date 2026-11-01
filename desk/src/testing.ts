@@ -21,6 +21,8 @@ export const rights = (all: Partial<Rights> = {}): Rights => ({
   submit: 'none',
   cancel: 'none',
   amend: 'none',
+  export: 'none',
+  import: 'none',
   ...all,
 });
 

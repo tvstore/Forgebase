@@ -49,6 +49,12 @@ pub enum Command {
     /// as the trusted system context: no permission rules apply (see --actor).
     #[command(subcommand)]
     Doc(DocCommand),
+    /// Export documents to a CSV or JSON file and import them from one (M9.3, ADR 0021). These
+    /// commands run as the trusted system context: no permission rules apply (see --actor of
+    /// `import`). Both use the document pipeline, so an import runs the hooks, validation and
+    /// webhooks of every row.
+    #[command(subcommand)]
+    Data(DataCommand),
     /// Create and manage users and their roles. Passwords are read from standard input.
     #[command(subcommand)]
     User(UserCommand),
@@ -116,6 +122,9 @@ impl Command {
             Command::Migrate { doctypes, .. }
             | Command::Serve { doctypes }
             | Command::Worker { doctypes, .. } => Some(doctypes),
+            Command::Data(
+                DataCommand::Export { doctypes, .. } | DataCommand::Import { doctypes, .. },
+            ) => Some(doctypes),
             Command::Doc(
                 DocCommand::Insert { doctypes, .. }
                 | DocCommand::Get { doctypes, .. }
@@ -177,6 +186,13 @@ impl Command {
             Command::Site(SiteCommand::Create { .. }) => ["site", "create"],
             Command::Site(SiteCommand::Backup { .. }) => ["site", "backup"],
             Command::Site(SiteCommand::Restore { .. }) => ["site", "restore"],
+            Command::Data(data) => [
+                "data",
+                match data {
+                    DataCommand::Export { .. } => "export",
+                    DataCommand::Import { .. } => "import",
+                },
+            ],
             Command::Doc(doc) => [
                 "doc",
                 match doc {
@@ -585,6 +601,73 @@ pub enum DocCommand {
         version: VersionArg,
         #[command(flatten)]
         doctypes: DocTypesDir,
+        #[command(flatten)]
+        actor: ActorArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DataCommand {
+    /// Write the documents of a DocType to standard output (or --out) as CSV or JSON, in one
+    /// consistent snapshot, in pages. Child tables are written to JSON only. Text that a
+    /// spreadsheet could take for a formula gets a leading `'` in CSV (numbers never do); use
+    /// JSON for exact text. An export of more rows than the limit (100000, see
+    /// --limit-override) is refused before anything is written.
+    ///
+    /// --filter and --sort are those of `doc list`; there is no paging.
+    Export {
+        /// DocType name.
+        doctype: String,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        /// The file format.
+        #[arg(long, value_name = "FORMAT", value_parser = ["csv", "json"], default_value = "csv")]
+        format: String,
+        /// A JSON array of filters, as for `doc list`.
+        #[arg(long, value_name = "JSON")]
+        filter: Option<String>,
+        /// Sort key `FIELD` or `FIELD:desc`; repeat for several. `name` is always the last key.
+        #[arg(long, value_name = "FIELD[:desc]")]
+        sort: Vec<String>,
+        /// The keys to write, comma separated: field names and the standard columns `name`,
+        /// `owner`, `modified_by`, `created_at`, `modified_at`, `version` (and `docstatus`,
+        /// `workflow_state` where the DocType has them). Default: `name` and every field.
+        #[arg(long, value_name = "FIELDS", value_delimiter = ',')]
+        fields: Option<Vec<String>>,
+        /// Write to this new file instead of standard output. An existing file is never
+        /// overwritten, and a failed export leaves no partial file.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Allow this many rows instead of the default limit (100000).
+        #[arg(long, value_name = "N")]
+        limit_override: Option<u64>,
+    },
+    /// Import documents from a CSV or JSON file in one transaction: every row goes through the
+    /// document pipeline (hooks, validation, naming, webhooks), each in a savepoint, and if any
+    /// row has an error **nothing** is imported. Prints the summary as JSON (as the API's
+    /// `data`), with the first 100 row errors; exit code 1 when any row failed. With --dry-run
+    /// nothing is ever kept. At most 10000 rows.
+    ///
+    /// CSV: the first row is the header of field keys (a `name` column is allowed; child tables
+    /// are not, use JSON); an empty cell is not given (insert) or set to null (upsert of an
+    /// existing document). JSON: an array of objects as for `doc insert`, child rows as arrays.
+    Import {
+        /// DocType name.
+        doctype: String,
+        /// The file to read.
+        file: PathBuf,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+        /// The file format.
+        #[arg(long, value_name = "FORMAT", value_parser = ["csv", "json"])]
+        format: String,
+        /// Update the documents that exist (by `name`) and insert the others, instead of
+        /// inserting every row.
+        #[arg(long)]
+        upsert: bool,
+        /// Check everything and report, but keep nothing.
+        #[arg(long)]
+        dry_run: bool,
         #[command(flatten)]
         actor: ActorArg,
     },

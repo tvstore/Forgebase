@@ -58,7 +58,7 @@ pub(crate) fn user_agent() -> String {
 ///
 /// | Family | Blocked |
 /// |---|---|
-/// | IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16` (link-local, with the cloud metadata address `169.254.169.254`), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4` (multicast), `240.0.0.0/4` (reserved, with `255.255.255.255`) |
+/// | IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16` (link-local, with the cloud metadata address `169.254.169.254`), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4` (multicast), `240.0.0.0/4` (reserved, with `255.255.255.255`); and, as an explicit extra, `168.63.129.16/32`, the Azure WireServer, which is reachable from Azure virtual machines and is a public address otherwise |
 /// | IPv6 | `::/96` (this includes `::` and `::1`), `fc00::/7` (unique local), `fe80::/10` (link-local), `ff00::/8` (multicast); `::ffff:0:0/96` (IPv4-mapped) and `64:ff9b::/96` (the NAT64 well-known prefix) are checked as the IPv4 address they embed |
 pub(crate) fn is_blocked(ip: IpAddr) -> bool {
     match ip {
@@ -67,6 +67,10 @@ pub(crate) fn is_blocked(ip: IpAddr) -> bool {
     }
 }
 
+/// The Azure WireServer (host and platform services of an Azure virtual machine): not a private
+/// range, so it needs its own entry. Also blocked as an IPv4-mapped or NAT64 address.
+const AZURE_WIRESERVER: Ipv4Addr = Ipv4Addr::new(168, 63, 129, 16);
+
 fn blocked_v4(ip: Ipv4Addr) -> bool {
     let [a, b, c, _] = ip.octets();
     a == 0 // 0.0.0.0/8
@@ -74,6 +78,7 @@ fn blocked_v4(ip: Ipv4Addr) -> bool {
         || (a == 100 && (64..=127).contains(&b)) // 100.64.0.0/10
         || a == 127 // 127.0.0.0/8
         || (a == 169 && b == 254) // 169.254.0.0/16
+        || ip == AZURE_WIRESERVER // 168.63.129.16/32: reachable from Azure VMs, public otherwise
         || (a == 172 && (16..=31).contains(&b)) // 172.16.0.0/12
         || (a == 192 && b == 0 && c == 0) // 192.0.0.0/24
         || (a == 192 && b == 168) // 192.168.0.0/16
@@ -490,6 +495,18 @@ mod tests {
             assert!(!is_blocked(v4(public)), "{public} is public");
         }
         assert!(is_blocked(v4("169.254.169.254")), "the metadata address");
+        // The Azure WireServer is blocked as one address, not as a range: its neighbours are public.
+        assert!(is_blocked(v4("168.63.129.16")), "the Azure WireServer");
+        for neighbour in [
+            "168.63.129.15",
+            "168.63.129.17",
+            "168.63.128.16",
+            "168.63.130.16",
+            "168.62.129.16",
+            "168.64.129.16",
+        ] {
+            assert!(!is_blocked(v4(neighbour)), "{neighbour} is public");
+        }
         assert!(is_blocked(v4("255.255.255.255")), "broadcast");
     }
 
@@ -532,6 +549,8 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
             "::ffff:169.254.169.254",
+            "::ffff:168.63.129.16",
+            "64:ff9b::a83f:8110",
             "::ffff:192.168.1.1",
             "::ffff:0.0.0.0",
             "64:ff9b::7f00:1",

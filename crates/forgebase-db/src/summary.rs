@@ -222,7 +222,10 @@ fn build(doctype: &DocType, owner: Option<&str>, query: &SummaryQuery) -> Result
     for (function, field) in &query.aggregates {
         let name = format!("{}_{field}", function.name());
         if selected.iter().any(|s| s.name == name) {
-            return Err(invalid(format!("the aggregate {name:?} is listed twice")));
+            return Err(invalid(format!(
+                "the aggregate {:?} is listed twice",
+                forgebase_core::shorten(&name)
+            )));
         }
         // Only fields: the standard columns are not summed.
         let field_type = match doctype.field(field).map(|f| f.field_type.clone()) {
@@ -234,8 +237,10 @@ fn build(doctype: &DocType, owner: Option<&str>, query: &SummaryQuery) -> Result
             Some(t) => t,
             None => {
                 return Err(invalid(format!(
-                    "unknown field {field:?} for DocType `{}` in {name:?}",
-                    doctype.name
+                    "unknown field {:?} for DocType `{}` in {:?}",
+                    forgebase_core::shorten(field),
+                    doctype.name,
+                    forgebase_core::shorten(&name)
                 )));
             }
         };
