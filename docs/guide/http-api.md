@@ -81,6 +81,35 @@ curl -s -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
 
 Whatever the method did in the transaction is rolled back on every error.
 
+## Customize fields (M10.1)
+
+Site custom fields over HTTP ([ADR 0023](../adr/0023-metadata-overlays.md); the command line does the same, see [Customize field commands](cli.md#customize-field-commands-m101)). **Only the Administrator role** may use these routes: any other authenticated user gets `403 permission_denied`, a cookie call needs the CSRF header like any write, and no credentials is `401`.
+
+| Route | Effect |
+|---|---|
+| `GET /api/v1/customize/{doctype}/fields` | The custom fields of the DocType, enabled and disabled, in the order they were added: `{"data": [{"doctype", "name", "label", "type", "definition", "enabled", "created_at", "modified_at", "modified_by"}]}`. |
+| `POST /api/v1/customize/{doctype}/fields` | Adds a field. The body is the field as JSON with the keys of a TOML `[[fields]]` entry (`name`, `type`, `label`, `unique`, `allow_on_submit`, `max_length`, `precision`, `scale`, `options`, `target`). `201` with the stored field. |
+| `POST /api/v1/customize/{doctype}/fields/{name}/disable` and `/enable` | Hides or shows the field; the column and data stay. `200` with the field. The body is ignored (send `{}`). |
+
+```sh
+# Add a checkbox to customer (a POST with a session cookie needs the CSRF header)
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"name": "custom_vip", "label": "VIP", "type": "check"}' \
+  http://localhost:8000/api/v1/customize/customer/fields
+# The server that took the change uses it at once; other servers within 10 seconds.
+curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"version": 1, "data": {"custom_vip": true}}' http://localhost:8000/api/v1/resource/customer/ada@example.com
+```
+
+| Status | When |
+|---|---|
+| `404` | The DocType, or the field for `disable` and `enable`, does not exist. |
+| `422 validation_failed` | A rule is broken: the name must start with `custom_`; no `required`, `read_only` or `table`; not a child DocType; a Link target that does not exist; an unknown key or type. `details` says which. |
+| `409 conflict` | The DocType has a field of that name already (a disabled custom field included). |
+| `503 lock_timeout` | A `migrate` or another schema change holds the lock longer than 5 s (`Retry-After: 5`); nothing was written, retry. |
+
+A custom field is a field of its DocType in every other respect: `GET /api/v1/meta/{doctype}` lists it (after the fields of the app), the `[[permissions]]` of the DocType apply to it, and it can be filtered, sorted, summarized, exported and imported. A disabled field is none of that: input with it is `422` (unknown field) and a filter or sort on it is `400 invalid_query`.
+
 ## Import and export (M9.3)
 
 Files in and out ([ADR 0021](../adr/0021-import-and-export.md)). Both are **rights of their own**, off for every role until a DocType's `[[permissions]]` grant them: **export** needs `read` and `export`, **import** needs `import` and `create` (and `write` for an upsert). An `if_owner` right limits an export to the caller's own documents.

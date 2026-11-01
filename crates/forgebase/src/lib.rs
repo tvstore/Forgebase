@@ -42,6 +42,11 @@
 //!   in app order, through the document pipeline, one transaction per app. A record is inserted
 //!   if missing and updated only when the app changes it (a checksum per record in `fb_fixture`),
 //!   so a site's edits survive until then; nothing is ever deleted. See ADR 0022.
+//! - **Overlays.** An app may add fields to a DocType of an app it depends on with
+//!   [`App::extend_doctype`] (overlay files embedded with [`overlays!`]: only `[[fields]]`), applied
+//!   after all DocTypes in app order, then file order. A site adds its own fields at runtime with
+//!   `forgebase customize field` (names start with `custom_`, a prefix no app field may use). See
+//!   ADR 0023.
 //! - **Startup errors.** All of the above is checked before anything runs; every problem is
 //!   reported together ([`StartupError`], exit code 1).
 //!
@@ -63,7 +68,8 @@
 //! `user` (`create`, `set-password`, `add-role`, `remove-role`, `disable`, `enable`; passwords
 //! come from standard input), `token` (`create`, `revoke`), `serve` (the HTTP API; no
 //! migrations), `worker` (runs background jobs until Ctrl-C or SIGTERM), `job` (`list`, `show`,
-//! `retry` and `enqueue`; the command line is the only interface to jobs) and `new-app` (writes a new app crate that builds and passes its tests; needs no
+//! `retry` and `enqueue`; the command line is the only interface to jobs), `customize` (`field add`,
+//! `list`, `disable` and `enable`: the custom fields of a site, M10.1) and `new-app` (writes a new app crate that builds and passes its tests; needs no
 //! database, see `docs/guide/first-app.md`). Configuration comes from `FORGEBASE_DATABASE_URL` (the database of the
 //! one implicit site `default`), and for `serve` from `FORGEBASE_LISTEN`, `FORGEBASE_ALLOWED_HOSTS`,
 //! `FORGEBASE_DEV_INSECURE_COOKIES` and `FORGEBASE_DESK_DIR`.
@@ -103,6 +109,7 @@ mod builder;
 mod builtin;
 mod compose;
 mod config;
+mod customize_cmd;
 mod data_cmd;
 mod doctypes;
 mod documents;
@@ -123,7 +130,7 @@ mod worker;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use app::{App, DocTypeFile, FixtureFile, MigrationFile};
+pub use app::{App, DocTypeFile, FixtureFile, MigrationFile, OverlayFile};
 pub use builder::Forgebase;
 pub use compose::StartupError;
 pub use documents::{DocError, Documents, FilterOp, ListQuery, StoredDocument};

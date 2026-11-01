@@ -20,13 +20,12 @@
 #      of docs/guide/webhooks.md and records it, exactly one `submit` delivery arrives for the
 #      order that was approved, a forged signature is refused, and `webhook test` succeeds.
 #
-
 # Needs: the binary built (cargo build --locked -p sales_extension), PostgreSQL 16 with a role
 # that has CREATEDB, the PostgreSQL client tools (pg_dump, pg_restore) of the server's major
-# version (FORGEBASE_PG_BIN names their directory when they are not first on PATH),
-# curl, jq and python3 (the receiver). The three database URLs are read from the environment and never printed; the
-# three databases must not exist yet (they are created, and left in place when the script ends:
-# a local run drops them with DROP DATABASE).
+# version (FORGEBASE_PG_BIN names their directory when they are not first on PATH), curl, jq
+# and python3 (the receiver). The three database URLs are read from the environment and never
+# printed; the three databases must not exist yet (they are created, and left in place when the
+# script ends: a local run drops them with DROP DATABASE).
 #
 #   SHOP_DATABASE_URL=postgres://user:password@localhost:5432/fb_sites_shop
 #   FIELD_DATABASE_URL=postgres://user:password@localhost:5432/fb_sites_field
@@ -63,7 +62,12 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  # The worker's log is the first thing to read when a delivery step fails.
+  if [ -f "$work/worker.log" ]; then echo "--- worker.log" >&2; cat "$work/worker.log" >&2; fi
+  exit 1
+}
 
 export FORGEBASE_CONFIG="examples/sites/forgebase.toml"
 export FORGEBASE_LISTEN="127.0.0.1:$port"
@@ -237,9 +241,12 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
 # `--allow-private` and `--insecure-http` are development flags: the receiver is on 127.0.0.1 and
 # speaks plain HTTP, which the SSRF guard and the https-only rule refuse by default. Do not use
 # them in production.
+# The secret is matched from a file descriptor, never as an argument (an argument shows in `ps`).
 printf '%s\n' "$secret" | "$bin" webhook add sales_order_submit --site shop --doctype sales_order \
-  --events submit --url "http://127.0.0.1:$rport/hook" --allow-private --insecure-http --secret-stdin
-if "$bin" webhook list --site shop | grep -q "$secret"; then fail "webhook list printed the secret"; fi
+  --events submit --url "http://127.0.0.1:$rport/hook" --allow-private --insecure-http --secret-stdin \
+  > "$work/webhook-add.out"
+if grep -qF -f <(printf '%s\n' "$secret") "$work/webhook-add.out"; then fail "webhook add printed the secret"; fi
+if "$bin" webhook list --site shop | grep -qF -f <(printf '%s\n' "$secret"); then fail "webhook list printed the secret"; fi
 # One signed test delivery, now, without the queue: exit 0 on a 2xx answer.
 "$bin" webhook test sales_order_submit --site shop || fail "webhook test failed"
 # Approve the order that is pending (see above): the transition submits it, which fires
@@ -254,10 +261,10 @@ for _ in $(seq 1 30); do
   if [ "$(jq -s '[.[] | select(.event == "submit")] | length' "$records")" -ge 1 ]; then break; fi
   sleep 1
 done
-kill "$worker"
+kill "$worker" 2>/dev/null || true
 wait "$worker" || true
 worker=""
-if grep -q "$secret" "$work/worker.log"; then fail "the worker printed the secret"; fi
+if grep -qF -f <(printf '%s\n' "$secret") "$work/worker.log"; then fail "the worker printed the secret"; fi
 [ "$(jq -s --arg order "$order" \
   '[.[] | select(.event == "submit" and .doctype == "sales_order" and .name == $order)] | length' "$records")" = 1 ] \
   || { cat "$records" "$work/worker.log" >&2; fail "the receiver did not record exactly one verified submit delivery of the order"; }
@@ -266,12 +273,12 @@ if grep -q "$secret" "$work/worker.log"; then fail "the worker printed the secre
   || fail "the receiver got an event the webhook does not listen to"
 [ "$(jq -s '[.[].delivery] | unique | length' "$records")" = 2 ] || fail "the delivery ids are not distinct"
 echo "ok: the worker delivered exactly one verified submit of $order, signed with the secret, and webhook test answered 2xx"
-kill "$receiver"
+kill "$receiver" 2>/dev/null || true
 wait "$receiver" || true
 receiver=""
 
 echo "== stop the server"
-kill "$server"
+kill "$server" 2>/dev/null || true
 wait "$server" || true
 server=""
 echo "done"

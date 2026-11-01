@@ -10,7 +10,7 @@ use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use forgebase_core::document::{Changes, Document};
-use forgebase_core::meta::DocType;
+use forgebase_core::meta::{DocType, Registry};
 use forgebase_core::permission::{Access, Caller, Right, evaluate};
 use forgebase_db::auth;
 use forgebase_db::{DbError, ListQuery};
@@ -50,9 +50,8 @@ pub(crate) fn data(status: StatusCode, value: Json) -> Response {
     (status, AxumJson(json!({ "data": value }))).into_response()
 }
 
-pub(crate) fn doctype<'a>(state: &'a AppState, name: &str) -> Result<&'a DocType, ApiError> {
-    state
-        .registry()
+pub(crate) fn doctype<'a>(registry: &'a Registry, name: &str) -> Result<&'a DocType, ApiError> {
+    registry
         .get(name)
         .filter(|d| !d.is_child)
         .ok_or_else(|| ApiError::not_found("unknown doctype"))
@@ -147,14 +146,13 @@ pub(crate) fn link_titles_flag(query: &BTreeMap<String, String>) -> Result<bool,
 /// the pool (which has no wait timeout) would never free one.
 async fn with_link_titles(
     client: &forgebase_db::Client,
-    state: &AppState,
+    registry: &Registry,
     caller: &Caller,
     doctype: &str,
     documents: &[forgebase_db::StoredDocument],
     value: Json,
 ) -> Reply {
-    let titles =
-        forgebase_db::link_titles(client, state.registry(), caller, doctype, documents).await?;
+    let titles = forgebase_db::link_titles(client, registry, caller, doctype, documents).await?;
     Ok((
         StatusCode::OK,
         AxumJson(json!({ "data": value, "link_titles": titles })),
@@ -294,7 +292,8 @@ pub async fn list(
     query: RawQuery,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     require(
         doctype,
         &authenticated.caller(),
@@ -335,7 +334,7 @@ pub async fn list(
     let client = state.client().await?;
     let documents = forgebase_db::list(
         &**client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &authenticated.caller(),
         &list_query,
@@ -345,7 +344,7 @@ pub async fn list(
     if titles {
         return with_link_titles(
             &client,
-            &state,
+            &registry,
             &authenticated.caller(),
             &doctype.name,
             &documents,
@@ -365,7 +364,8 @@ pub async fn create(
     ApiJson(body): ApiJson,
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     require(
         doctype,
         &authenticated.caller(),
@@ -373,7 +373,7 @@ pub async fn create(
         Right::Create,
     )?;
     params(query, &[])?;
-    let input = input_from_json(state.registry(), doctype, body)?;
+    let input = input_from_json(&registry, doctype, body)?;
     let document = Document {
         name: None,
         values: input.values,
@@ -382,7 +382,7 @@ pub async fn create(
     let mut client = state.client().await?;
     let stored = forgebase_db::insert(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         document,
         &authenticated.caller(),
@@ -399,12 +399,13 @@ pub async fn read(
     query: RawQuery,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     let titles = link_titles_flag(&params(query, &["link_titles"])?)?;
     let mut client = state.client().await?;
     let stored = forgebase_db::get(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &name,
         &authenticated.caller(),
@@ -420,7 +421,7 @@ pub async fn read(
     if titles {
         return with_link_titles(
             &client,
-            &state,
+            &registry,
             &authenticated.caller(),
             &doctype.name,
             std::slice::from_ref(&stored),
@@ -440,7 +441,8 @@ pub async fn update(
     ApiJson(body): ApiJson,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     require(
         doctype,
         &authenticated.caller(),
@@ -453,7 +455,7 @@ pub async fn update(
     let changes = map
         .remove("data")
         .ok_or_else(|| ApiError::bad_request("`data` must be a JSON object"))?;
-    let input = input_from_json(state.registry(), doctype, changes)?;
+    let input = input_from_json(&registry, doctype, changes)?;
     let changes = Changes {
         values: input.values,
         tables: input.tables,
@@ -461,7 +463,7 @@ pub async fn update(
     let mut client = state.client().await?;
     let stored = forgebase_db::update(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &name,
         expected_version,
@@ -480,12 +482,13 @@ pub async fn delete(
     query: RawQuery,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     let expected_version = version_param(&params(query, &["version"])?)?;
     let mut client = state.client().await?;
     forgebase_db::delete(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &name,
         expected_version,
@@ -511,13 +514,14 @@ async fn lifecycle(
     body: Json,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     params(query, &[])?;
     let expected_version = version(&object(body, &["version"])?)?;
     let caller = authenticated.caller();
     let mut client = state.client().await?;
     let client = &mut **client;
-    let (registry, doctype, name) = (state.registry(), doctype.name.as_str(), name.as_str());
+    let (registry, doctype, name) = (&*registry, doctype.name.as_str(), name.as_str());
     let (status, stored) = match kind {
         Lifecycle::Submit => (
             StatusCode::OK,
@@ -587,7 +591,8 @@ pub async fn transition(
     ApiJson(body): ApiJson,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     params(query, &[])?;
     let map = object(body, &["action", "version"])?;
     let expected_version = version(&map)?;
@@ -598,7 +603,7 @@ pub async fn transition(
     let mut client = state.client().await?;
     let stored = forgebase_db::transition(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &name,
         action,
@@ -620,12 +625,13 @@ pub async fn transitions(
     query: RawQuery,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     params(query, &[])?;
     let mut client = state.client().await?;
     let available = forgebase_db::available_transitions(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &name,
         &authenticated.caller(),
@@ -651,12 +657,13 @@ pub async fn history(
     query: RawQuery,
 ) -> Reply {
     let (Path((doctype_name, name)), Query(query)) = (path?, query?);
-    let doctype = doctype(&state, &doctype_name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &doctype_name)?;
     params(query, &[])?;
     let mut client = state.client().await?;
     let entries = forgebase_db::history(
         &mut **client,
-        state.registry(),
+        &registry,
         &doctype.name,
         &name,
         &authenticated.caller(),

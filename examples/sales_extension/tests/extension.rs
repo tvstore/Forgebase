@@ -99,6 +99,7 @@ fn a_submit_enqueues_the_follow_up_job() {
 
 struct Env {
     db: TestDb,
+    manager: HttpClient,
     user: HttpClient,
     outsider: HttpClient,
 }
@@ -121,6 +122,7 @@ async fn env() -> Env {
         .await;
     assert_eq!(reply.status, 201, "{:?}", reply.body);
     Env {
+        manager,
         user: client.login("ann").await,
         outsider: client.login("eve").await,
         db,
@@ -277,6 +279,69 @@ async fn the_metadata_names_the_app_of_every_doctype() {
     assert_eq!(app_of("customer_visit"), "sales_extension");
     assert_eq!(app_of("sales_order"), "sales");
     assert_eq!(app_of("customer"), "sales");
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_overlay_field_is_a_field_of_customer() {
+    let env = env().await;
+    // The column exists, added by `migrate` from the overlay.
+    assert_eq!(
+        env.db
+            .rows(
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_name = 'doc_customer' AND column_name = 'loyalty_tier'"
+            )
+            .await,
+        vec![vec!["text".to_owned()]]
+    );
+    // The metadata of `customer` lists it after the fields of `sales`; `customer` still belongs to
+    // `sales`.
+    let meta = env.user.get("/api/v1/meta/customer").await;
+    assert_eq!(meta.status, 200, "{:?}", meta.body);
+    assert_eq!(meta.data()["app"], "sales");
+    let fields: Vec<&str> = meta.data()["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .map(|f| f["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(fields.last(), Some(&"loyalty_tier"), "{fields:?}");
+    assert!(
+        fields.contains(&"tier"),
+        "the field of sales is still there"
+    );
+
+    // The rules of `customer` apply: a Sales Manager writes it, a Sales User only reads it, and
+    // the select options are checked.
+    let manager = env.manager.clone();
+    let updated = manager
+        .patch(
+            "/api/v1/resource/customer/ada@example.com",
+            json!({"version": 1, "data": {"loyalty_tier": "Gold"}}),
+        )
+        .await;
+    assert_eq!(updated.status, 200, "{:?}", updated.body);
+    let read = env
+        .user
+        .get("/api/v1/resource/customer/ada@example.com")
+        .await;
+    assert_eq!(read.data()["loyalty_tier"], "Gold");
+    let denied = env
+        .user
+        .patch(
+            "/api/v1/resource/customer/ada@example.com",
+            json!({"version": 2, "data": {"loyalty_tier": "Silver"}}),
+        )
+        .await;
+    assert_eq!(denied.status, 403, "{:?}", denied.body);
+    let bad = manager
+        .patch(
+            "/api/v1/resource/customer/ada@example.com",
+            json!({"version": 2, "data": {"loyalty_tier": "Platinum"}}),
+        )
+        .await;
+    assert_eq!(bad.status, 422, "{:?}", bad.body);
     env.db.cleanup().await;
 }
 

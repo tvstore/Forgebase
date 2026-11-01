@@ -21,8 +21,9 @@ use crate::run::write_stdout;
 /// The system actor of `data export`, which only reads.
 const EXPORT_ACTOR: &str = "cli";
 
-/// A `data` command with its input checked: nothing touches the database when the DocType, the
-/// filter, the fields or the file is wrong.
+/// A `data` command with its input checked against the registry of the site context (enabled
+/// custom fields included): the file is read, and the syntax of the filter checked, before the
+/// database is opened.
 pub(crate) enum Prepared {
     Export {
         doctype: String,
@@ -46,13 +47,36 @@ fn format(text: &str) -> Result<Format, CliError> {
     Format::parse(text).ok_or_else(|| CliError::Transfer(format!("unknown format `{text}`")))
 }
 
-/// Checks a `data` command against the DocType and reads its file.
+/// The bytes of the file of an `import`, read before the database is opened (`None` for an
+/// export), and the syntax check of an export's `--filter`.
+pub(crate) fn read_input(command: &DataCommand) -> Result<Option<Vec<u8>>, CliError> {
+    if let DataCommand::Export {
+        filter: Some(filter),
+        ..
+    } = command
+    {
+        forgebase_http::json::check_filters_syntax(filter)?;
+    }
+    match command {
+        DataCommand::Import { file, .. } => std::fs::read(file)
+            .map(Some)
+            .map_err(|e| CliError::Transfer(format!("cannot read {}: {e}", file.display()))),
+        DataCommand::Export { .. } => Ok(None),
+    }
+}
+
+/// Checks a `data` command against the DocType in `registry`, the registry of the site context
+/// (enabled custom fields included), with the file `read_input` read.
 pub(crate) fn prepare(
     command: DataCommand,
     registry: &Registry,
-    found: &DocType,
+    bytes: Option<Vec<u8>>,
 ) -> Result<Prepared, CliError> {
     let defaults = AppConfig::default();
+    let (DataCommand::Export { doctype, .. } | DataCommand::Import { doctype, .. }) = &command;
+    let found: &DocType = registry
+        .get(doctype)
+        .ok_or_else(|| CliError::Transfer(format!("unknown DocType `{doctype}`")))?;
     match command {
         DataCommand::Export {
             format: format_name,
@@ -82,15 +106,13 @@ pub(crate) fn prepare(
             })
         }
         DataCommand::Import {
-            file,
             format: format_name,
             upsert,
             dry_run,
             actor,
             ..
         } => {
-            let bytes = std::fs::read(&file)
-                .map_err(|e| CliError::Transfer(format!("cannot read {}: {e}", file.display())))?;
+            let bytes = bytes.unwrap_or_default();
             let mode = if upsert {
                 ImportMode::Upsert
             } else {

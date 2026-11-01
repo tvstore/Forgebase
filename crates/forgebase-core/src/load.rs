@@ -6,6 +6,7 @@ use crate::document::DocStatus;
 use crate::meta::{
     DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming, humanize,
 };
+use crate::overlay::OverlayError;
 use crate::permission::PermissionRule;
 use crate::series::SeriesPattern;
 use crate::workflow::{StateStyle, Transition, Workflow, WorkflowState};
@@ -229,19 +230,12 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
 
     let mut fields = Vec::with_capacity(raw.fields.len());
     for f in raw.fields {
-        match convert_type(&f) {
-            Ok(field_type) => fields.push(DocField {
-                label: f.label.unwrap_or_else(|| humanize(&f.name)),
-                name: f.name,
-                field_type,
-                required: f.required,
-                unique: f.unique,
-                allow_on_submit: f.allow_on_submit,
-                read_only: f.read_only,
-            }),
+        let name = f.name.clone();
+        match convert_field(f) {
+            Ok(field) => fields.push(field),
             Err(mut e) => {
                 errors.append(&mut e);
-                failed.push(f.name);
+                failed.push(name);
             }
         }
     }
@@ -265,6 +259,67 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
     } else {
         Err(MetaError::Invalid(errors))
     }
+}
+
+/// One raw field into the validated model: the type and its parameters. The rules that need the
+/// whole DocType (duplicates, names, `allow_on_submit`) are checked by [`DocType::check`].
+fn convert_field(f: RawField) -> Result<DocField, Vec<DefinitionError>> {
+    let field_type = convert_type(&f)?;
+    Ok(DocField {
+        label: f.label.unwrap_or_else(|| humanize(&f.name)),
+        name: f.name,
+        field_type,
+        required: f.required,
+        unique: f.unique,
+        allow_on_submit: f.allow_on_submit,
+        read_only: f.read_only,
+    })
+}
+
+/// The `[[fields]]` of an overlay file (M10.1, ADR 0023): the same entries as in a DocType file,
+/// parsed and converted by the same code, and nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOverlay {
+    #[serde(default)]
+    fields: Vec<RawField>,
+}
+
+fn converted(raw: RawField) -> Result<DocField, OverlayError> {
+    let name = raw.name.clone();
+    convert_field(raw).map_err(|mut errors| {
+        // The name is checked here too: the DocType check that would do it never sees a field
+        // that did not convert.
+        if let Err(reason) = crate::ident::validate_field_name(&name) {
+            errors.push(DefinitionError::InvalidFieldName {
+                field: name,
+                reason,
+            });
+        }
+        OverlayError::Invalid(errors)
+    })
+}
+
+/// Parses an overlay file: only `[[fields]]`, at least one.
+pub(crate) fn overlay_from_toml_str(text: &str) -> Result<Vec<DocField>, OverlayError> {
+    let raw: RawOverlay = toml::from_str(text).map_err(|e| OverlayError::Parse(e.to_string()))?;
+    if raw.fields.is_empty() {
+        return Err(OverlayError::NoFields);
+    }
+    raw.fields.into_iter().map(converted).collect()
+}
+
+/// Parses one field written as a TOML table body (`name = "custom_vip"`, `type = "check"`).
+pub(crate) fn field_from_toml_str(text: &str) -> Result<DocField, OverlayError> {
+    let raw: RawField = toml::from_str(text).map_err(|e| OverlayError::Parse(e.to_string()))?;
+    converted(raw)
+}
+
+/// Parses one field written as a JSON object with the keys of a TOML `[[fields]]` entry.
+pub(crate) fn field_from_json(value: &serde_json::Value) -> Result<DocField, OverlayError> {
+    let raw: RawField =
+        serde_json::from_value(value.clone()).map_err(|e| OverlayError::Parse(e.to_string()))?;
+    converted(raw)
 }
 
 fn convert_type(f: &RawField) -> Result<FieldType, Vec<DefinitionError>> {

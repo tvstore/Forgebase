@@ -5,7 +5,7 @@ use std::io::{BufRead, Read, Write};
 use std::time::Duration;
 
 use forgebase_core::document::{Changes, Document};
-use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::meta::Registry;
 use forgebase_core::permission::Caller;
 use forgebase_db::auth;
 use forgebase_db::{DbError, ListQuery, StoredDocument, SyncOptions};
@@ -16,12 +16,13 @@ use forgebase_http::{AppConfig, AppState, Sites};
 
 use crate::app::App;
 use crate::args::{
-    ActorArg, Cli, Command, DataCommand, DocCommand, DocTypesDir, SiteCommand, TokenCommand,
-    UserCommand, VersionArg, WebhookCommand,
+    ActorArg, Cli, Command, CustomizeCommand, DataCommand, DocCommand, DocTypesDir, FieldCommand,
+    SiteCommand, TokenCommand, UserCommand, VersionArg, WebhookCommand,
 };
 use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
 use crate::config::{Config, Site, SiteContext, host_problem};
+use crate::customize_cmd::{field as customize_field, read_field};
 use crate::error::CliError;
 use crate::job_cmd::{job, read_payload};
 use crate::new_app::new_app;
@@ -84,8 +85,17 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             write_stdout(&migrate_site(site, &composed, &options).await?)
         }
         Command::Doc(command) => {
-            let (registry, operation) = prepare(command, site, apps)?;
-            let ctx = site.context(Arc::new(registry), None).await?;
+            // The DocType is looked up in the apps (before the database is opened, so an unknown
+            // one never touches it) and the input is read; the input is then checked against the
+            // registry of the site context, which has the site's enabled custom fields.
+            let (dir, name) = target(&command);
+            let base = Arc::new(find_doctype(site, apps, dir, name)?);
+            let text = read_doc_input(&command)?;
+            // Syntax errors fail before the database is opened; field names and values are
+            // checked later against the registry of the site context.
+            check_doc_syntax(&command, text.as_deref())?;
+            let ctx = site.context(base, None).await?;
+            let operation = prepare(command, &ctx.registry, text)?;
             execute(&ctx, operation).await
         }
         Command::Data(command) => {
@@ -95,10 +105,12 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             | DataCommand::Import {
                 doctype, doctypes, ..
             }) = &command;
-            let (registry, found) = find_doctype(site, apps, doctypes, doctype)?;
-            // The file is read and checked before the database is opened.
-            let prepared = crate::data_cmd::prepare(command, &registry, &found)?;
-            let ctx = site.context(Arc::new(registry), None).await?;
+            let base = Arc::new(find_doctype(site, apps, doctypes, doctype)?);
+            // The file is read before the database is opened, and checked against the registry
+            // of the site context (enabled custom fields included) after.
+            let bytes = crate::data_cmd::read_input(&command)?;
+            let ctx = site.context(base, None).await?;
+            let prepared = crate::data_cmd::prepare(command, &ctx.registry, bytes)?;
             crate::data_cmd::execute(&ctx, prepared).await
         }
         Command::User(command) => {
@@ -124,6 +136,19 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             let secret = read_secret(&command)?;
             let ctx = site.context(registry, None).await?;
             webhook(&ctx, command, secret).await
+        }
+        Command::Customize(CustomizeCommand::Field(command)) => {
+            // The field is read and checked before the database is opened. `add` checks it
+            // against the DocTypes of the site, the `--doctypes` directory included.
+            let base = match &command {
+                FieldCommand::Add { doctypes, .. } => {
+                    Arc::new(site_composed(site, apps, doctypes)?.registry)
+                }
+                _ => site_registry(site, apps)?,
+            };
+            let field = read_field(&command)?;
+            let ctx = site.context(Arc::clone(&base), None).await?;
+            customize_field(&ctx, &base, command, field).await
         }
         Command::Worker {
             doctypes,
@@ -332,9 +357,10 @@ fn site_registry(site: &Site, apps: &[App]) -> Result<Arc<Registry>, CliError> {
     Ok(Arc::new(site_composed(site, apps, &none)?.registry))
 }
 
-/// A document operation with its input already read and checked, so that nothing touches the
-/// database when the DocType, the JSON or standard input is wrong. It runs against the registry
-/// of the site context.
+/// A document operation with its input already read and checked: the DocType, the files and the
+/// syntax of the JSON are checked before the database is opened, and the field names and values
+/// against the registry of the site context (custom fields included) right after. It runs against
+/// that registry.
 enum Operation {
     Insert {
         doctype: String,
@@ -420,20 +446,23 @@ fn target(command: &DocCommand) -> (&DocTypesDir, &str) {
     }
 }
 
-/// Checks a `doc` command and reads its input. Returns the registry it was checked against and
-/// the operation.
+/// Checks a `doc` command against `registry`, the registry of the site context (enabled custom
+/// fields included), with the `--data` text that `read_doc_input` read, and returns the operation.
 fn prepare(
     command: DocCommand,
-    site: &Site,
-    apps: &[App],
-) -> Result<(Registry, Operation), CliError> {
-    let (dir, doctype) = target(&command);
-    let (registry, found) = find_doctype(site, apps, dir, doctype)?;
+    registry: &Registry,
+    text: Option<String>,
+) -> Result<Operation, CliError> {
+    let (_, doctype) = target(&command);
+    let found = registry
+        .get(doctype)
+        .cloned()
+        .ok_or_else(|| unknown_doctype(registry, doctype))?;
     let doctype = found.name.clone();
     let operation = match command {
-        DocCommand::Insert { data, actor, .. } => Operation::Insert {
+        DocCommand::Insert { actor, .. } => Operation::Insert {
             doctype,
-            input: parse_input(&registry, &found, &read_data(&data.data)?)?,
+            input: parse_input(registry, &found, text.as_deref().unwrap_or_default())?,
             actor: actor.actor,
         },
         DocCommand::Get { name, .. } => Operation::Get { doctype, name },
@@ -458,14 +487,13 @@ fn prepare(
         DocCommand::Update {
             name,
             version,
-            data,
             actor,
             ..
         } => Operation::Update {
             doctype,
             name,
             expected_version: version.expected_version,
-            input: parse_input(&registry, &found, &read_data(&data.data)?)?,
+            input: parse_input(registry, &found, text.as_deref().unwrap_or_default())?,
             actor: actor.actor,
         },
         DocCommand::Submit {
@@ -511,7 +539,34 @@ fn prepare(
             actor: actor.actor,
         },
     };
-    Ok((registry, operation))
+    Ok(operation)
+}
+
+/// The syntax-only checks of a `doc` command: `--data` is a JSON object and `--filter` is a list
+/// of filters. Nothing here needs a registry.
+fn check_doc_syntax(command: &DocCommand, text: Option<&str>) -> Result<(), CliError> {
+    if let Some(text) = text {
+        forgebase_http::json::check_input_syntax(text)?;
+    }
+    if let DocCommand::List {
+        filter: Some(filter),
+        ..
+    } = command
+    {
+        forgebase_http::json::check_filters_syntax(filter)?;
+    }
+    Ok(())
+}
+
+/// The `--data` text of an `insert` or `update` (standard input for `-`), read before the
+/// database is opened.
+fn read_doc_input(command: &DocCommand) -> Result<Option<String>, CliError> {
+    match command {
+        DocCommand::Insert { data, .. } | DocCommand::Update { data, .. } => {
+            read_data(&data.data).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn status(
@@ -760,11 +815,11 @@ async fn serve(
         }
         for (site, registry, methods) in registries {
             let ctx = site.context(registry, None).await?;
-            let state = AppState::with_methods(
+            let state = AppState::with_holder(
                 ctx.pool,
-                ctx.registry,
+                ctx.holder,
                 app_config(site.hosts.clone()),
-                methods,
+                Some(methods),
             );
             routing = routing.site(&site.hosts, state).map_err(CliError::Config)?;
             lines.push(format!("site {}: {}\n", site.name, site.hosts.join(", ")));
@@ -778,11 +833,11 @@ async fn serve(
         let composed = site_composed(site, apps, doctypes)?;
         let methods = Arc::new(composed.methods);
         let ctx = site.context(Arc::new(composed.registry), None).await?;
-        routing = Sites::implicit(AppState::with_methods(
+        routing = Sites::implicit(AppState::with_holder(
             ctx.pool,
-            ctx.registry,
+            ctx.holder,
             app_config(allowed_hosts),
-            methods,
+            Some(methods),
         ));
     }
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -833,7 +888,7 @@ async fn worker(
     let signals = stop_signals().map_err(CliError::Serve)?;
     let worker = Worker::new(
         ctx.pool,
-        composed.registry,
+        ctx.holder,
         composed.jobs,
         composed.schedules,
         WorkerConfig::default(),
@@ -1007,31 +1062,34 @@ fn site_composed(site: &Site, apps: &[App], dir: &DocTypesDir) -> Result<Compose
     Ok(compose(&site.installed(apps), local).map_err(|e| e.for_site(&site.name))?)
 }
 
-/// The registry of the site's apps and the directory, and the DocType called `name` in it.
+/// The registry of the site's apps and the directory (without the site's custom fields), checked
+/// to have a DocType called `name`.
 fn find_doctype(
     site: &Site,
     apps: &[App],
     dir: &DocTypesDir,
     name: &str,
-) -> Result<(Registry, DocType), CliError> {
+) -> Result<Registry, CliError> {
     let registry = site_composed(site, apps, dir)?.registry;
-    match registry.get(name) {
-        Some(doctype) => {
-            let doctype = doctype.clone();
-            Ok((registry, doctype))
-        }
-        None => Err(CliError::UnknownDocType {
-            name: name.to_owned(),
-            known: if registry.is_empty() {
-                "none".to_owned()
-            } else {
-                registry
-                    .iter()
-                    .map(|d| d.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            },
-        }),
+    if registry.get(name).is_some() {
+        Ok(registry)
+    } else {
+        Err(unknown_doctype(&registry, name))
+    }
+}
+
+fn unknown_doctype(registry: &Registry, name: &str) -> CliError {
+    CliError::UnknownDocType {
+        name: name.to_owned(),
+        known: if registry.is_empty() {
+            "none".to_owned()
+        } else {
+            registry
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
     }
 }
 

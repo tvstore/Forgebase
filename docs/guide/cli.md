@@ -138,6 +138,37 @@ cargo run -p sales -- data import customer new-customers.csv --format csv --acto
 - **`--upsert`** updates the document that a row's `name` names and inserts the rows whose name does not exist, when the DocType's naming allows a given name (a DocType named by a field takes the name that equals the field's value; random and series naming give their own names, so such a row is an error). A DocType named by a field cannot be renamed: the row's naming field must equal the name.
 - **Time.** The transaction is as long as the file: about 37 seconds for 10 000 rows of a simple DocType (measured with a debug build on a local PostgreSQL; the export of the same rows takes half a second). Run big imports when the site is quiet.
 
+## Customize field commands (M10.1)
+
+A **site custom field** is a field one site adds to a DocType in its own database, without a rebuild ([ADR 0023](../adr/0023-metadata-overlays.md); an app adds fields with an [overlay](first-app.md#add-a-field-to-another-apps-doctype-overlays) instead). The command line is the tool for the operator; the same operations are available to an Administrator over [HTTP](http-api.md#customize-fields-m101).
+
+```sh
+# One field is one TOML table body, written like a [[fields]] entry of a DocType file.
+cat > vip.toml <<'EOF2'
+name = "custom_vip"
+label = "VIP"
+type = "check"
+EOF2
+cargo run -p sales -- customize field add --doctype customer --field vip.toml --site main
+# added custom field customer.custom_vip (check); its column exists now, and a running server or worker uses it within 10 seconds
+printf 'name = "custom_rank"\ntype = "int"\nunique = true\n' | cargo run -p sales -- customize field add --doctype customer --field - --site main
+
+cargo run -p sales -- customize field list --site main                      # every custom field
+cargo run -p sales -- customize field list --doctype customer --site main   # one DocType's
+# DOCTYPE   NAME         TYPE   LABEL        ENABLED  MODIFIED                     BY
+# customer  custom_vip   check  VIP          yes      2026-11-01T09:30:12.123456Z  cli
+cargo run -p sales -- customize field disable --doctype customer custom_vip --site main
+cargo run -p sales -- customize field enable --doctype customer custom_vip --site main
+```
+
+- **Rules.** The name starts with `custom_`. Any type except `table`. `required` and `read_only` are refused (the documents that exist have no value for a new field, and nothing could write a read-only site field); `unique` and `allow_on_submit` (on a submittable DocType) are allowed. The DocType must exist, must not be a child DocType and must have been migrated; a Link must target a DocType that exists. A name that the DocType, an app overlay or an earlier custom field has (**a disabled one too**: use `enable`) is refused. Every refusal prints the reason and exits with code 1, and changes nothing.
+- **What happens.** In one transaction under the lock of `migrate`: the field is stored, its column (and the foreign key and index of a Link, or the unique index) is added with the statements of the schema sync, and the metadata version is incremented. A running `serve` and `worker` look at the version every 10 seconds and swap in the new metadata; the API and the desk show the field from then on. A request in progress finishes with the metadata it started with.
+- **Disable and enable.** Disabling hides the field everywhere (the metadata API, input, filters, sort, summary, export, import, webhook snapshots); its **column and data are kept**, and enabling brings both back. Nothing drops a custom field's column.
+- **`migrate`** creates the column of every stored custom field (enabled or disabled) if it is missing, for example after a restored backup. A stored field that no longer validates (say its Link target left the apps) is skipped with a warning; the site still starts.
+- **`doc` and `data`** use the custom fields too: an enabled field is accepted in `doc insert` and `update`, `doc list --filter`, `data export` (the CSV columns, `--fields`, `--filter`, `--sort`) and `data import`, and a disabled one is refused as an unknown field. An unreadable file or an unknown DocType still fails before the database is opened.
+- **A disabled Link field keeps its foreign key.** Deleting a document that is referenced only by a hidden custom Link field fails with `409 linked_document_exists` (the message does not name the field); enable the field and clear it first.
+- **Large tables.** A `unique` field (and a Link) builds its index in the same transaction, under the table lock and within the 5 second `lock_timeout` of the command; on a very large table add the field in a quiet period. A migrate in progress holds the same lock: the command then fails with the lock-timeout error (the API answers `503 lock_timeout`); run it again.
+
 ## Migrate and fixtures (M9.4)
 
 `forgebase migrate` applies the framework migrations, the schema sync, the app migrations and then the **fixtures** of the apps that have any ([first-app guide, section 9](first-app.md#9-fixtures)). It prints one line per app with fixtures:

@@ -129,6 +129,21 @@ Amendment of 2026-11-01 (the text above is unchanged). [ADR 0022](0022-fixtures.
 
 Every mistake in a fixture file that needs no database is a startup error with the other app problems (`StartupError`).
 
+### Public surface update (M10.1)
+
+Amendment of 2026-11-01 (the text above is unchanged). [ADR 0023](0023-metadata-overlays.md) (the M10 plan, owner decisions 1 to 5 and 8 of 2026-10-31) adds these items; nothing else becomes public. It fulfils what point 3 of the Decision above left to M10: *"An app cannot change another app's DocType definition (custom fields on another app's DocType are a later milestone, M10: the model leaves room for an overlay applied after the app's own definitions)."* An app still cannot change or redefine a DocType, but it may now **add fields** to one of an app it depends on, through an overlay; the DocType stays owned by its one app. The reservation of the prefix `custom_` below is a **breaking change** for an app that used such a field name.
+
+| Item | Purpose |
+|---|---|
+| `App::extend_doctype(doctype, &'static [OverlayFile])` | Adds the fields of overlay files to a DocType of an app this app depends on. Calling it again adds more files. Startup errors for an unknown target, a target that no dependency owns (the app's own DocTypes too), a child DocType, a Table field, a name that is taken (the message names both apps) and a name that starts with `custom_`. |
+| `overlays!` | Embeds overlay files (TOML with only `[[fields]]`) with `include_str!`, paths relative to the calling crate's root, like `doctypes!`. |
+| `OverlayFile` (`new(path, toml)`, `path()`, `toml()`; `#[non_exhaustive]`, no public fields) | One overlay file, for the macro and for tests. |
+| `testing::TestDb::client_polling(&Forgebase, Duration)`, `TestDb::add_custom_field(&Forgebase, doctype, field_toml)`, `TestDb::set_custom_field_enabled(doctype, name, enabled)` and `testing::HttpClient::reload_metadata()` (feature `testing`) | Site custom fields in an app's tests: add or disable a field as the command line does, give a test server a short reload interval, and rebuild its registry at once. `run_jobs` and `run_schedules_at` run with the custom fields of the database, like a worker. `testing::Reply::header(name)` reads a response header. |
+
+**A new reserved prefix.** A field name that starts with `custom_` is refused in an app's own DocType files (and in `--doctypes` files) with the other startup errors: the prefix belongs to site custom fields. This is a change in behaviour for an app that used such a name; none of the examples or templates did.
+
+The metadata API, the command line (`forgebase customize field ...`) and the HTTP routes under `/api/v1/customize` are not Rust API and are documented in the guides.
+
 ## Implementation details (M5.1)
 
 These were chosen while implementing M5.1; they are to be reviewed with that change, not owner decisions.

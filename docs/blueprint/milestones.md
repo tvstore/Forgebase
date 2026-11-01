@@ -18,7 +18,7 @@ Milestones are **Proposed** until their Stage 1 plan is approved; each milestone
 | UX.4 | UX: Desk polish (runs between M8.1 and M8.2) |
 | UX.5 | UX: Corporate refinement, "soft neutral" (after M8.3, before M8.4) |
 | M9 | Integration (Done) |
-| M10 | Customization |
+| M10 | Customization (In progress) |
 | Later | Items that each need their own plan |
 
 M4 to M10 are the roadmap proposed after M3 (owner-approved direction 2026-10-29, toward the [Project Goal](vision.md#project-goal)); the order is a proposal and every milestone is still **Proposed**. The jobs, scheduler and outbox milestone was renumbered from M5 to M6 on 2026-10-29; earlier documents (the ADRs) that say "M5" for jobs, the scheduler or the outbox mean M6. Realtime is on demand and not scheduled. Which capability each milestone serves: [feature matrix](feature-matrix.md#roadmap-by-capability).
@@ -230,9 +230,33 @@ The exit criteria of the M9 plan (approved 2026-10-30), one by one. Test names a
 
 ## M10 Customization
 
-- **Scope:** custom-field overlay, field-level permissions, user permissions. Capabilities 5 and 10.
-- **Exit criteria:** (to be set in the M10 plan) extends the authorization test matrix; schema sync stays aware of the overlay.
-- **Non-goals:** a Customize Form UI before a real need.
+- **Status:** In progress. The M10 plan was approved by the owner on 2026-10-31 (*"setuju semua rencana mu"*, ten decisions; see [owner decisions](../owner-decisions.md#m10-customization-2026-10-31-setuju-semua-rencana-mu-information-session)) and is split into four pull requests. **M10.1 is delivered by this pull request**; M10.2 to M10.4 have not started.
+- **Scope:** capabilities 5 and 10 of the [feature matrix](feature-matrix.md): metadata overlays (app overlays and site custom fields, M10.1), field-level permissions (M10.2), user permissions (M10.3), and the desk checks, example apps and the guide "Customizing and restricting data" (M10.4, which touches no file under `crates/`).
+- **M10.1 Metadata overlays** (ADR 0023): **delivered by this pull request** (owner decisions 1 to 5 and 8 of the M10 plan).
+  - **Scope:** `App::extend_doctype` and `overlays!` (an overlay file holds only `[[fields]]`, parsed by the same code as a DocType's fields; applied in `compose` in app order, then file order); site custom fields in `fb_custom_field` with `fb_meta_version` (migration 0012), changed under the advisory lock of `migrate` with the statements of the schema sync; `forgebase customize field add|list|disable|enable` and the Administrator-only routes under `/api/v1/customize`; the effective registry (the apps' plus the enabled site fields) in a per-site `RegistryHolder` with request snapshots and a background version poll (10 s by default) in `serve` and `worker`; `migrate` re-creates the column of every stored custom field; the reserved `custom_` prefix; the `testing` helpers; one overlay in `examples/sales_extension` (`loyalty_tier` on `customer`).
+  - **Choices inside the plan, not owner decisions:** site fields cannot be `required` or `read_only` in M10.1; `enable` is added next to `add|list|disable`; overlays on child DocTypes are refused. All three are in [ADR 0023](../adr/0023-metadata-overlays.md).
+  - **Not done (non-goals of the plan):** a Customize Form or admin UI, property setters, Table custom fields, scripts.
+- **M10 exit criteria (from the plan):**
+  - **Overlays (M10.1):** startup errors for an unknown target, a target that is not a dependency's DocType, collisions and the Table type; sync adds the columns; a disabled field is hidden and its data kept; live reload happens within the interval; two sites with different custom fields are isolated; behaviour without overlays is unchanged.
+  - **Authorization (M10.2 and M10.3):** the authorization test matrix is extended (field levels: read, write, filter, sort, group-by and export refusals with no leakage; user permissions on every path including link resolution and transitions; combinations with `if_owner` and roles; Administrator bypass).
+  - **Process and docs:** unchanged behaviour otherwise; CI green (`ci-result`); an independent Opus PASS per pull request; docs (architecture section 10 Accepted, the security model, the feature matrix, the guide, the CHANGELOG, these milestones and the owner decisions).
+  - **Non-goals of M10:** a Customize Form or admin UI, property setters, Table custom fields, sharing, deny rules and role hierarchies, Postgres row-level security, levels and user permissions in reports, scripts.
+
+### M10.1 exit criteria and evidence
+
+Test names are the ones in the repository.
+
+- **Startup errors:** `overlay_problems_name_the_app_and_the_file` (unknown target, a target no dependency owns, the app's own DocType, a child DocType, a Table field, the reserved prefix, files that do not parse), `a_collision_names_both_apps`, `an_overlay_link_follows_the_app_dependency_rule`, `the_prefix_custom_is_reserved_for_the_fields_of_app_doctypes_too` (`crates/forgebase/src/compose.rs`), and the rules of the registry in `crates/forgebase-core/src/overlay.rs`.
+- **Sync adds the columns:** `an_app_overlay_field_is_seen_by_every_path` (the columns exist after `migrate`), `adding_a_field_stores_it_adds_the_column_and_bumps_the_version`, `unique_and_link_fields_get_their_keys_and_indexes`, `migrate_gives_back_a_missing_column_enabled_or_disabled` and `migrate_recreates_a_missing_custom_column`.
+- **A disabled field is hidden and its data kept:** `a_disabled_field_is_hidden_everywhere_and_its_data_is_kept` (the metadata API, the document, input `422`, filter, sort and summary `400`, export, the column checked with SQL, and enabling brings the value back) and `disable_hides_the_field_and_keeps_the_column_and_the_data`.
+- **Live reload within the interval:** `a_server_sees_a_field_added_elsewhere_within_the_reload_interval` (a server that does not poll still has the old registry, which makes the first half deterministic; a server polling every 100 ms sees the field and its disabling), `the_holder_serves_a_snapshot_and_rebuilds_on_a_version_change`, and `swapping_the_registry_under_load_fails_no_request` (six tasks of reads and writes while the field is disabled and enabled 20 times, the poll runs every 5 ms and the registry is reloaded by force each round: no request fails, an answer never mixes two registries) with `swapping_under_concurrent_readers_never_shows_a_half_built_registry` at the holder.
+- **Two sites isolated:** `two_sites_with_different_custom_fields_stay_apart`.
+- **Every path sees an overlay field and a site field:** the same function checks both, over HTTP: insert, update, get, filter, sort, summary, export, import, a hook of the app that owns the overlay (it sees `tier` and `points` and sets `badge`), the permission rules (a Viewer reads and cannot write, a caller without the right gets `403`) and the webhook snapshot; plus `a_job_sees_the_custom_fields_of_its_site`.
+- **The API:** `the_customize_api_is_for_administrators_and_validates` (`403` for three roles, `csrf_failed`, `401`, an API token, every validation rule and `404` and `409`).
+- **A bad stored field:** `a_stored_field_that_no_longer_validates_is_skipped_with_a_warning`, `a_stored_field_that_no_longer_validates_is_skipped_and_the_site_serves` and `a_database_without_migration_12_serves_the_registry_of_the_apps`.
+- **The command line:** `customize_field_adds_lists_disables_and_enables`, `customize_field_refusals_change_nothing` (`crates/forgebase/tests/cli.rs`).
+- **Unchanged behaviour without overlays:** the whole existing suite, and `without_the_overlay_nothing_changes`.
+- **Partly evidenced:** the desk is not changed by M10.1 (it reads the metadata API, so a custom field is a field to it); M10.4 checks it with Playwright and screenshots. The two sites of the live-reload test share a process (separate databases, separate registries); two server processes are covered by the poll of a second `AppState`, not by two operating-system processes.
 
 ## Later
 

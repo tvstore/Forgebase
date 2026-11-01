@@ -52,6 +52,10 @@ pub enum CliError {
     /// message says why. Never contains the secret, nor the path or query of the URL.
     #[error("{0}")]
     Webhook(String),
+    /// A `customize` command cannot be done (the field file cannot be read or parsed); the
+    /// message says why. A refusal by the database layer is a [`CliError::Db`].
+    #[error("{0}")]
+    Customize(String),
     /// An import or export cannot be done, or an import had row errors; the message says why.
     #[error("{0}")]
     Transfer(String),

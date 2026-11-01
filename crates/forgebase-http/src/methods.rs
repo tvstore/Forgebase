@@ -151,21 +151,15 @@ pub async fn call(
     // This asks the one evaluator of `forgebase-core`; the handler's documents are checked again,
     // per call, by `forgebase-db`.
     let not_found = || ApiError::not_found("method not found");
-    let method = state
-        .registry()
+    let registry = state.registry();
+    let method = registry
         .method(&name)
         .filter(|method| can_call_method(&method.access, &caller))
         .ok_or_else(not_found)?;
     params(query, &[])?;
     let dispatch = state.methods().ok_or_else(not_found)?;
     let result = dispatch
-        .call(
-            state.pool(),
-            state.registry_arc(),
-            &method.full_name(),
-            caller,
-            body,
-        )
+        .call(state.pool(), &registry, &method.full_name(), caller, body)
         .await?;
     Ok(data(StatusCode::OK, result))
 }

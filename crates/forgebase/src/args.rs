@@ -68,6 +68,10 @@ pub enum Command {
     /// running worker). Secrets are printed once, by `add` and `rotate-secret`, and never again.
     #[command(subcommand)]
     Webhook(WebhookCommand),
+    /// Customize the DocTypes of one site (M10.1, ADR 0023). Administrators of the server use the
+    /// command line (or the Administrator-only API); there is no admin screen.
+    #[command(subcommand)]
+    Customize(CustomizeCommand),
     /// List the sites of the config file, create the database of a site, and back it up and
     /// restore it. `--site` is not used here: the commands take the site name as an argument.
     #[command(subcommand)]
@@ -144,6 +148,10 @@ impl Command {
             }) => Some(doctypes),
             // Only `webhook add` needs the DocTypes (to check the DocType of the webhook).
             Command::Webhook(WebhookCommand::Add { doctypes, .. }) => Some(doctypes),
+            // Only `customize field add` needs the DocTypes (to check the field against them).
+            Command::Customize(CustomizeCommand::Field(FieldCommand::Add { doctypes, .. })) => {
+                Some(doctypes)
+            }
             Command::Site(
                 SiteCommand::Create { empty: true, .. }
                 | SiteCommand::Backup { .. }
@@ -151,6 +159,7 @@ impl Command {
                 | SiteCommand::List,
             )
             | Command::Webhook(_)
+            | Command::Customize(_)
             | Command::User(_)
             | Command::Token(_)
             | Command::Job(_)
@@ -180,6 +189,15 @@ impl Command {
                     WebhookCommand::Remove { .. } => "remove",
                     WebhookCommand::RotateSecret { .. } => "rotate-secret",
                     WebhookCommand::Test { .. } => "test",
+                },
+            ],
+            Command::Customize(CustomizeCommand::Field(field)) => [
+                "customize",
+                match field {
+                    FieldCommand::Add { .. } => "field add",
+                    FieldCommand::List { .. } => "field list",
+                    FieldCommand::Disable { .. } => "field disable",
+                    FieldCommand::Enable { .. } => "field enable",
                 },
             ],
             Command::Site(SiteCommand::List) => ["site", "list"],
@@ -679,6 +697,62 @@ pub struct VersionArg {
     /// is refused if someone else changed the document since.
     #[arg(long = "version", value_name = "N")]
     pub expected_version: i64,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CustomizeCommand {
+    /// Site custom fields: fields this site adds to a DocType of its own database. They are
+    /// stored in the site (`fb_custom_field`), get a column at once, and are seen by every
+    /// server and worker of the site within 10 seconds. Only adding is possible: a field cannot
+    /// be changed or removed, only disabled (which hides it everywhere and keeps its column and
+    /// data) and enabled again.
+    #[command(subcommand)]
+    Field(FieldCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FieldCommand {
+    /// Add a custom field to a DocType. The field is one TOML table body, written like a
+    /// `[[fields]]` entry of a DocType file (for example `name = "custom_vip"` and
+    /// `type = "check"` on two lines). The name must start with `custom_`; the type is any
+    /// except `table`; `required` and `read_only` are refused (existing documents have no value,
+    /// and no hook can write the field); `unique` and `allow_on_submit` (on a submittable
+    /// DocType) are allowed. The DocType must exist, must not be a child DocType and must have
+    /// been migrated.
+    Add {
+        /// The DocType to add the field to.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: String,
+        /// The file with the field definition, or `-` to read it from standard input.
+        #[arg(long, value_name = "FILE")]
+        field: String,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+    },
+    /// Print the custom fields as a table: DocType, name, type, label, whether enabled and when
+    /// and by whom they were last changed.
+    List {
+        /// Only the fields of this DocType.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: Option<String>,
+    },
+    /// Hide a custom field everywhere (the API, the desk, filters, export, import). Its column
+    /// and its data are kept.
+    Disable {
+        /// The DocType of the field.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: String,
+        /// The field name.
+        name: String,
+    },
+    /// Show a disabled custom field again, with its data.
+    Enable {
+        /// The DocType of the field.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: String,
+        /// The field name.
+        name: String,
+    },
 }
 
 #[derive(Debug, Args)]

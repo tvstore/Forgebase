@@ -52,3 +52,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0020](0020-outgoing-webhooks.md) | Outgoing webhooks | Accepted (amended by M9.3: 16-byte secrets, an unavailable snapshot, the Azure WireServer) |
 | [0021](0021-import-and-export.md) | Import and export | Accepted |
 | [0022](0022-fixtures.md) | Fixtures | Accepted |
+| [0023](0023-metadata-overlays.md) | Metadata overlays: app overlays, site custom fields, live reload | Accepted |

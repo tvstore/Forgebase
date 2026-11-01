@@ -287,7 +287,7 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 11 pending"), "{text}");
+    assert!(text.contains("framework migrations: 12 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
@@ -333,7 +333,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 11 applied"), "{text}");
+    assert!(text.contains("framework migrations: 12 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -2862,4 +2862,527 @@ fn data_import_dry_run_failure_exit_code_and_success() {
     // --format is required.
     assert_eq!(code(&import(&good, &[])), Some(2));
     assert_eq!(count(), "4");
+}
+
+// ---- customize field (M10.1, ADR 0023) -------------------------------------------------------------
+
+#[test]
+fn customize_field_adds_lists_disables_and_enables() {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    let scratch = Scratch::new();
+    let file = scratch.file(
+        "vip.toml",
+        "name = \"custom_vip\"\nlabel = \"VIP\"\ntype = \"check\"\n",
+    );
+    let add = |field: &str, stdin: Option<&str>| {
+        db.forgebase_with_stdin(
+            &[
+                "customize",
+                "field",
+                "add",
+                "--doctype",
+                "customer",
+                "--field",
+                field,
+                "--doctypes",
+                DOCTYPES,
+            ],
+            stdin,
+        )
+    };
+
+    // From a file: the column exists at once.
+    let added = add(&file, None);
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    assert!(
+        stdout(&added).starts_with("added custom field customer.custom_vip (check)"),
+        "{}",
+        stdout(&added)
+    );
+    assert_eq!(
+        db.scalar(
+            "SELECT data_type FROM information_schema.columns \
+             WHERE table_name = 'doc_customer' AND column_name = 'custom_vip'"
+        )
+        .as_deref(),
+        Some("boolean")
+    );
+    assert_eq!(
+        db.scalar("SELECT version::text FROM fb_meta_version")
+            .as_deref(),
+        Some("1")
+    );
+
+    // From standard input, with a type parameter and `unique`.
+    let from_stdin = add(
+        "-",
+        Some("name = \"custom_rank\"\ntype = \"int\"\nunique = true\n"),
+    );
+    assert_eq!(code(&from_stdin), Some(0), "{}", stderr(&from_stdin));
+
+    // `list`: a table with every field, then one DocType's.
+    let list = db.forgebase(&["customize", "field", "list"]);
+    assert_eq!(code(&list), Some(0), "{}", stderr(&list));
+    let text = stdout(&list);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(
+        lines[0].starts_with("DOCTYPE") && lines[0].contains("ENABLED"),
+        "{text}"
+    );
+    // In the order they were added.
+    assert!(
+        lines[1].contains("custom_vip")
+            && lines[1].contains("VIP")
+            && lines[1].contains("yes")
+            && lines[1].trim_end().ends_with("cli"),
+        "{text}"
+    );
+    assert!(
+        lines[2].contains("custom_rank") && lines[2].contains("Custom Rank"),
+        "{text}"
+    );
+    let none = db.forgebase(&["customize", "field", "list", "--doctype", "customer_group"]);
+    assert_eq!(stdout(&none).lines().count(), 1, "{}", stdout(&none));
+
+    // The commands that read documents show the field.
+    let data = r#"{"email": "a@x.test", "full_name": "A"}"#;
+    assert_eq!(
+        code(&db.forgebase(&[
+            "doc",
+            "insert",
+            "customer",
+            "--data",
+            data,
+            "--doctypes",
+            DOCTYPES
+        ])),
+        Some(0)
+    );
+    db.exec("UPDATE doc_customer SET custom_vip = true, custom_rank = 3");
+    let get = db.forgebase(&["doc", "get", "customer", "a@x.test", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&get), Some(0), "{}", stderr(&get));
+    let doc: Json = serde_json::from_str(&stdout(&get)).expect("JSON");
+    assert_eq!(doc["custom_vip"], true, "{doc}");
+    assert_eq!(doc["custom_rank"], 3, "{doc}");
+
+    // Disable: hidden, column and data kept.
+    let disabled = db.forgebase(&[
+        "customize",
+        "field",
+        "disable",
+        "--doctype",
+        "customer",
+        "custom_vip",
+    ]);
+    assert_eq!(code(&disabled), Some(0), "{}", stderr(&disabled));
+    assert!(
+        stdout(&disabled).contains("its column and data are kept"),
+        "{}",
+        stdout(&disabled)
+    );
+    let get = db.forgebase(&["doc", "get", "customer", "a@x.test", "--doctypes", DOCTYPES]);
+    let doc: Json = serde_json::from_str(&stdout(&get)).expect("JSON");
+    assert!(
+        doc.get("custom_vip").is_none() && doc["custom_rank"] == 3,
+        "{doc}"
+    );
+    assert_eq!(
+        db.scalar("SELECT custom_vip::text FROM doc_customer")
+            .as_deref(),
+        Some("true")
+    );
+    let list = db.forgebase(&["customize", "field", "list", "--doctype", "customer"]);
+    assert!(
+        stdout(&list)
+            .lines()
+            .any(|l| l.contains("custom_vip") && l.split_whitespace().any(|w| w == "no")),
+        "{}",
+        stdout(&list)
+    );
+
+    // Enable: shown again with its data.
+    let enabled = db.forgebase(&[
+        "customize",
+        "field",
+        "enable",
+        "--doctype",
+        "customer",
+        "custom_vip",
+    ]);
+    assert_eq!(code(&enabled), Some(0), "{}", stderr(&enabled));
+    let get = db.forgebase(&["doc", "get", "customer", "a@x.test", "--doctypes", DOCTYPES]);
+    let doc: Json = serde_json::from_str(&stdout(&get)).expect("JSON");
+    assert_eq!(doc["custom_vip"], true, "{doc}");
+    assert_eq!(
+        db.scalar("SELECT version::text FROM fb_meta_version")
+            .as_deref(),
+        Some("4")
+    );
+}
+
+#[test]
+fn customize_field_refusals_change_nothing() {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    let add = |doctype: &str, text: &str| {
+        db.forgebase_with_stdin(
+            &[
+                "customize",
+                "field",
+                "add",
+                "--doctype",
+                doctype,
+                "--field",
+                "-",
+                "--doctypes",
+                DOCTYPES,
+            ],
+            Some(text),
+        )
+    };
+    for (doctype, text, expected) in [
+        (
+            "customer",
+            "name = \"vip\"\ntype = \"check\"\n",
+            "must start with `custom_`",
+        ),
+        (
+            "customer",
+            "name = \"custom_a\"\ntype = \"check\"\nrequired = true\n",
+            "cannot be required",
+        ),
+        (
+            "customer",
+            "name = \"custom_a\"\ntype = \"check\"\nread_only = true\n",
+            "cannot be read_only",
+        ),
+        (
+            "customer",
+            "name = \"custom_a\"\ntype = \"table\"\ntarget = \"sales_order_item\"\n",
+            "cannot add Table fields",
+        ),
+        (
+            "customer",
+            "name = \"custom_a\"\ntype = \"check\"\ncolour = 1\n",
+            "cannot parse the definition",
+        ),
+        ("customer", "not toml at all", "cannot parse the definition"),
+        (
+            "sales_order_item",
+            "name = \"custom_a\"\ntype = \"check\"\n",
+            "child DocType",
+        ),
+        (
+            "ghost",
+            "name = \"custom_a\"\ntype = \"check\"\n",
+            "unknown doctype `ghost`",
+        ),
+        (
+            "customer",
+            "name = \"email\"\ntype = \"check\"\n",
+            "must start with `custom_`",
+        ),
+    ] {
+        let out = add(doctype, text);
+        assert_eq!(code(&out), Some(1), "{text}: {}", stderr(&out));
+        assert!(stderr(&out).contains(expected), "{text}: {}", stderr(&out));
+    }
+    // A file that is not there is refused before the database is used.
+    let out = db.forgebase(&[
+        "customize",
+        "field",
+        "add",
+        "--doctype",
+        "customer",
+        "--field",
+        "/no/such/file.toml",
+        "--doctypes",
+        DOCTYPES,
+    ]);
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("cannot read"), "{}", stderr(&out));
+    // A duplicate, and a field that is not there.
+    assert_eq!(
+        code(&add("customer", "name = \"custom_a\"\ntype = \"check\"\n")),
+        Some(0)
+    );
+    let again = add("customer", "name = \"custom_a\"\ntype = \"int\"\n");
+    assert_eq!(code(&again), Some(1));
+    assert!(
+        stderr(&again).contains("already exists"),
+        "{}",
+        stderr(&again)
+    );
+    let missing = db.forgebase(&[
+        "customize",
+        "field",
+        "disable",
+        "--doctype",
+        "customer",
+        "custom_nope",
+    ]);
+    assert_eq!(code(&missing), Some(1));
+    assert!(
+        stderr(&missing).contains("not found"),
+        "{}",
+        stderr(&missing)
+    );
+    // Only the one good field was written.
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_custom_field")
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        db.scalar("SELECT version::text FROM fb_meta_version")
+            .as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
+fn the_data_and_doc_commands_see_enabled_custom_fields_and_refuse_disabled_ones() {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    let added = db.forgebase_with_stdin(
+        &[
+            "customize",
+            "field",
+            "add",
+            "--doctype",
+            "customer",
+            "--field",
+            "-",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        Some("name = \"custom_vip\"\ntype = \"check\"\n"),
+    );
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    let scratch = Scratch::new();
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--doctypes", DOCTYPES]);
+        db.forgebase(&all)
+    };
+
+    // doc insert and update take the field, and doc get shows it.
+    let out = run(&[
+        "doc",
+        "insert",
+        "customer",
+        "--data",
+        r#"{"email":"a@x.test","full_name":"A","custom_vip":true}"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let doc: Json = serde_json::from_str(&stdout(&out)).expect("JSON");
+    assert_eq!(doc["custom_vip"], true);
+    let version = doc["version"].to_string();
+    let out = run(&[
+        "doc",
+        "update",
+        "customer",
+        "a@x.test",
+        "--version",
+        &version,
+        "--data",
+        r#"{"custom_vip":false}"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let out = run(&[
+        "doc",
+        "list",
+        "customer",
+        "--filter",
+        r#"[{"field":"custom_vip","op":"=","value":false}]"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        serde_json::from_str::<Json>(&stdout(&out))
+            .expect("JSON")
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // A CSV export has the column, --fields and --filter work on it, and an import sets it.
+    let out = run(&["data", "export", "customer", "--format", "csv"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out)
+            .lines()
+            .next()
+            .expect("header")
+            .contains("custom_vip"),
+        "{}",
+        stdout(&out)
+    );
+    let out = run(&[
+        "data",
+        "export",
+        "customer",
+        "--format",
+        "csv",
+        "--fields",
+        "name,custom_vip",
+        "--filter",
+        r#"[{"field":"custom_vip","op":"=","value":false}]"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out).replace("\r\n", "\n"),
+        "name,custom_vip\na@x.test,false\n"
+    );
+    let csv = scratch.file("in.csv", "email,full_name,custom_vip\nb@x.test,B,true\n");
+    let out = run(&["data", "import", "customer", &csv, "--format", "csv"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        db.scalar("SELECT custom_vip::text FROM doc_customer WHERE name = 'b@x.test'")
+            .as_deref(),
+        Some("true")
+    );
+
+    // Disabled: unknown in input, import, --fields and --filter; the column and data stay.
+    let off = db.forgebase(&[
+        "customize",
+        "field",
+        "disable",
+        "--doctype",
+        "customer",
+        "custom_vip",
+    ]);
+    assert_eq!(code(&off), Some(0), "{}", stderr(&off));
+    for args in [
+        vec![
+            "doc",
+            "insert",
+            "customer",
+            "--data",
+            r#"{"email":"c@x.test","full_name":"C","custom_vip":true}"#,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            r#"[{"field":"custom_vip","op":"=","value":true}]"#,
+        ],
+        vec!["data", "export", "customer", "--fields", "custom_vip"],
+        vec![
+            "data",
+            "export",
+            "customer",
+            "--filter",
+            r#"[{"field":"custom_vip","op":"=","value":true}]"#,
+        ],
+        vec![
+            "data", "import", "customer", &csv, "--format", "csv", "--upsert",
+        ],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), Some(1), "{args:?}: {}", stdout(&out));
+        assert!(
+            stderr(&out).contains("custom_vip"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    let out = run(&["data", "export", "customer", "--format", "csv"]);
+    assert!(!stdout(&out).contains("custom_vip"), "{}", stdout(&out));
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM doc_customer WHERE custom_vip")
+            .as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
+fn malformed_json_and_filters_fail_before_the_database_is_used() {
+    // The URL points at nothing: a connection error would show if the database were opened.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_forgebase"))
+            .args(args)
+            .env(
+                "FORGEBASE_DATABASE_URL",
+                "postgres://nobody:nothing@127.0.0.1:1/none",
+            )
+            .stdin(Stdio::null())
+            .output()
+            .expect("run forgebase")
+    };
+    for args in [
+        vec![
+            "doc",
+            "insert",
+            "customer",
+            "--data",
+            "{bad",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "update",
+            "customer",
+            "a",
+            "--version",
+            "1",
+            "--data",
+            "[1]",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            "{bad",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            r#"{"field":"a"}"#,
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            r#"[{"field":"a"}]"#,
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "data",
+            "export",
+            "customer",
+            "--filter",
+            "{bad",
+            "--doctypes",
+            DOCTYPES,
+        ],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), Some(1), "{args:?}");
+        let text = stderr(&out);
+        assert!(
+            text.starts_with("error: invalid JSON")
+                || text.starts_with("error: the data must be a JSON object")
+                || text.starts_with("error: invalid filter"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("site `"), "{args:?}: {text}");
+    }
 }

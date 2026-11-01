@@ -208,7 +208,7 @@ fn drive() {
 
     // A dry run on an empty database lists the app migration, and keeps nothing.
     let out = succeeds(&good.go(&["migrate", "--dry-run"], None));
-    assert!(out.contains("framework migrations: 11 pending"), "{out}");
+    assert!(out.contains("framework migrations: 12 pending"), "{out}");
     assert!(
         out.contains("app migrations: 1 pending\n  crm 0001 seed\n"),
         "{out}"
@@ -385,7 +385,7 @@ fn fixtures(runtime: &tokio::runtime::Runtime) {
     // What was applied (and committed) is printed first, as for a failed report check.
     let stdout = text(&out.stdout);
     assert!(
-        stdout.contains("framework migrations: 11 applied")
+        stdout.contains("framework migrations: 12 applied")
             && stdout.contains("schema sync: applied")
             && stdout.contains("app migrations: 1 applied\n  crm 0001 seed\n"),
         "{stdout}"
@@ -434,7 +434,7 @@ fn reports(runtime: &tokio::runtime::Runtime) {
     // What was applied is reported, and it stays applied.
     let stdout = text(&out.stdout);
     assert!(
-        stdout.contains("framework migrations: 11 applied")
+        stdout.contains("framework migrations: 12 applied")
             && stdout.contains("app migrations: 1 applied\n  crm 0001 seed\n"),
         "{stdout}"
     );

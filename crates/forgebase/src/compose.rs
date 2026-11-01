@@ -1,9 +1,10 @@
 //! Putting the apps together: validating them, loading their DocTypes into one registry,
 //! registering their hooks, and migrating them.
 //!
-//! Order of work (documented in ADR 0012): the apps' own consistency (names, dependencies,
-//! order, migration versions); the DocTypes of every app in app order, then the DocTypes of
-//! the `--doctypes` directory (the app `local`); the references between DocTypes (existing
+//! Order of work (documented in ADR 0012 and ADR 0023): the apps' own consistency (names,
+//! dependencies, order, migration versions); the DocTypes of every app in app order, then the
+//! DocTypes of the `--doctypes` directory (the app `local`); the overlays (fields that an app
+//! adds to a dependency's DocType) in app order, then file order; the references between DocTypes (existing
 //! rules, plus: a Link or Table may only target a DocType of its own app or of a dependency);
 //! the hooks in app order. Every problem found is collected and reported together. The
 //! reference and hook checks only run when every DocType file loaded, because a file that did
@@ -15,7 +16,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use forgebase_core::ident::validate_doctype_name;
-use forgebase_core::meta::{DefinitionError, DocType, FieldType, Registry};
+use forgebase_core::meta::{DefinitionError, DocField, DocType, FieldType, Registry};
+use forgebase_core::overlay::{CUSTOM_PREFIX, OverlayError, parse_overlay};
 use forgebase_db::schedule::{Declared, Spec};
 use forgebase_db::{
     AppMigration, AppSpec, DbError, FixtureRecord, MigrateReport, Pool, SyncOptions,
@@ -246,11 +248,32 @@ pub(crate) fn compose(apps: &[App], local: Option<&Path>) -> Result<Composed, St
         local_reach = apps.iter().map(|a| a.name.clone()).collect();
     }
 
+    // The overlay files are parsed with the DocType files: a file that does not parse is a file
+    // problem, and stops the checks that follow it like any other.
+    let overlays = parse_overlays(apps, &mut errors);
+    // (DocType, field) of a field added by an overlay -> the app and the file that added it.
+    let mut field_files: BTreeMap<(String, String), (String, String)> = BTreeMap::new();
+
     // Only when everything loaded: a Link to a DocType from a broken file would be reported
     // twice, and a hook on one as an unknown DocType.
     let mut fixtures: Vec<Vec<OwnedRecord>> = vec![Vec::new(); apps.len()];
     if errors.files.is_empty() {
-        check_references(&registry, &defined_in, &reach, &local_reach, &mut errors);
+        apply_overlays(
+            &overlays,
+            &reach,
+            &defined_in,
+            &mut registry,
+            &mut field_files,
+            &mut errors,
+        );
+        check_references(
+            &registry,
+            &defined_in,
+            &field_files,
+            &reach,
+            &local_reach,
+            &mut errors,
+        );
         check_hooks(apps, &reach, &mut registry, &mut errors);
         check_reports(apps, &reach, &mut registry, &mut errors);
         fixtures = fixtures::check(apps, &reach, &registry, &mut errors);
@@ -381,6 +404,21 @@ fn load(
             }
         };
         let name = doctype.name.clone();
+        let reserved: Vec<_> = doctype
+            .fields
+            .iter()
+            .filter(|f| f.name.starts_with(CUSTOM_PREFIX))
+            .collect();
+        if !reserved.is_empty() {
+            for field in reserved {
+                errors.files.push(format!(
+                    "{prefix}{}: field `{}` of doctype `{name}` starts with `{CUSTOM_PREFIX}`, a prefix \
+                     reserved for site custom fields; rename it",
+                    file.path, field.name
+                ));
+            }
+            continue;
+        }
         if let Some((first_app, first_path)) = defined_in.get(&name) {
             errors.files.push(if first_app == app {
                 format!(
@@ -411,11 +449,139 @@ fn load(
     }
 }
 
+/// One overlay file of an app, parsed.
+struct Overlay<'a> {
+    app: &'a str,
+    path: &'a str,
+    target: &'a str,
+    fields: Vec<DocField>,
+}
+
+/// Parses the overlay files of the apps, in app order and then registration order. A file that
+/// does not parse is a file problem naming the app and the file.
+fn parse_overlays<'a>(apps: &'a [App], errors: &mut StartupError) -> Vec<Overlay<'a>> {
+    let mut parsed = Vec::new();
+    for app in apps {
+        for (target, file) in &app.overlays {
+            match parse_overlay(file.toml()) {
+                Ok(fields) => parsed.push(Overlay {
+                    app: &app.name,
+                    path: file.path(),
+                    target,
+                    fields,
+                }),
+                Err(e) => errors
+                    .files
+                    .push(format!("app `{}`: {}: {e}", app.name, file.path())),
+            }
+        }
+    }
+    parsed
+}
+
+/// Adds the fields of the overlays to their target DocTypes, in the order of `overlays`. An
+/// overlay with any problem adds nothing; all of its problems are reported, each naming the app
+/// and the file. A field name that is taken names both apps.
+fn apply_overlays(
+    overlays: &[Overlay<'_>],
+    reach: &BTreeMap<String, BTreeSet<String>>,
+    defined_in: &BTreeMap<String, (String, String)>,
+    registry: &mut Registry,
+    field_files: &mut BTreeMap<(String, String), (String, String)>,
+    errors: &mut StartupError,
+) {
+    for overlay in overlays {
+        let Overlay {
+            app,
+            path,
+            target,
+            fields,
+        } = overlay;
+        let problem = |text: String| format!("app `{app}`: {path}: {text}");
+        let Some(owner) = registry.owner(target).map(str::to_owned) else {
+            errors.apps.push(problem(format!(
+                "overlay for unknown DocType `{target}` (it must be a DocType of an app that `{app}` depends on)"
+            )));
+            continue;
+        };
+        if owner == *app {
+            errors.apps.push(problem(format!(
+                "overlay for `{target}`, a DocType of app `{app}` itself; add the field to the DocType's own file"
+            )));
+            continue;
+        }
+        if !reach.get(*app).is_some_and(|uses| uses.contains(&owner)) {
+            errors.apps.push(problem(format!(
+                "overlay for `{target}`, which belongs to app `{owner}`; app `{app}` does not depend on `{owner}` \
+                 (add .depends_on(&[\"{owner}\"]), registered before `{app}`)"
+            )));
+            continue;
+        }
+        if registry.get(target).is_some_and(|d| d.is_child) {
+            errors.apps.push(problem(format!(
+                "overlay for `{target}`, a child DocType; overlays extend DocTypes with documents of their own"
+            )));
+            continue;
+        }
+        let mut problems = Vec::new();
+        for field in fields {
+            if matches!(field.field_type, FieldType::Table { .. }) {
+                problems.push(format!(
+                    "field `{}` has type table; an overlay cannot add a Table field",
+                    field.name
+                ));
+            } else if field.name.starts_with(CUSTOM_PREFIX) {
+                problems.push(format!(
+                    "field `{}` starts with `{CUSTOM_PREFIX}`, a prefix reserved for site custom fields",
+                    field.name
+                ));
+            } else if registry
+                .get(target)
+                .is_some_and(|d| d.field(&field.name).is_some())
+            {
+                let key = ((*target).to_owned(), field.name.clone());
+                let (first_app, first_path) = field_files
+                    .get(&key)
+                    .or_else(|| defined_in.get(*target))
+                    .map_or(("?", "?"), |(a, p)| (a.as_str(), p.as_str()));
+                problems.push(format!(
+                    "field `{}` of doctype `{target}` is already defined by app `{first_app}` ({first_path}); \
+                     app `{app}` cannot add a field of the same name",
+                    field.name
+                ));
+            }
+        }
+        if !problems.is_empty() {
+            errors.apps.extend(problems.into_iter().map(&problem));
+            continue;
+        }
+        match registry.add_overlay_fields(app, target, fields.clone()) {
+            Ok(()) => {
+                for field in fields {
+                    field_files.insert(
+                        ((*target).to_owned(), field.name.clone()),
+                        ((*app).to_owned(), (*path).to_owned()),
+                    );
+                }
+            }
+            Err(OverlayError::Invalid(found)) => {
+                for e in found {
+                    errors
+                        .apps
+                        .push(problem(format!("invalid overlay for `{target}`: {e}")));
+                }
+            }
+            Err(e) => errors.apps.push(problem(e.to_string())),
+        }
+    }
+}
+
 /// The reference rules of the registry, and the app rule: a Link or Table field may only
 /// target a DocType of its own app or of an app it depends on.
 fn check_references(
     registry: &Registry,
     defined_in: &BTreeMap<String, (String, String)>,
+    field_files: &BTreeMap<(String, String), (String, String)>,
     reach: &BTreeMap<String, BTreeSet<String>>,
     local_reach: &BTreeSet<String>,
     errors: &mut StartupError,
@@ -431,30 +597,42 @@ fn check_references(
                 DefinitionError::ChildSharedByTables { child, .. } => Some(child),
                 _ => None,
             };
-            errors
-                .files
-                .push(match doctype.and_then(|d| defined_in.get(d)) {
+            // A Link field that an overlay added is reported at the overlay file.
+            let field = match &problem {
+                DefinitionError::UnknownLinkTarget { doctype, field, .. }
+                | DefinitionError::LinkToChild { doctype, field, .. } => {
+                    field_files.get(&(doctype.clone(), field.clone()))
+                }
+                _ => None,
+            };
+            errors.files.push(
+                match field.or_else(|| doctype.and_then(|d| defined_in.get(d))) {
                     Some((app, path)) if app == LOCAL_APP => format!("{path}: {problem}"),
                     Some((app, path)) => format!("app `{app}`: {path}: {problem}"),
                     None => problem.to_string(),
-                });
+                },
+            );
         }
     }
     // The app rule runs even when the reference rules found problems, so that one run shows both
     // kinds. (A target nobody defines has no owner and is skipped here: it is already reported.)
     for doctype in registry.iter() {
-        let Some((app, path)) = defined_in.get(&doctype.name) else {
+        let Some(defined) = defined_in.get(&doctype.name) else {
             continue;
         };
-        let uses = if app == LOCAL_APP {
-            local_reach
-        } else {
-            match reach.get(app) {
-                Some(uses) => uses,
-                None => continue,
-            }
-        };
         for field in &doctype.fields {
+            // A field that an overlay added belongs to the app and the file of the overlay.
+            let (app, path) = field_files
+                .get(&(doctype.name.clone(), field.name.clone()))
+                .unwrap_or(defined);
+            let uses = if app == LOCAL_APP {
+                local_reach
+            } else {
+                match reach.get(app) {
+                    Some(uses) => uses,
+                    None => continue,
+                }
+            };
             let (FieldType::Link { target } | FieldType::Table { target }) = &field.field_type
             else {
                 continue;
@@ -918,5 +1096,297 @@ mod tests {
             files: vec!["b".to_owned()],
         };
         assert_eq!(only_files.to_string(), "cannot load DocType files:\n  - b");
+    }
+
+    // ---- overlays (M10.1, ADR 0023) ----
+
+    use crate::app::OverlayFile;
+
+    const TIER: &str = "[[fields]]\nname = \"tier\"\ntype = \"select\"\noptions = [\"a\", \"b\"]\n";
+
+    fn ext(name: &str, depends: &[&str], target: &str, overlays: &'static [OverlayFile]) -> App {
+        App::new(name)
+            .depends_on(depends)
+            .extend_doctype(target, overlays)
+    }
+
+    fn problems(apps: &[App]) -> Vec<String> {
+        compose(apps, None)
+            .err()
+            .expect("refused")
+            .problems()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn an_overlay_adds_its_fields_after_the_doctype_in_app_order_then_file_order() {
+        const FIRST: &[OverlayFile] = &[
+            OverlayFile::new("overlays/a1.toml", TIER),
+            OverlayFile::new(
+                "overlays/a2.toml",
+                "[[fields]]\nname = \"note\"\ntype = \"text\"\n",
+            ),
+        ];
+        const SECOND: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/b.toml",
+            "[[fields]]\nname = \"rank\"\ntype = \"int\"\nunique = true\nrequired = true\n",
+        )];
+        let composed = compose(
+            &[
+                crm(),
+                ext("first", &["crm"], "customer", FIRST),
+                ext("second", &["crm"], "customer", SECOND),
+            ],
+            None,
+        )
+        .expect("composed");
+        let customer = composed.registry.get("customer").expect("customer");
+        let names: Vec<_> = customer.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["tier", "note", "rank"]);
+        assert!(customer.field("rank").expect("rank").unique);
+        assert_eq!(
+            composed.registry.field_owner("customer", "tier"),
+            Some("first")
+        );
+        assert_eq!(
+            composed.registry.field_owner("customer", "rank"),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn an_overlay_may_target_a_transitive_dependency() {
+        const O: &[OverlayFile] = &[OverlayFile::new("overlays/o.toml", TIER)];
+        let mid = App::new("mid").depends_on(&["crm"]);
+        let top = ext("top", &["mid"], "customer", O);
+        compose(&[crm(), mid, top], None).expect("composed");
+    }
+
+    #[test]
+    fn overlay_problems_name_the_app_and_the_file() {
+        const O: &[OverlayFile] = &[OverlayFile::new("overlays/o.toml", TIER)];
+        const NOTHING: &[OverlayFile] = &[OverlayFile::new("overlays/x.toml", "")];
+        const STRAY: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/s.toml",
+            "label = \"x\"\n[[fields]]\nname = \"a\"\ntype = \"int\"\n",
+        )];
+        const TABLE: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/t.toml",
+            "[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"customer\"\n",
+        )];
+        const PREFIX: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/p.toml",
+            "[[fields]]\nname = \"custom_x\"\ntype = \"int\"\n",
+        )];
+        const BAD: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/b.toml",
+            "[[fields]]\nname = \"a\"\ntype = \"select\"\n",
+        )];
+
+        let found = problems(&[crm(), ext("e", &["crm"], "nope", O)]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with("app `e`: overlays/o.toml: overlay for unknown DocType `nope`"),
+            "{found:?}"
+        );
+
+        // Not a dependency: `e` does not depend on `crm`.
+        let found = problems(&[crm(), ext("e", &[], "customer", O)]);
+        assert!(
+            found[0].contains("app `e`: overlays/o.toml: overlay for `customer`, which belongs to app `crm`; app `e` does not depend on `crm`"),
+            "{found:?}"
+        );
+
+        // The app's own DocType.
+        let own = crm().extend_doctype("customer", O);
+        let found = problems(&[own]);
+        assert!(
+            found[0].contains(
+                "app `crm`: overlays/o.toml: overlay for `customer`, a DocType of app `crm` itself"
+            ),
+            "{found:?}"
+        );
+
+        // A child DocType.
+        let parent = App::new("p").doctypes(
+            const {
+                &[
+                    DocTypeFile::new("doctypes/parent.toml", "name = \"parent\"\nlabel = \"P\"\n[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"child\"\n"),
+                    DocTypeFile::new("doctypes/child.toml", "name = \"child\"\nlabel = \"C\"\nis_child = true\n"),
+                ]
+            },
+        );
+        let found = problems(&[parent, ext("e", &["p"], "child", O)]);
+        assert!(
+            found[0].contains("overlay for `child`, a child DocType"),
+            "{found:?}"
+        );
+
+        // A Table field, the reserved prefix.
+        let found = problems(&[crm(), ext("e", &["crm"], "customer", TABLE)]);
+        assert!(
+            found[0].contains("app `e`: overlays/t.toml: field `rows` has type table"),
+            "{found:?}"
+        );
+        let found = problems(&[crm(), ext("e", &["crm"], "customer", PREFIX)]);
+        assert!(
+            found[0].contains("app `e`: overlays/p.toml: field `custom_x` starts with `custom_`"),
+            "{found:?}"
+        );
+
+        // Files that do not parse, or hold more than fields: file problems naming the file.
+        for (files, expected) in [
+            (
+                NOTHING,
+                "app `e`: overlays/x.toml: the overlay has no [[fields]]",
+            ),
+            (
+                STRAY,
+                "app `e`: overlays/s.toml: cannot parse the definition",
+            ),
+        ] {
+            let error = compose(&[crm(), ext("e", &["crm"], "customer", files)], None)
+                .err()
+                .expect("refused")
+                .to_string();
+            assert!(
+                error.contains("cannot load DocType files") && error.contains(expected),
+                "{error}"
+            );
+        }
+
+        // A field with its own problem (the same check as a DocType file).
+        let found = problems(&[crm(), ext("e", &["crm"], "customer", BAD)]);
+        assert!(found[0].contains("app `e`: overlays/b.toml:"), "{found:?}");
+    }
+
+    #[test]
+    fn a_collision_names_both_apps() {
+        const ONE: &[OverlayFile] = &[OverlayFile::new("overlays/one.toml", TIER)];
+        const TWO: &[OverlayFile] = &[OverlayFile::new("overlays/two.toml", TIER)];
+        let found = problems(&[
+            crm(),
+            ext("one", &["crm"], "customer", ONE),
+            ext("two", &["crm"], "customer", TWO),
+        ]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("app `two`: overlays/two.toml: field `tier` of doctype `customer` is already defined by app `one` (overlays/one.toml)"),
+            "{found:?}"
+        );
+        // With a field of the DocType itself.
+        const OWN: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/own.toml",
+            "[[fields]]\nname = \"email\"\ntype = \"data\"\n",
+        )];
+        let crm_with_email = App::new("crm").doctypes(
+            const {
+                &[DocTypeFile::new(
+                    "doctypes/customer.toml",
+                    "name = \"customer\"\nlabel = \"C\"\n[[fields]]\nname = \"email\"\ntype = \"data\"\n",
+                )]
+            },
+        );
+        let found = problems(&[crm_with_email, ext("one", &["crm"], "customer", OWN)]);
+        assert!(
+            found[0].contains("already defined by app `crm` (doctypes/customer.toml); app `one` cannot add a field of the same name"),
+            "{found:?}"
+        );
+        // Twice in one app, and twice in one file.
+        const SAME: &[OverlayFile] = &[
+            OverlayFile::new("overlays/a.toml", TIER),
+            OverlayFile::new("overlays/b.toml", TIER),
+        ];
+        let found = problems(&[crm(), ext("one", &["crm"], "customer", SAME)]);
+        assert!(
+            found[0].contains("already defined by app `one` (overlays/a.toml)"),
+            "{found:?}"
+        );
+        const TWICE: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/t.toml",
+            "[[fields]]\nname = \"x\"\ntype = \"int\"\n[[fields]]\nname = \"x\"\ntype = \"int\"\n",
+        )];
+        let found = problems(&[crm(), ext("one", &["crm"], "customer", TWICE)]);
+        assert!(
+            found[0].contains("overlays/t.toml") && found[0].contains("already exists"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn an_overlay_link_follows_the_app_dependency_rule() {
+        const LINK_TO_CRM: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/l.toml",
+            "[[fields]]\nname = \"buddy\"\ntype = \"link\"\ntarget = \"customer\"\n",
+        )];
+        const LINK_GHOST: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/g.toml",
+            "[[fields]]\nname = \"buddy\"\ntype = \"link\"\ntarget = \"ghost\"\n",
+        )];
+        let other = App::new("other").doctypes(
+            const {
+                &[DocTypeFile::new(
+                    "doctypes/thing.toml",
+                    "name = \"thing\"\nlabel = \"T\"\n",
+                )]
+            },
+        );
+        const LINK_TO_OTHER: &[OverlayFile] = &[OverlayFile::new(
+            "overlays/o.toml",
+            "[[fields]]\nname = \"buddy\"\ntype = \"link\"\ntarget = \"thing\"\n",
+        )];
+        // `e` extends `crm` but does not depend on `other`: the link is refused at the overlay.
+        let found = problems(&[
+            crm(),
+            other.clone(),
+            ext("e", &["crm"], "customer", LINK_TO_OTHER),
+        ]);
+        assert!(
+            found.iter().any(|p| p.contains("app `e`: overlays/o.toml: field `buddy` of doctype `customer` refers to `thing`, which belongs to app `other`")),
+            "{found:?}"
+        );
+        // A target nobody defines is reported at the overlay file.
+        let found = problems(&[crm(), ext("e", &["crm"], "customer", LINK_GHOST)]);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.contains("overlays/g.toml") && p.contains("ghost")),
+            "{found:?}"
+        );
+        compose(&[crm(), ext("e", &["crm"], "customer", LINK_TO_CRM)], None)
+            .expect("a link into the extended app is fine");
+    }
+
+    #[test]
+    fn the_prefix_custom_is_reserved_for_the_fields_of_app_doctypes_too() {
+        let app = App::new("a").doctypes(
+            const {
+                &[DocTypeFile::new(
+                    "doctypes/t.toml",
+                    "name = \"t\"\nlabel = \"T\"\n[[fields]]\nname = \"custom_x\"\ntype = \"int\"\n",
+                )]
+            },
+        );
+        let found = problems(&[app]);
+        assert!(
+            found[0].contains(
+                "app `a`: doctypes/t.toml: field `custom_x` of doctype `t` starts with `custom_`"
+            ),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn hooks_of_the_owning_app_see_the_overlay_fields() {
+        // The hook registry is checked against the extended DocType: a hook may be registered for
+        // the overlay's target.
+        use forgebase_core::hooks::DocTypeHooks;
+        struct Noop;
+        impl DocTypeHooks for Noop {}
+        const O: &[OverlayFile] = &[OverlayFile::new("overlays/o.toml", TIER)];
+        let app = ext("e", &["crm"], "customer", O).hooks("customer", Noop);
+        let composed = compose(&[crm(), app], None).expect("composed");
+        assert_eq!(composed.registry.hooks("customer").len(), 1);
     }
 }

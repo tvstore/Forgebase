@@ -7,7 +7,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use forgebase_core::meta::{DocField, DocType, FieldType, Naming};
+use forgebase_core::meta::{DocField, DocType, FieldType, Naming, Registry};
 use forgebase_core::permission::{Access, Caller, Right, evaluate};
 use forgebase_db::DbError;
 use serde_json::{Map, Value as Json, json};
@@ -109,12 +109,11 @@ fn workflow(doctype: &DocType) -> Json {
 
 /// A field of the DocType; a Table field also carries the field list of its child DocType
 /// (`fields`), so the desk needs one request per DocType.
-fn field_with_children(state: &AppState, f: &DocField) -> Json {
+fn field_with_children(registry: &Registry, f: &DocField) -> Json {
     let mut map = field(f);
     if let FieldType::Table { target } = &f.field_type {
         // The registry was checked at startup, so the child exists.
-        let rows: Vec<Json> = state
-            .registry()
+        let rows: Vec<Json> = registry
             .get(target)
             .map(|child| {
                 child
@@ -134,15 +133,15 @@ fn field_with_children(state: &AppState, f: &DocField) -> Json {
 /// (`null` or a name from the DocType icon list), `submittable` and the caller's `rights`.
 pub async fn list(State(state): State<AppState>, authenticated: Authenticated) -> Reply {
     let caller = authenticated.caller();
-    let items: Vec<Json> = state
-        .registry()
+    let registry = state.registry();
+    let items: Vec<Json> = registry
         .iter()
         .filter(|d| !d.is_child && evaluate(d, &caller, Right::Read) != Access::Denied)
         .map(|d| {
             json!({
                 "name": d.name,
                 "label": d.label,
-                "app": state.registry().owner(&d.name),
+                "app": registry.owner(&d.name),
                 "icon": d.icon,
                 "submittable": d.submittable,
                 "rights": rights(d, &caller),
@@ -161,7 +160,8 @@ pub async fn read(
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path(name) = path?;
-    let doctype = doctype(&state, &name)?;
+    let registry = state.registry();
+    let doctype = doctype(&registry, &name)?;
     let caller = authenticated.caller();
     if evaluate(doctype, &caller, Right::Read) == Access::Denied {
         return Err(DbError::PermissionDenied {
@@ -173,14 +173,14 @@ pub async fn read(
     let fields: Vec<Json> = doctype
         .fields
         .iter()
-        .map(|f| field_with_children(&state, f))
+        .map(|f| field_with_children(&registry, f))
         .collect();
     Ok(data(
         StatusCode::OK,
         json!({
             "name": doctype.name,
             "label": doctype.label,
-            "app": state.registry().owner(&doctype.name),
+            "app": registry.owner(&doctype.name),
             "icon": doctype.icon,
             "naming": naming(&doctype.naming),
             "submittable": doctype.submittable,

@@ -94,6 +94,47 @@ pub fn parse_input(registry: &Registry, doctype: &DocType, text: &str) -> Result
     input_from_json(registry, doctype, serde_json::from_str::<Json>(text)?)
 }
 
+/// The syntax-only part of [`parse_input`]: the text is JSON and an object. Field names and
+/// values are not looked at, so it needs no DocType (the command line runs it before the
+/// database is opened, and the full check later against the site's registry).
+pub fn check_input_syntax(text: &str) -> Result<(), JsonError> {
+    match serde_json::from_str::<Json>(text)? {
+        Json::Object(_) => Ok(()),
+        _ => Err(JsonError::NotAnObject),
+    }
+}
+
+/// The syntax-only part of [`parse_filters`]: the text is a JSON array of objects with only the
+/// keys `field`, `op` and `value`, and a string `field` and `op`. Whether the field exists and
+/// the value fits is not looked at (see [`check_input_syntax`]).
+pub fn check_filters_syntax(text: &str) -> Result<(), JsonError> {
+    let query = |problem: String| JsonError::Query(format!("invalid filter: {problem}"));
+    let Json::Array(items) = serde_json::from_str::<Json>(text)? else {
+        return Err(query("expected a JSON array of filters".to_owned()));
+    };
+    for (i, item) in items.iter().enumerate() {
+        let place = |problem: String| query(format!("filter {}: {problem}", i + 1));
+        let Json::Object(object) = item else {
+            return Err(place(format!("expected an object, found {}", kind(item))));
+        };
+        if let Some(key) = object
+            .keys()
+            .find(|k| !matches!(k.as_str(), "field" | "op" | "value"))
+        {
+            return Err(place(format!(
+                "unknown key `{}` (use field, op, value)",
+                forgebase_core::shorten(key)
+            )));
+        }
+        for key in ["field", "op"] {
+            if object.get(key).and_then(Json::as_str).is_none() {
+                return Err(place(format!("`{key}` must be a string")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Like [`parse_input`] for JSON that is already parsed.
 pub fn input_from_json(
     registry: &Registry,

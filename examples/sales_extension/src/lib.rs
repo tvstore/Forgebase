@@ -1,8 +1,9 @@
 //! The `sales_extension` example app: a custom app on top of `sales`.
 //!
-//! It adds a DocType of its own (`customer_visit`, with a Link to `sales`' `customer`), two
-//! hooks on a DocType of `sales` (`sales_order`) and a background job that works on `sales`
-//! documents, without changing anything in `sales`.
+//! It adds a DocType of its own (`customer_visit`, with a Link to `sales`' `customer`), a field
+//! on a DocType of `sales` (`loyalty_tier` on `customer`, an overlay), two hooks on another
+//! DocType of `sales` (`sales_order`) and a background job that works on `sales` documents,
+//! without changing anything in `sales`.
 
 use forgebase::serde_json::json;
 use forgebase::{
@@ -26,6 +27,9 @@ pub fn app() -> App {
         .depends_on(&["sales"])
         // Every file in doctypes/ must be listed here (a test checks that).
         .doctypes(forgebase::doctypes!["doctypes/customer_visit.toml"])
+        // A field added to `customer`, a DocType of `sales` (ADR 0023): an overlay file holds
+        // only `[[fields]]`. `sales` does not change; `migrate` adds the column.
+        .extend_doctype("customer", forgebase::overlays!["overlays/customer.toml"])
         // Hooks on a DocType of `sales`: allowed because we depend on it. They run after the
         // hooks of `sales`, in this order.
         .hooks("sales_order", MinimumOrder)

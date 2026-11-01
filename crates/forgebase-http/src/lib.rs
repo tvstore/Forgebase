@@ -56,6 +56,9 @@
 //! | `POST /report/{app}.{name}/export?format=csv\|json` body `{"params"?: {..}}` (M9.3) | 200, a file; the report's own access rules (404) and limits; `X-Forgebase-Truncated: true` when cut at the row limit |
 //! | `POST /import/{doctype}?format=csv\|json&mode=insert\|upsert&dry_run=1` body: the file (M9.3) | 200 `{"data": {"dry_run", "mode", "rows", "inserted", "updated", "errors", "error_count"}}`; 422 `import_failed` (the same summary in `details`) when a row fails, 422 `invalid_import` / `import_too_large`, 415 for the wrong `Content-Type`, 413 over `import_body_limit_bytes`; needs `import` and `create` (and `write` for an upsert) |
 //! | `POST /method/{app}.{method}` body: a JSON object, optional (M9.1, ADR 0019) | 200 `{"data": <what the handler returned>}`; an empty body is `{}`, a body that is not a JSON object 400, another content type 415, over the limit 413, query parameters 400 `invalid_query`; **404** for a method that does not exist, is not installed on the site or that the caller may not call (by role; one answer for all three); 400 or 422 `method_error` (the app's message), the document API's own status and code for a document error (403 `permission_denied`, 404, 409, 422, ...), 500 `internal` with no detail; one transaction, rolled back on every error |
+//! | `GET /customize/{doctype}/fields` (M10.1, ADR 0023) | 200 `{"data": [{"doctype", "name", "label", "type", "definition", "enabled", "created_at", "modified_at", "modified_by"}]}`: the site custom fields of the DocType, enabled and disabled; **Administrator role only** (403 `permission_denied`), 404 for an unknown DocType |
+//! | `POST /customize/{doctype}/fields` body: the field as JSON, with the keys of a TOML `[[fields]]` entry (M10.1) | 201 `{"data": field}`; Administrator only; 404 unknown DocType; 422 `validation_failed` (the name must start with `custom_`; no `required`, `read_only` or `table`; not a child DocType; a bad Link target; an unknown key); 409 `conflict` for a name the DocType has already, a disabled custom field included. The column is added in the same transaction, and this server's registry is rebuilt before the answer; other servers follow within `meta_reload_interval` |
+//! | `POST /customize/{doctype}/fields/{name}/disable` and `/enable` (M10.1) | 200 `{"data": field}`; Administrator only; 404 for an unknown DocType or field. Disabling hides the field everywhere (meta, input, filters, export) and keeps its column and data; enabling brings both back |
 //!
 //! Anything else is 404, a wrong method is 405.
 //!
@@ -66,6 +69,7 @@
 //! headers). The Host routing applies to them like to every route.
 
 mod auth;
+mod customize;
 mod desk;
 mod error;
 pub mod json;
@@ -90,7 +94,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use forgebase_core::meta::Registry;
-use forgebase_db::Pool;
+use forgebase_db::{Pool, RegistryHolder};
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
@@ -131,6 +135,11 @@ pub struct AppConfig {
     /// The largest body of an import request in bytes: the import route has its own limit, and
     /// the other routes keep `body_limit_bytes`. Default 16 MiB.
     pub import_body_limit_bytes: usize,
+    /// How often a site checks `fb_meta_version` and rebuilds its registry when a custom field
+    /// was added, disabled or enabled by another process (M10.1, ADR 0023). Default 10 seconds;
+    /// `Duration::ZERO` turns the check off (the registry then changes only through
+    /// `AppState::reload_registry`, which the customize routes call after a change).
+    pub meta_reload_interval: std::time::Duration,
 }
 
 impl Default for AppConfig {
@@ -145,6 +154,7 @@ impl Default for AppConfig {
             import_max_rows: 10_000,
             export_send_timeout: std::time::Duration::from_secs(30),
             import_body_limit_bytes: 16 * 1024 * 1024,
+            meta_reload_interval: std::time::Duration::from_secs(10),
         }
     }
 }
@@ -158,7 +168,9 @@ pub struct AppState {
 
 struct Inner {
     pool: Pool,
-    registry: Arc<Registry>,
+    /// The registry of the site, replaced while the server runs (custom fields, ADR 0023). A
+    /// request takes one snapshot of it ([`AppState::registry`]) and keeps it.
+    holder: Arc<RegistryHolder>,
     config: AppConfig,
     logins: Semaphore,
     /// Runs app methods (M9.1); `None` when the binary has none (every method call is a 404).
@@ -166,9 +178,16 @@ struct Inner {
 }
 
 impl AppState {
-    /// Creates the state. The registry must be the one the database schema was synced with.
+    /// Creates the state. The registry must be the one the database schema was synced with. It
+    /// is also the base the registry is rebuilt from when the site's custom fields change; use
+    /// [`AppState::with_holder`] to start from a registry that has them already.
     pub fn new(pool: Pool, registry: Arc<Registry>, config: AppConfig) -> Self {
-        Self::build(pool, registry, config, None)
+        let holder = Arc::new(RegistryHolder::new(
+            "default",
+            Arc::clone(&registry),
+            registry,
+        ));
+        Self::build(pool, holder, config, None)
     }
 
     /// Like [`AppState::new`], with the dispatcher that runs the app methods of the registry
@@ -179,12 +198,29 @@ impl AppState {
         config: AppConfig,
         methods: Arc<dyn MethodDispatch>,
     ) -> Self {
-        Self::build(pool, registry, config, Some(methods))
+        let holder = Arc::new(RegistryHolder::new(
+            "default",
+            Arc::clone(&registry),
+            registry,
+        ));
+        Self::build(pool, holder, config, Some(methods))
+    }
+
+    /// The state of a site whose registry lives in `holder` (M10.1): the registry of its apps
+    /// plus its custom fields, rebuilt in the background every
+    /// [`AppConfig::meta_reload_interval`] when the metadata version changed.
+    pub fn with_holder(
+        pool: Pool,
+        holder: Arc<RegistryHolder>,
+        config: AppConfig,
+        methods: Option<Arc<dyn MethodDispatch>>,
+    ) -> Self {
+        Self::build(pool, holder, config, methods)
     }
 
     fn build(
         pool: Pool,
-        registry: Arc<Registry>,
+        holder: Arc<RegistryHolder>,
         config: AppConfig,
         methods: Option<Arc<dyn MethodDispatch>>,
     ) -> Self {
@@ -192,15 +228,76 @@ impl AppState {
             config.max_concurrent_logins,
             pool.status().max_size,
         ));
-        Self {
+        let interval = config.meta_reload_interval;
+        let state = Self {
             inner: Arc::new(Inner {
                 pool,
-                registry,
+                holder,
                 config,
                 logins,
                 methods,
             }),
+        };
+        state.spawn_reload(interval);
+        state
+    }
+
+    /// The background version check: one task per site, which ends when the last clone of the
+    /// state is dropped. It runs only inside a Tokio runtime and when `interval` is not zero. A
+    /// failed check (the database is down) is logged and the current registry is kept.
+    fn spawn_reload(&self, interval: std::time::Duration) {
+        if interval.is_zero() {
+            return;
         }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let weak = Arc::downgrade(&self.inner);
+        runtime.spawn(async move {
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                if let Err(e) = inner.holder.poll(&inner.pool).await {
+                    eprintln!(
+                        "warning: site `{}`: cannot check the metadata version, keeping the current registry: {e}",
+                        inner.holder.site()
+                    );
+                }
+            }
+        });
+    }
+
+    /// Rebuilds this site's registry from the database now (after a custom field changed
+    /// through this server), so that the next request sees the change.
+    pub(crate) async fn reload_registry(&self) -> Result<(), ApiError> {
+        self.inner
+            .holder
+            .reload(&self.inner.pool)
+            .await
+            .map(|_| ())
+            .map_err(ApiError::from)
+    }
+
+    /// The site's registry as it is now: **one snapshot**. A request calls this once, at its
+    /// start, and uses the result to the end, so it never sees a half-built registry or two
+    /// different ones (ADR 0023).
+    pub(crate) fn registry(&self) -> Arc<Registry> {
+        self.inner.holder.snapshot()
+    }
+
+    /// The registry of the site's apps without its custom fields, which a change of a custom
+    /// field is validated against.
+    pub(crate) fn base_registry(&self) -> &Arc<Registry> {
+        self.inner.holder.base()
+    }
+
+    /// The site's name, for messages.
+    pub(crate) fn site_name(&self) -> &str {
+        self.inner.holder.site()
     }
 
     /// A pooled database connection (`&mut **client` is the `Client`). A failure is a generic
@@ -214,14 +311,6 @@ impl AppState {
             .get()
             .await
             .map_err(|e| ApiError::internal(&e))
-    }
-
-    pub(crate) fn registry(&self) -> &Registry {
-        &self.inner.registry
-    }
-
-    pub(crate) fn registry_arc(&self) -> &Arc<Registry> {
-        &self.inner.registry
     }
 
     pub(crate) fn pool(&self) -> &Pool {
@@ -417,7 +506,19 @@ fn site_router(state: AppState) -> Router {
                 state.config().import_body_limit_bytes,
             )),
         )
-        .route("/api/v1/method/{name}", post(methods::call));
+        .route("/api/v1/method/{name}", post(methods::call))
+        .route(
+            "/api/v1/customize/{doctype}/fields",
+            get(customize::list).post(customize::add),
+        )
+        .route(
+            "/api/v1/customize/{doctype}/fields/{name}/disable",
+            post(customize::disable),
+        )
+        .route(
+            "/api/v1/customize/{doctype}/fields/{name}/enable",
+            post(customize::enable),
+        );
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {
         router = router

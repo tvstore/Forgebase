@@ -140,6 +140,18 @@ Routes, statuses and the error envelope: [architecture, section 7](architecture.
 - **A site's data wins until the app changes the record.** An unchanged record never touches the document (not even a read); an existing document is adopted, not overwritten; nothing is deleted. A changed record overwrites **only the fields it has**, so a fixture cannot reset a field the app did not ship.
 - **`fb_fixture` is bookkeeping, not authority.** It holds a checksum, an app name and a time per record; deleting a row only makes the next `migrate` check that record again.
 
+## Customization: overlays and site custom fields (M10.1, ADR 0023)
+
+[ADR 0023](../adr/0023-metadata-overlays.md). Customization only **adds** fields, and it changes who may see or write data only through the rules that already exist: a new field is a field of its DocType, so the DocType's `[[permissions]]` apply to it like to any other field (field levels, M10.2, come later).
+
+- **Only an Administrator changes site custom fields.** The routes under `/api/v1/customize` answer `403 permission_denied` to every authenticated user without the Administrator role (before the DocType or the body is looked at), a cookie call needs the CSRF header like any write, and the command line is the trusted local tool (the system context, recorded as `cli`). There is no way for a caller to add a field through the document API.
+- **A field is data, never code.** A custom field is a validated definition (a type and its parameters), turned into a column by the same statements as the schema sync, with every identifier quoted. There are no scripts, no expressions and no property changes; `required` and `read_only` are refused, so a field cannot block the writes of documents that exist or be written by anything but a caller.
+- **One writer at a time.** Adding a field takes the advisory lock of `migrate` in one transaction with the row, the column and the version increment, so it cannot interleave with a `migrate` or another change, and a failure leaves nothing behind. The lock waits at most the `lock_timeout` (5 s).
+- **A bad stored field never takes a site down.** A stored field that no longer validates (for example its Link target left the apps) is skipped with a warning naming the site, the DocType and the field; the site serves the rest. A DocType, Link target or name can never be redirected by a stored row: the field is validated against the registry on every rebuild, and the reserved `custom_` prefix means a site field cannot shadow an app's field.
+- **Disabled means hidden, not deleted.** A disabled field is absent from the effective registry, so it cannot be read, written, filtered, sorted, grouped or exported by anyone, an Administrator included; its column and data stay in the database and are visible to whoever has SQL access to it (the operator).
+- **Sites do not share metadata.** The fields live in the site's own database and the registry of a site is built from that database only; one site's fields are unknown on another (tested with two sites).
+- **A request sees one registry.** A request, job attempt or command takes one snapshot of the site's registry and uses it to the end; a swap during the request changes nothing for it, so a field being disabled cannot make one request apply two different rules.
+
 ## Multi-site isolation (M7.1, Accepted, ADR 0014)
 
 Decision record: [ADR 0014](../adr/0014-multi-site-database-per-site.md). Design and decisions: [architecture, section 9](architecture.md#9-multi-site-accepted-adr-0014). Security properties (M7.1, and M7.2 where marked):

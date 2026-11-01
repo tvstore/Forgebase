@@ -9,6 +9,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Json as AxumJson, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use forgebase_core::meta::Registry;
 use forgebase_core::permission::{Caller, can_run_report};
 use forgebase_core::report::{ColumnKind, ParamKind, ReportColumn, ReportDef, ReportParam};
 use forgebase_core::value::Value;
@@ -71,8 +72,8 @@ pub async fn list(
     let Query(query) = query?;
     params(query, &[])?;
     let caller = authenticated.caller();
-    let mut reports: Vec<&ReportDef> = state
-        .registry()
+    let registry = state.registry();
+    let mut reports: Vec<&ReportDef> = registry
         .reports()
         .filter(|report| can_run_report(&report.roles, &caller))
         .collect();
@@ -102,12 +103,11 @@ pub async fn list(
 /// the caller may not run are not for them. This asks the one evaluator of `forgebase-core`;
 /// `forgebase-db` checks again.
 pub(crate) fn find_report<'a>(
-    state: &'a AppState,
+    registry: &'a Registry,
     name: &str,
     caller: &Caller,
 ) -> Result<&'a ReportDef, ApiError> {
-    state
-        .registry()
+    registry
         .report(name)
         .filter(|report| can_run_report(&report.roles, caller))
         .ok_or_else(|| ApiError::not_found("report not found"))
@@ -158,7 +158,8 @@ pub async fn run(
 ) -> Reply {
     let (Path(name), Query(query)) = (path?, query?);
     let caller = authenticated.caller();
-    let report = find_report(&state, &name, &caller)?;
+    let registry = state.registry();
+    let report = find_report(&registry, &name, &caller)?;
     let query = params(query, &["link_titles"])?;
     let titles = link_titles_flag(&query)?;
     let values = report_params(report, body)?;
@@ -184,14 +185,9 @@ pub async fn run(
     let body = if titles {
         // The connection of this request, as in `with_link_titles`: a second one could never be
         // had when every pool slot is held by a request like this.
-        let link_titles = forgebase_db::report_link_titles(
-            &*client,
-            state.registry(),
-            &caller,
-            report,
-            &result.rows,
-        )
-        .await?;
+        let link_titles =
+            forgebase_db::report_link_titles(&*client, &registry, &caller, report, &result.rows)
+                .await?;
         let mut body = body;
         body["link_titles"] = json!(link_titles);
         body
