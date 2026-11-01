@@ -10,8 +10,8 @@ use std::process::{Command, ExitCode, Output, Stdio};
 
 use forgebase::testing::TestDb;
 use forgebase::{
-    App, DocTypeFile, DocTypeHooks, Document, Forgebase, HookContext, HookError, JobContext,
-    JobError, JobFuture, JobHandler, MigrationFile, Param, Report, Value,
+    App, DocTypeFile, DocTypeHooks, Document, FixtureFile, Forgebase, HookContext, HookError,
+    JobContext, JobError, JobFuture, JobHandler, MigrationFile, Param, Report, Value,
 };
 
 const BINARY_VAR: &str = "FORGEBASE_TEST_BINARY";
@@ -88,6 +88,20 @@ fn crm_with_report(valid: bool) -> App {
     crm().report("totals", report)
 }
 
+const CUSTOMER_FIXTURES: &[FixtureFile] = &[FixtureFile::new(
+    "fixtures/customer.json",
+    r#"{"doctype": "customer", "records": [{"code": "fx-1", "title": "One"}, {"code": "fx-2"}]}"#,
+)];
+/// The hook of `sales` rejects the title `banned`.
+const BANNED_FIXTURES: &[FixtureFile] = &[FixtureFile::new(
+    "fixtures/customer.json",
+    r#"{"doctype": "customer", "records": [{"code": "fx-1"}, {"code": "fx-2", "title": "banned"}]}"#,
+)];
+const UNKNOWN_FIELD_FIXTURES: &[FixtureFile] = &[FixtureFile::new(
+    "fixtures/customer.json",
+    r#"{"doctype": "customer", "records": [{"code": "fx-1", "nope": 1}]}"#,
+)];
+
 fn sales() -> App {
     App::new("sales")
         .depends_on(&["crm"])
@@ -100,6 +114,16 @@ fn main() -> ExitCode {
         // `sales` before `crm`: a startup error.
         Ok("reports_ok") => Forgebase::new().app(crm_with_report(true)).run(),
         Ok("reports_bad") => Forgebase::new().app(crm_with_report(false)).run(),
+        Ok("fixtures") => Forgebase::new()
+            .app(crm().fixtures(CUSTOMER_FIXTURES))
+            .run(),
+        Ok("fixtures_banned") => Forgebase::new()
+            .app(crm().fixtures(BANNED_FIXTURES))
+            .app(sales())
+            .run(),
+        Ok("fixtures_unknown_field") => Forgebase::new()
+            .app(crm().fixtures(UNKNOWN_FIELD_FIXTURES))
+            .run(),
         Ok("broken") => Forgebase::new().app(sales()).app(crm()).run(),
         _ => {
             drive();
@@ -184,7 +208,7 @@ fn drive() {
 
     // A dry run on an empty database lists the app migration, and keeps nothing.
     let out = succeeds(&good.go(&["migrate", "--dry-run"], None));
-    assert!(out.contains("framework migrations: 10 pending"), "{out}");
+    assert!(out.contains("framework migrations: 11 pending"), "{out}");
     assert!(
         out.contains("app migrations: 1 pending\n  crm 0001 seed\n"),
         "{out}"
@@ -300,6 +324,80 @@ fn drive() {
 
     runtime.block_on(db.cleanup());
     reports(&runtime);
+    fixtures(&runtime);
+}
+
+/// Fixtures (M9.4): the line of `migrate` and of a dry run, a failing record, and a startup error.
+fn fixtures(runtime: &tokio::runtime::Runtime) {
+    let db = runtime.block_on(TestDb::new());
+    let ok = Run {
+        mode: "fixtures",
+        url: db.url(),
+    };
+    // A dry run on an empty database does not plan them yet and keeps nothing.
+    let out = succeeds(&ok.go(&["migrate", "--dry-run"], None));
+    assert!(
+        out.contains("fixtures: crm: 2 record(s), not planned yet"),
+        "{out}"
+    );
+    let out = succeeds(&ok.go(&["migrate"], None));
+    assert!(
+        out.contains("fixtures: crm: 2 inserted, 0 updated, 0 kept, 0 unchanged\n"),
+        "{out}"
+    );
+    let rows =
+        runtime.block_on(db.rows("SELECT name, modified_by FROM doc_customer ORDER BY name"));
+    assert_eq!(
+        rows,
+        vec![
+            vec!["fx-1".to_owned(), "fixture:crm".into()],
+            vec!["fx-2".to_owned(), "fixture:crm".into()]
+        ]
+    );
+    let out = succeeds(&ok.go(&["migrate"], None));
+    assert!(
+        out.contains("fixtures: crm: 0 inserted, 0 updated, 0 kept, 2 unchanged\n"),
+        "{out}"
+    );
+    let out = succeeds(&ok.go(&["migrate", "--dry-run"], None));
+    assert!(
+        out.contains("fixtures: crm: would insert 0, update 0, keep 0, 2 unchanged\n")
+            && out.ends_with("dry run: nothing was changed\n"),
+        "{out}"
+    );
+    runtime.block_on(db.cleanup());
+
+    // A record the pipeline refuses (the hook of `sales`): exit code 1, the message names app,
+    // file and record, and nothing of the app's fixtures is kept.
+    let db = runtime.block_on(TestDb::new());
+    let banned = Run {
+        mode: "fixtures_banned",
+        url: db.url(),
+    };
+    let out = banned.go(&["migrate"], None);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.starts_with("error: fixtures of app `crm` were not applied: fixtures/customer.json: record 2 (`fx-2`)")
+            && stderr.contains("a banned customer is not allowed"),
+        "{stderr}"
+    );
+    let rows = runtime.block_on(db.rows("SELECT count(*)::text FROM doc_customer"));
+    assert_eq!(rows, vec![vec!["0".to_owned()]]);
+    runtime.block_on(db.cleanup());
+
+    // A mistake that needs no database is a startup error, for every command.
+    let unknown = Run {
+        mode: "fixtures_unknown_field",
+        url: "postgres://unused:unused@127.0.0.1:1/unused",
+    };
+    let out = unknown.go(&["migrate"], None);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).starts_with("error: invalid app setup:\n  - app `crm`: fixtures/customer.json: record 1 (`fx-1`): `nope` is not a field of `customer`"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 /// The check of the reports' SQL at `migrate` (M8.4): after the migrations, never in a dry run,
@@ -327,7 +425,7 @@ fn reports(runtime: &tokio::runtime::Runtime) {
     // What was applied is reported, and it stays applied.
     let stdout = text(&out.stdout);
     assert!(
-        stdout.contains("framework migrations: 10 applied")
+        stdout.contains("framework migrations: 11 applied")
             && stdout.contains("app migrations: 1 applied\n  crm 0001 seed\n"),
         "{stdout}"
     );

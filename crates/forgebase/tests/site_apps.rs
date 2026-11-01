@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use forgebase::testing::TestDb;
 use forgebase::{
-    App, DocTypeFile, Document, Forgebase, JobContext, JobError, JobFuture, JobHandler, Method,
-    MethodContext, MethodFuture, MethodHandler, MigrationFile, Schedule, Value,
+    App, DocTypeFile, Document, FixtureFile, Forgebase, JobContext, JobError, JobFuture,
+    JobHandler, Method, MethodContext, MethodFuture, MethodHandler, MigrationFile, Schedule, Value,
 };
 use forgebase_db::{connect, quote_ident};
 
@@ -39,6 +39,11 @@ const EXTRA_SEED: MigrationFile = MigrationFile::new(
     "migrations/0001_seed.sql",
     "CREATE TABLE extra_seed (entry text)",
 );
+
+const EXTRA_FIXTURES: &[FixtureFile] = &[FixtureFile::new(
+    "fixtures/extra_item.json",
+    r#"{"doctype": "extra_item", "records": [{"code": "fixture-1"}]}"#,
+)];
 
 struct Noop;
 
@@ -88,6 +93,7 @@ fn extra() -> App {
         .depends_on(&["base"])
         .doctypes(const { &[DocTypeFile::new("doctypes/extra_item.toml", EXTRA_ITEM)] })
         .migrations(&[EXTRA_SEED])
+        .fixtures(EXTRA_FIXTURES)
         .job("stamp", Stamp)
         .job("mark", Noop)
         .schedule("mark", Schedule::every_minutes(60))
@@ -469,6 +475,26 @@ fn migrate_per_site() {
     );
     assert_eq!(table(&world.b, "extra_seed").as_deref(), Some("extra_seed"));
 
+    // Fixtures (M9.4): an app that is not installed on a site gets none there.
+    assert!(!out_a.contains("fixtures:"), "{out_a}");
+    assert!(
+        out_b.contains("fixtures: extra: 1 inserted, 0 updated, 0 kept, 0 unchanged\n"),
+        "{out_b}"
+    );
+    assert_eq!(
+        scalar(&world.b, "SELECT name FROM doc_extra_item").as_deref(),
+        Some("fixture-1")
+    );
+    assert_eq!(table(&world.a, "fb_fixture").as_deref(), Some("fb_fixture"));
+    assert_eq!(
+        scalar(&world.a, "SELECT count(*)::text FROM fb_fixture").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        scalar(&world.b, "SELECT count(*)::text FROM fb_fixture").as_deref(),
+        Some("1")
+    );
+
     assert_eq!(names(&world.a, APPS), ["base"]);
     assert_eq!(names(&world.b, APPS), ["base", "extra"]);
     assert_eq!(names(&world.a, SCHEDULES), with_builtin(vec!["base.tick"]));
@@ -795,7 +821,12 @@ fn worker_per_site() {
         Some("true")
     );
     assert_eq!(
-        scalar(&world.b, "SELECT count(*)::text FROM doc_extra_item").as_deref(),
+        scalar(
+            &world.b,
+            // Not the record the fixture of `extra` made.
+            "SELECT count(*)::text FROM doc_extra_item WHERE name <> 'fixture-1'"
+        )
+        .as_deref(),
         Some("1")
     );
 }
@@ -830,9 +861,10 @@ fn removed_app() {
     assert!(report.contains("extra.mark"), "{report}");
     assert_eq!(names(&world.b, SCHEDULES), with_builtin(vec!["base.tick"]));
     assert_eq!(names(&world.b, APPS), ["base", "extra"]);
+    // `kept` and the record of the app's fixture.
     assert_eq!(
         scalar(&world.b, "SELECT count(*)::text FROM doc_extra_item").as_deref(),
-        Some("1")
+        Some("2")
     );
     assert_eq!(
         scalar(&world.b, "SELECT count(*)::text FROM extra_seed").as_deref(),
