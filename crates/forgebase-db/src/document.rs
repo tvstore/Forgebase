@@ -56,6 +56,16 @@
 //!   update by a user who cannot see a field keeps its value. A DocType without `perm_level`, and
 //!   the system context and the `Administrator` role, are not affected.
 //!
+//! - **User permissions (M10.3, ADR 0025).** A caller can be restricted to some documents of a
+//!   DocType. The scope ([`forgebase_core::permission::row_scope`]) is applied in the same SQL as
+//!   `if_owner`, by the same code ([`read_scope`], `crate::scope`): the own name of a restricted
+//!   DocType, and every top-level Link to a restricted target (empty or allowed). A document
+//!   outside it is *not found* on every path, the locking reads included (not returned, not
+//!   locked). A Link to a target outside the target's scope is [`ValidationError::LinkNotFound`]
+//!   (a kept stored value is still resolved with full access). A caller restricted on a DocType
+//!   cannot create or amend one of it ([`DbError::PermissionDenied`]): the new name could not be
+//!   checked and they could not see the result.
+//!
 //! The [`Caller::System`] context and the `Administrator` role bypass the rules.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,7 +75,7 @@ use forgebase_core::hooks::{DocTypeHooks, EnqueuedJobs, HookContext, HookError, 
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Naming, Registry, WORKFLOW_COLUMN};
 use forgebase_core::permission::{
-    Access, Caller, FieldAccess, Right, evaluate, field_access, readable_doctype,
+    Access, Caller, FieldAccess, Right, evaluate, field_access, readable_doctype, row_scope,
 };
 use forgebase_core::series::SeriesPattern;
 use forgebase_core::value::Value;
@@ -78,6 +88,7 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::field_levels::{check_input, redact, restricted, scrub};
 use crate::ident::quote_ident;
+use crate::scope::ReadScope;
 use crate::value::{SqlParam, SqlValue, cast_type, decode};
 
 /// The standard columns, in the order they are selected (see `plan.rs`: the DDL has the same).
@@ -216,6 +227,7 @@ pub async fn insert(
     let doctype = document_doctype(registry, doctype)?;
     check_actor(caller.name())?;
     access_to(doctype, caller, Right::Create)?;
+    refuse_restricted_create(doctype, caller, Right::Create)?;
     let levels = levels_of(doctype, caller);
     let tx = client.transaction().await?;
     let jobs = EnqueuedJobs::new();
@@ -345,15 +357,15 @@ pub async fn get(
     caller: &Caller,
 ) -> Result<Option<StoredDocument>, DbError> {
     let doctype = document_doctype(registry, doctype)?;
-    let owner = owner_scope(access_to(doctype, caller, Right::Read)?, caller);
+    let scope = read_scope(doctype, caller)?;
     // The fields the caller cannot read are not selected at all (ADR 0024).
     let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
     // Without Table fields the read is one statement, already consistent: no transaction needed.
     if doctype.table_fields().next().is_none() {
-        return get_in(&*client, registry, doctype, name, owner).await;
+        return get_in(&*client, registry, doctype, name, &scope).await;
     }
     let tx = client.transaction().await?;
-    let stored = get_in(&tx, registry, doctype, name, owner).await?;
+    let stored = get_in(&tx, registry, doctype, name, &scope).await?;
     tx.commit().await?;
     Ok(stored)
 }
@@ -363,17 +375,14 @@ async fn get_in(
     registry: &Registry,
     doctype: &DocType,
     name: &str,
-    owner: Option<&str>,
+    scope: &ReadScope<'_>,
 ) -> Result<Option<StoredDocument>, DbError> {
+    let scoped = scope.and_sql(2);
+    let sql = get_sql(doctype, &scoped.sql);
     for _ in 0..READ_ATTEMPTS {
-        let params: Vec<&(dyn ToSql + Sync)> = match &owner {
-            Some(owner) => vec![&name, owner],
-            None => vec![&name],
-        };
-        let Some(row) = client
-            .query_opt(&get_sql(doctype, owner.is_some()), &params)
-            .await?
-        else {
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![&name];
+        params.extend(scoped.params.iter().map(|p| p as &(dyn ToSql + Sync)));
+        let Some(row) = client.query_opt(&sql, &params).await? else {
             return Ok(None);
         };
         let mut stored = decode_row(doctype, &row)?;
@@ -578,7 +587,7 @@ async fn update_in(
             name,
             expected_version,
             caller,
-            read_owner: grant.read_owner,
+            read: grant.read.clone(),
         },
     };
     update_tail(client, &pipeline, &current, doc, &ctx, submitted, None).await
@@ -960,7 +969,7 @@ async fn submit_in(
             name,
             expected_version,
             caller,
-            read_owner: grant.read_owner,
+            read: grant.read.clone(),
         },
     };
     submit_tail(client, &pipeline, &current, doc, &ctx, None).await
@@ -1092,7 +1101,7 @@ async fn cancel_in(
             name,
             expected_version,
             caller,
-            read_owner: grant.read_owner,
+            read: grant.read.clone(),
         },
     };
     cancel_tail(client, &pipeline, &current, doc, &ctx, None).await
@@ -1237,6 +1246,8 @@ async fn amend_in(
     check_actor(caller.name())?;
     require_submittable(doctype, "amend")?;
     let grant = grant(doctype, caller, Right::Amend)?;
+    // The amendment is a new document with a new name: see `refuse_restricted_create`.
+    refuse_restricted_create(doctype, caller, Right::Amend)?;
     let current = lock_current(
         client,
         registry,
@@ -1395,7 +1406,7 @@ async fn delete_in(
             name,
             expected_version,
             caller,
-            read_owner: grant.read_owner,
+            read: grant.read.clone(),
         };
         return Err(stale_or_missing(client, doctype, &target).await?);
     }
@@ -1475,9 +1486,9 @@ pub(crate) fn as_document(stored: &StoredDocument) -> Document {
 /// What a caller may do with one existing document for an operation, decided by the evaluator.
 pub(crate) struct Grant<'a> {
     pub(crate) right: Right,
-    /// With an `if_owner` *read*: the owner of the only documents the caller can see. `None`:
-    /// every document. Applied in the SQL that finds the document.
-    pub(crate) read_owner: Option<&'a str>,
+    /// What the caller can see of the DocType: the owner of an `if_owner` read and the user
+    /// permissions (M10.3). Applied in the SQL that finds the document.
+    pub(crate) read: ReadScope<'a>,
     /// With an `if_owner` right: the owner of the only documents the right applies to.
     pub(crate) right_owner: Option<&'a str>,
 }
@@ -1487,7 +1498,7 @@ pub(crate) struct Target<'a> {
     pub(crate) name: &'a str,
     pub(crate) expected_version: i64,
     pub(crate) caller: &'a Caller,
-    pub(crate) read_owner: Option<&'a str>,
+    pub(crate) read: ReadScope<'a>,
 }
 
 pub(crate) fn permission_denied(doctype: &DocType, right: Right) -> DbError {
@@ -1515,17 +1526,46 @@ pub(crate) fn owner_scope(access: Access, caller: &Caller) -> Option<&str> {
     (access == Access::OwnerOnly).then(|| caller.name())
 }
 
+/// What the caller may see of `doctype`: the owner scope of their read right (`if_owner`) and
+/// the scope of their user permissions, both from the one evaluator of `forgebase-core`. No read
+/// right at all is [`DbError::PermissionDenied`]. Every statement that finds a document for a
+/// caller (get, list, summary, the locking reads, ...) takes its conditions from here.
+pub(crate) fn read_scope<'a>(
+    doctype: &'a DocType,
+    caller: &'a Caller,
+) -> Result<ReadScope<'a>, DbError> {
+    let access = access_to(doctype, caller, Right::Read)?;
+    Ok(ReadScope::new(
+        owner_scope(access, caller),
+        row_scope(doctype, caller),
+    ))
+}
+
+/// A caller restricted to some documents of the DocType (user permissions) cannot create one:
+/// its name is not among the allowed ones, so they could not see the result. Refused with
+/// [`DbError::PermissionDenied`] for `right` (create, or amend, which makes a new document),
+/// before anything is looked up.
+fn refuse_restricted_create(
+    doctype: &DocType,
+    caller: &Caller,
+    right: Right,
+) -> Result<(), DbError> {
+    if row_scope(doctype, caller).names.is_some() {
+        return Err(permission_denied(doctype, right));
+    }
+    Ok(())
+}
+
 /// Checks the caller's name and its right to work on existing documents (`right` and read),
 /// before any document is looked up. Fails with [`DbError::PermissionDenied`] when either is
 /// denied at the DocType level, which says nothing about any document.
-fn grant<'a>(doctype: &DocType, caller: &'a Caller, right: Right) -> Result<Grant<'a>, DbError> {
+fn grant<'a>(doctype: &'a DocType, caller: &'a Caller, right: Right) -> Result<Grant<'a>, DbError> {
     check_actor(caller.name())?;
-    let read =
-        access_to(doctype, caller, Right::Read).map_err(|_| permission_denied(doctype, right))?;
+    let read = read_scope(doctype, caller).map_err(|_| permission_denied(doctype, right))?;
     let needed = access_to(doctype, caller, right)?;
     Ok(Grant {
         right,
-        read_owner: owner_scope(read, caller),
+        read,
         right_owner: owner_scope(needed, caller),
     })
 }
@@ -1533,12 +1573,14 @@ fn grant<'a>(doctype: &DocType, caller: &'a Caller, right: Right) -> Result<Gran
 /// Like [`grant`] for an operation whose right is not known before the document is read (a
 /// transition): only the caller's name and the read access are checked, the right is
 /// [`Right::Read`] and is not limited to own documents.
-pub(crate) fn read_grant<'a>(doctype: &DocType, caller: &'a Caller) -> Result<Grant<'a>, DbError> {
+pub(crate) fn read_grant<'a>(
+    doctype: &'a DocType,
+    caller: &'a Caller,
+) -> Result<Grant<'a>, DbError> {
     check_actor(caller.name())?;
-    let read = access_to(doctype, caller, Right::Read)?;
     Ok(Grant {
         right: Right::Read,
-        read_owner: owner_scope(read, caller),
+        read: read_scope(doctype, caller)?,
         right_owner: None,
     })
 }
@@ -1614,11 +1656,10 @@ pub(crate) async fn lock_current(
     lock: &'static str,
     grant: &Grant<'_>,
 ) -> Result<StoredDocument, DbError> {
-    let sql = format!("{} {lock}", get_sql(doctype, grant.read_owner.is_some()));
-    let params: Vec<&(dyn ToSql + Sync)> = match &grant.read_owner {
-        Some(owner) => vec![&name, owner],
-        None => vec![&name],
-    };
+    let scoped = grant.read.and_sql(2);
+    let sql = format!("{} {lock}", get_sql(doctype, &scoped.sql));
+    let mut params: Vec<&(dyn ToSql + Sync)> = vec![&name];
+    params.extend(scoped.params.iter().map(|p| p as &(dyn ToSql + Sync)));
     let Some(row) = client.query_opt(&sql, &params).await? else {
         return Err(DbError::NotFound {
             doctype: doctype.name.clone(),
@@ -1685,17 +1726,14 @@ async fn stale_or_missing(
     target: &Target<'_>,
 ) -> Result<DbError, DbError> {
     let (name, expected_version) = (target.name, target.expected_version);
-    let mut sql = format!(
-        "SELECT \"version\" FROM {} WHERE \"name\" = $1::text",
-        quote_ident(&table_name(&doctype.name))
+    let scoped = target.read.and_sql(2);
+    let sql = format!(
+        "SELECT \"version\" FROM {} WHERE \"name\" = $1::text{}",
+        quote_ident(&table_name(&doctype.name)),
+        scoped.sql
     );
-    let params: Vec<&(dyn ToSql + Sync)> = match &target.read_owner {
-        Some(owner) => {
-            sql.push_str(" AND \"owner\" = $2::text");
-            vec![&name, owner]
-        }
-        None => vec![&name],
-    };
+    let mut params: Vec<&(dyn ToSql + Sync)> = vec![&name];
+    params.extend(scoped.params.iter().map(|p| p as &(dyn ToSql + Sync)));
     Ok(match client.query_opt(&sql, &params).await? {
         None => DbError::NotFound {
             doctype: doctype.name.clone(),
@@ -1826,26 +1864,32 @@ async fn resolve_links(
             continue;
         }
         let target_type = lookup_doctype(registry, target)?;
-        let mut sql = format!(
-            "SELECT \"id\" FROM {} WHERE \"name\" = $1::text",
-            quote_ident(&table_name(target))
-        );
-        let access = if kept(field, target_name) {
-            Access::All
+        // A kept value is resolved with full access: no read right and no user permission is
+        // asked for what the document already holds (ADR 0011, ADR 0025).
+        let scope = if kept(field, target_name) {
+            Some(ReadScope::default())
         } else {
-            evaluate(target_type, caller, Right::Read)
-        };
-        let found = match access {
-            Access::Denied => None,
-            Access::All => {
-                sql.push_str(" FOR KEY SHARE");
-                client.query_opt(&sql, &[target_name]).await?
+            // The same scope as for reading the target: its `if_owner` and its user permissions.
+            match evaluate(target_type, caller, Right::Read) {
+                Access::Denied => None,
+                access => Some(ReadScope::new(
+                    owner_scope(access, caller),
+                    row_scope(target_type, caller),
+                )),
             }
-            Access::OwnerOnly => {
-                sql.push_str(" AND \"owner\" = $2::text FOR KEY SHARE");
-                client
-                    .query_opt(&sql, &[target_name, &caller.name()])
-                    .await?
+        };
+        let found = match scope {
+            None => None,
+            Some(scope) => {
+                let scoped = scope.and_sql(2);
+                let sql = format!(
+                    "SELECT \"id\" FROM {} WHERE \"name\" = $1::text{} FOR KEY SHARE",
+                    quote_ident(&table_name(target)),
+                    scoped.sql
+                );
+                let mut params: Vec<&(dyn ToSql + Sync)> = vec![target_name];
+                params.extend(scoped.params.iter().map(|p| p as &(dyn ToSql + Sync)));
+                client.query_opt(&sql, &params).await?
             }
         };
         match found {
@@ -2115,18 +2159,14 @@ pub(crate) fn select_list(doctype: &DocType) -> String {
     items.join(", ")
 }
 
-/// The statement for one document by name (`$1`); with `owner_only` it is limited to the
-/// caller's own documents (`$2`), which is how an `if_owner` read is applied.
-fn get_sql(doctype: &DocType, owner_only: bool) -> String {
+/// The statement for one document by name (`$1`); `scope` is the ` AND ...` conditions of the
+/// caller's read scope (`ReadScope::and_sql(2)`: `if_owner` and user permissions), empty for a
+/// caller who reads every document.
+fn get_sql(doctype: &DocType, scope: &str) -> String {
     format!(
-        "SELECT {} FROM {} WHERE \"name\" = $1::text{}",
+        "SELECT {} FROM {} WHERE \"name\" = $1::text{scope}",
         select_list(doctype),
         quote_ident(&table_name(&doctype.name)),
-        if owner_only {
-            " AND \"owner\" = $2::text"
-        } else {
-            ""
-        }
     )
 }
 
@@ -2293,6 +2333,8 @@ pub(crate) fn decode_row(doctype: &DocType, row: &PgRow) -> Result<StoredDocumen
 
 #[cfg(test)]
 mod tests {
+    use forgebase_core::permission::RowScope;
+
     use super::*;
 
     fn customer() -> DocType {
@@ -2357,7 +2399,7 @@ mod tests {
             ),
             "{sql}"
         );
-        assert!(get_sql(&order(), false).contains("AS \"customer\""));
+        assert!(get_sql(&order(), "").contains("AS \"customer\""));
     }
 
     fn line() -> DocType {
@@ -2392,7 +2434,7 @@ mod tests {
             "{insert}"
         );
         assert!(!insert.contains("lines"), "{insert}");
-        assert!(!get_sql(&doctype, false).contains("lines"));
+        assert!(!get_sql(&doctype, "").contains("lines"));
         assert!(!column_list(&doctype).contains("lines"));
         assert!(!select_list(&doctype).contains("lines"));
         assert!(!field_items(&doctype).concat().contains("lines"));
@@ -2425,12 +2467,17 @@ mod tests {
     #[test]
     fn an_owner_scope_is_a_bound_condition_in_the_statement() {
         let doctype = customer();
-        let plain = get_sql(&doctype, false);
+        let plain = get_sql(&doctype, "");
         assert!(
             plain.ends_with("FROM \"doc_customer\" WHERE \"name\" = $1::text"),
             "{plain}"
         );
-        let scoped = get_sql(&doctype, true);
+        let scoped = get_sql(
+            &doctype,
+            &ReadScope::new(Some("ann"), RowScope::default())
+                .and_sql(2)
+                .sql,
+        );
         assert!(
             scoped.ends_with("WHERE \"name\" = $1::text AND \"owner\" = $2::text"),
             "{scoped}"

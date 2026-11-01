@@ -4,17 +4,21 @@
 //! An export runs in one **read-only `REPEATABLE READ` transaction** ([`begin_export`]), so the
 //! count, every page and the child rows of every page see the same data. [`Export::start`]
 //! checks the rights and counts the rows with the same `WHERE` as the list query (including the
-//! `if_owner` scope); a count over the limit is [`DbError::ExportTooLarge`] and nothing is read.
+//! `if_owner` scope and the user permissions of the caller, ADR 0025); a count over the limit is [`DbError::ExportTooLarge`] and nothing is read.
 //! [`Export::next_page`] then fetches [`PAGE_ROWS`] documents at a time through a portal, so the
 //! memory in use does not depend on the size of the result. Formatting the pages (CSV or JSON)
 //! is the job of the caller, `forgebase_http::transfer`.
 //!
 //! **Rights.** The caller needs **read and export**. Each right is decided by the one evaluator
 //! ([`forgebase_core::permission::evaluate`]); if either right comes from an `if_owner` rule,
-//! only the caller's own documents are exported.
+//! only the caller's own documents are exported. The user permissions of the caller (M10.3,
+//! ADR 0025) limit the documents exactly as in a list: a document the caller cannot see is not
+//! exported and not counted.
 
 use forgebase_core::meta::{DocType, Registry};
-use forgebase_core::permission::{Access, Caller, Right, field_access, readable_doctype};
+use forgebase_core::permission::{
+    Access, Caller, Right, field_access, readable_doctype, row_scope,
+};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, IsolationLevel, Portal, Transaction};
 
@@ -23,6 +27,7 @@ use crate::document::{
 };
 use crate::error::DbError;
 use crate::list::{Filter, Sort, build_export};
+use crate::scope::ReadScope;
 use crate::value::SqlValue;
 
 /// How many documents one page of an export has.
@@ -87,10 +92,11 @@ impl Export {
         let export = access_to(doctype, caller, Right::Export)?;
         let owner =
             (read == Access::OwnerOnly || export == Access::OwnerOnly).then(|| caller.name());
+        let scope = ReadScope::new(owner, row_scope(doctype, caller));
         // The columns, the filters, the sort and the child rows follow the fields the caller can
         // read: a hidden field is not exported and is unknown to the query (ADR 0024).
         let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
-        let (rows_sql, count_sql, binds) = build_export(doctype, owner, filters, sort)?;
+        let (rows_sql, count_sql, binds) = build_export(doctype, &scope, filters, sort)?;
         let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
         let params: Vec<&(dyn ToSql + Sync)> =
             params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();

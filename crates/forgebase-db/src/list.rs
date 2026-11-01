@@ -3,8 +3,9 @@
 //! A [`ListQuery`] is a typed tree, not text: fields are looked up in the DocType's metadata (an
 //! unknown field is an error and is never put into SQL), identifiers are quoted, and **every
 //! value is a bound parameter** with an explicit cast taken from the field type. The caller's
-//! read access is part of the same statement (`WHERE "owner" = $1` for an `if_owner` read): rows
-//! the caller cannot read are never fetched, so no filter, sort or page can reveal one.
+//! read access is part of the same statement (`WHERE "owner" = $1` for an `if_owner` read, and the
+//! conditions of the caller's user permissions, M10.3, ADR 0025): rows the caller cannot read are
+//! never fetched, so no filter, sort or page can reveal one.
 //!
 //! # Operators
 //!
@@ -35,15 +36,16 @@
 
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Registry};
-use forgebase_core::permission::{Access, Caller, Right, field_access, readable_doctype};
+use forgebase_core::permission::{Caller, field_access, readable_doctype};
 use forgebase_core::value::Value;
 use time::UtcOffset;
 use tokio_postgres::GenericClient;
 use tokio_postgres::types::ToSql;
 
-use crate::document::{StoredDocument, access_to, decode_row, document_doctype, select_list};
+use crate::document::{StoredDocument, decode_row, document_doctype, read_scope, select_list};
 use crate::error::DbError;
 use crate::ident::quote_ident;
+use crate::scope::ReadScope;
 use crate::value::{SqlValue, cast_type};
 
 /// The number of documents [`list`] returns when [`ListQuery::limit`] is `None`.
@@ -157,10 +159,10 @@ pub async fn list(
     query: &ListQuery,
 ) -> Result<Vec<StoredDocument>, DbError> {
     let doctype = document_doctype(registry, doctype)?;
-    let owner = read_owner(doctype, caller)?;
+    let scope = read_scope(doctype, caller)?;
     // A field the caller cannot read is unknown to the query (ADR 0024).
     let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
-    let (sql, binds) = build(doctype, owner, query)?;
+    let (sql, binds) = build(doctype, &scope, query)?;
     let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
     let params: Vec<&(dyn ToSql + Sync)> =
         params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
@@ -172,25 +174,11 @@ pub async fn list(
         .collect()
 }
 
-/// The read scope of a caller: `Some(name)` limits a statement to the documents that user owns
-/// (`if_owner`), `None` reads every document, and no read right at all is
-/// [`DbError::PermissionDenied`]. [`list`] and the group-by summary both take their scope from
-/// here, so the two can never disagree.
-pub(crate) fn read_owner<'a>(
-    doctype: &DocType,
-    caller: &'a Caller,
-) -> Result<Option<&'a str>, DbError> {
-    Ok(match access_to(doctype, caller, Right::Read)? {
-        Access::OwnerOnly => Some(caller.name()),
-        _ => None,
-    })
-}
-
 /// Checks that `query` can be run on `doctype` (fields, operators, operand kinds, limit and
 /// offset) without running it. Saved views use it, so a view is validated by the very code
 /// that later runs it.
 pub(crate) fn validate(doctype: &DocType, query: &ListQuery) -> Result<(), DbError> {
-    build(doctype, None, query).map(|_| ())
+    build(doctype, &ReadScope::default(), query).map(|_| ())
 }
 
 /// The type of a field the list query can filter or sort by (a column field or a standard
@@ -256,20 +244,19 @@ impl Binds {
     }
 }
 
-/// The `WHERE` conditions of a read: the owner scope first (bound, so it cannot be injected),
-/// then one per filter. The list and the group-by summary build theirs here.
+/// The `WHERE` conditions of a read: the read scope first (the owner and the user permissions,
+/// all bound, so nothing can be injected), then one per filter. The list, the group-by summary
+/// and the export build theirs here.
 pub(crate) fn conditions(
     doctype: &DocType,
-    owner: Option<&str>,
+    scope: &ReadScope<'_>,
     filters: &[Filter],
     binds: &mut Binds,
 ) -> Result<Vec<String>, DbError> {
     let table = quote_ident(&table_name(&doctype.name));
-    let mut conditions = Vec::new();
-    if let Some(owner) = owner {
-        let placeholder = binds.add(Value::Text(owner.to_owned()), "text");
-        conditions.push(format!("{table}.\"owner\" = {placeholder}"));
-    }
+    let mut conditions = scope.conditions(Some(&table), &mut |value, cast| {
+        binds.add(Value::Text(value), cast)
+    });
     for filter in filters {
         let col = column(doctype, &filter.field)?;
         conditions.push(condition(binds, &filter.field, &col, &filter.op)?);
@@ -277,10 +264,10 @@ pub(crate) fn conditions(
     Ok(conditions)
 }
 
-/// Builds the statement and its bound values. `owner` limits it to one owner's documents.
+/// Builds the statement and its bound values. `scope` limits it to what the caller may read.
 fn build(
     doctype: &DocType,
-    owner: Option<&str>,
+    scope: &ReadScope<'_>,
     query: &ListQuery,
 ) -> Result<(String, Vec<Value>), DbError> {
     let limit = match query.limit {
@@ -298,7 +285,7 @@ fn build(
 
     let table = quote_ident(&table_name(&doctype.name));
     let mut binds = Binds::default();
-    let conditions = conditions(doctype, owner, &query.filters, &mut binds)?;
+    let conditions = conditions(doctype, scope, &query.filters, &mut binds)?;
 
     let order = order_keys(doctype, &query.sort)?;
 
@@ -344,13 +331,13 @@ fn order_keys(doctype: &DocType, sorts: &[Sort]) -> Result<Vec<String>, DbError>
 /// which share one list of bound values. Built from the same conditions and sort as [`list`].
 pub(crate) fn build_export(
     doctype: &DocType,
-    owner: Option<&str>,
+    scope: &ReadScope<'_>,
     filters: &[Filter],
     sort: &[Sort],
 ) -> Result<(String, String, Vec<Value>), DbError> {
     let table = quote_ident(&table_name(&doctype.name));
     let mut binds = Binds::default();
-    let conditions = conditions(doctype, owner, filters, &mut binds)?;
+    let conditions = conditions(doctype, scope, filters, &mut binds)?;
     let order = order_keys(doctype, sort)?;
     let filter = if conditions.is_empty() {
         String::new()
@@ -514,6 +501,8 @@ fn check_operand(field: &str, ft: &FieldType, value: &Value) -> Result<(), DbErr
 
 #[cfg(test)]
 mod tests {
+    use forgebase_core::permission::{Access, Right, RowScope};
+
     use super::*;
     use forgebase_core::permission::evaluate;
 
@@ -541,7 +530,7 @@ mod tests {
     }
 
     fn err(q: &ListQuery) -> String {
-        match build(&doctype(), None, q) {
+        match build(&doctype(), &ReadScope::default(), q) {
             Err(DbError::InvalidQuery(message)) => message,
             other => panic!("expected InvalidQuery, got {other:?}"),
         }
@@ -549,7 +538,7 @@ mod tests {
 
     #[test]
     fn the_default_statement_orders_by_name_and_pages() {
-        let (sql, binds) = build(&doctype(), None, &ListQuery::default()).unwrap();
+        let (sql, binds) = build(&doctype(), &ReadScope::default(), &ListQuery::default()).unwrap();
         assert!(
             sql.starts_with("SELECT \"id\", \"name\", \"owner\""),
             "{sql}"
@@ -566,7 +555,12 @@ mod tests {
     #[test]
     fn an_owner_scope_comes_first_and_is_bound() {
         let q = query(vec![Filter::new("qty", FilterOp::Gt(Value::Int(5)))]);
-        let (sql, binds) = build(&doctype(), Some("ann'; DROP TABLE x; --"), &q).unwrap();
+        let (sql, binds) = build(
+            &doctype(),
+            &ReadScope::new(Some("ann'; DROP TABLE x; --"), RowScope::default()),
+            &q,
+        )
+        .unwrap();
         assert!(
             sql.contains(
                 "WHERE \"doc_order\".\"owner\" = $1::text AND \"doc_order\".\"qty\" > $2::bigint ORDER BY"
@@ -592,7 +586,7 @@ mod tests {
             Filter::new("version", FilterOp::IsNull(false)),
             Filter::new("docstatus", FilterOp::Eq(Value::Int(1))),
         ]);
-        let (sql, binds) = build(&doctype(), None, &q).unwrap();
+        let (sql, binds) = build(&doctype(), &ReadScope::default(), &q).unwrap();
         let t = "\"doc_order\"";
         let expected = format!(
             "WHERE {t}.\"title\" = $1::varchar AND {t}.\"title\" <> $2::varchar \
@@ -612,7 +606,7 @@ mod tests {
             Filter::new("customer", FilterOp::In(vec![text("a"), text("b")])),
             Filter::new("customer", FilterOp::IsNull(true)),
         ]);
-        let (sql, _) = build(&doctype(), None, &q).unwrap();
+        let (sql, _) = build(&doctype(), &ReadScope::default(), &q).unwrap();
         let c = "\"doc_order\".\"customer\"";
         let sub = "(SELECT t.\"id\" FROM \"doc_customer\" t WHERE t.\"name\"";
         assert!(sql.contains(&format!("{c} IN {sub} = $1::text)")), "{sql}");
@@ -637,7 +631,7 @@ mod tests {
             ],
             ..ListQuery::default()
         };
-        let (sql, _) = build(&doctype(), None, &q).unwrap();
+        let (sql, _) = build(&doctype(), &ReadScope::default(), &q).unwrap();
         assert!(
             sql.contains(
                 "ORDER BY \"doc_order\".\"qty\" DESC, \
@@ -679,10 +673,10 @@ mod tests {
         let plain = DocType::from_toml_str("name = \"p\"\nlabel = \"P\"\n").unwrap();
         let q = query(vec![Filter::new("docstatus", FilterOp::IsNull(true))]);
         assert!(matches!(
-            build(&plain, None, &q),
+            build(&plain, &ReadScope::default(), &q),
             Err(DbError::InvalidQuery(_))
         ));
-        assert!(build(&doctype(), None, &q).is_ok());
+        assert!(build(&doctype(), &ReadScope::default(), &q).is_ok());
     }
 
     #[test]
@@ -757,7 +751,7 @@ mod tests {
         assert!(
             build(
                 &doctype(),
-                None,
+                &ReadScope::default(),
                 &query(vec![Filter::new("qty", FilterOp::In(max))])
             )
             .is_ok()
@@ -775,9 +769,15 @@ mod tests {
         assert!(err(&with(Some(501), None)).contains("maximum of 500"));
         assert!(err(&with(Some(u32::MAX), None)).contains("maximum"));
         assert!(err(&with(None, Some(u64::MAX))).contains("offset"));
-        let (_, binds) = build(&doctype(), None, &with(Some(500), Some(7))).unwrap();
+        let (_, binds) =
+            build(&doctype(), &ReadScope::default(), &with(Some(500), Some(7))).unwrap();
         assert_eq!(binds, vec![Value::Int(500), Value::Int(7)]);
-        let (_, binds) = build(&doctype(), None, &with(Some(1), Some(i64::MAX as u64))).unwrap();
+        let (_, binds) = build(
+            &doctype(),
+            &ReadScope::default(),
+            &with(Some(1), Some(i64::MAX as u64)),
+        )
+        .unwrap();
         assert_eq!(binds[1], Value::Int(i64::MAX));
     }
 

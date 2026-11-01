@@ -196,7 +196,7 @@ async fn transition_in(
             name,
             expected_version,
             caller,
-            read_owner: grant.read_owner,
+            read: grant.read.clone(),
         },
     };
     let state = Some(transition.to.as_str());

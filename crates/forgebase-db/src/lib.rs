@@ -85,6 +85,7 @@ mod plan;
 mod registry_holder;
 mod reports;
 pub mod schedule;
+mod scope;
 mod summary;
 mod sync;
 pub mod tls;

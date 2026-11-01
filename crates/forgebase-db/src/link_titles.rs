@@ -6,7 +6,8 @@
 //! is limited to the caller's own documents (`"owner" = $2`), so a title never reveals a document
 //! the caller could not fetch. Nothing is decided here: the access comes from
 //! the one evaluator in `forgebase-core`, and the owner
-//! condition is the one `list` and `get` use.
+//! condition and the user permissions (M10.3, ADR 0025: a document outside the caller's scope has
+//! no title) are the ones `list` and `get` use.
 //!
 //! One statement per target DocType (never one per row):
 //! `SELECT name, <title> FROM <target> WHERE name = ANY($1)`.
@@ -15,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Registry};
-use forgebase_core::permission::{Access, Caller, Right, evaluate};
+use forgebase_core::permission::{Access, Caller, Right, evaluate, row_scope};
 use forgebase_core::value::Value;
 use tokio_postgres::GenericClient;
 use tokio_postgres::types::ToSql;
@@ -24,6 +25,7 @@ use crate::document::{StoredDocument, document_doctype, owner_scope};
 use crate::error::DbError;
 use crate::ident::quote_ident;
 use crate::list::MAX_LIMIT;
+use crate::scope::ReadScope;
 
 /// Titles by target DocType and then by document name: `{"customer": {"CUST-0001": "Ada"}}`.
 /// A target the caller cannot read, a target without a `title_field`, and a document without a
@@ -120,9 +122,10 @@ pub(crate) async fn resolve(
         if access == Access::Denied {
             continue;
         }
-        let owner = owner_scope(access, caller);
+        let scope = ReadScope::new(owner_scope(access, caller), row_scope(target_type, caller));
         let names: Vec<String> = names.into_iter().collect();
-        let found = query_titles(client, registry, target_type, title_field, &names, owner).await?;
+        let found =
+            query_titles(client, registry, target_type, title_field, &names, &scope).await?;
         if !found.is_empty() {
             titles.insert(target, found);
         }
@@ -136,7 +139,7 @@ async fn query_titles(
     target: &DocType,
     title_field: &str,
     names: &[String],
-    owner: Option<&str>,
+    scope: &ReadScope<'_>,
 ) -> Result<BTreeMap<String, String>, DbError> {
     let table = quote_ident(&table_name(&target.name));
     let column = quote_ident(title_field);
@@ -158,10 +161,9 @@ async fn query_titles(
         "SELECT {table}.\"name\", {title} FROM {table} WHERE {table}.\"name\" = ANY($1::text[])"
     );
     let mut params: Vec<&(dyn ToSql + Sync)> = vec![&names];
-    if let Some(owner) = &owner {
-        sql.push_str(&format!(" AND {table}.\"owner\" = $2::text"));
-        params.push(owner);
-    }
+    let scoped = scope.and_sql_for(&table, 2);
+    sql.push_str(&scoped.sql);
+    params.extend(scoped.params.iter().map(|p| p as &(dyn ToSql + Sync)));
     let mut found = BTreeMap::new();
     for row in client.query(&sql, &params).await? {
         let name: String = row.try_get(0)?;
