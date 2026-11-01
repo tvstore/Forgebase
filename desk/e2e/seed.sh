@@ -21,6 +21,15 @@
 #   - a separate DocType `purchase_request` with a workflow (M8.2), so that the sales order flow keeps its plain
 #     Submit: Draft -> Pending Approval (Sales Clerk or Sales Manager), Pending Approval -> Approved (Sales Manager,
 #     submits), Pending Approval -> Draft "Reject" (Sales Manager), Approved -> Cancelled (Sales Manager, cancels).
+# M10.4 (desk/e2e/restrict.spec.ts) adds, with the stock commands of the same binary:
+#   - e2e_sales, role "Sales User" with no restriction (it must not see level 1, `credit_limit`);
+#   - e2e_retail, role "Sales User", user permission customer_group = Retail; e2e_retail_manager, role "Sales Manager", the
+#     same restriction (a manager who may create groups, until restricted);
+#   - e2e_auditor, role "Credit Auditor" (e2e-only, written below): may read and write customers at level 0 but only read
+#     level 1 (`credit_limit`), so the field is read-only for it;
+#   - the customer groups Retail and Wholesale, and the customers "Rita Retail" (Retail, credit limit 500.00) and
+#     "Walt Wholesale" (Wholesale, credit limit 9000.00), next to Ada, who has no group (credit limit 1250.50);
+#   - a site custom field `custom_region` (data) on customer, added with `customize field add`.
 # Passwords come from E2E_PASSWORD (default below): a throw-away password of a throw-away database.
 # Start the server with:  target/debug/examples/e2e_app serve --doctypes "$E2E_DIR/doctypes"
 set -euo pipefail
@@ -58,6 +67,17 @@ cat >> "$DOCTYPES/customer.toml" <<'TOML'
 # e2e only: needed to read the Link target of a sales order.
 [[permissions]]
 role = "Sales Clerk"
+read = true
+
+# e2e only (M10.4): reads and writes customers, but reads level 1 (`credit_limit`) only: the field is read-only for it.
+[[permissions]]
+role = "Credit Auditor"
+read = true
+write = true
+
+[[permissions]]
+role = "Credit Auditor"
+level = 1
 read = true
 TOML
 
@@ -150,6 +170,24 @@ TOML
 printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_manager --role "Sales Manager" > /dev/null
 printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_clerk --role "Sales Clerk" > /dev/null
 printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_admin --role "Administrator" > /dev/null
+# M10.4: the customer groups (the sales app's migration is not part of this binary), customers with a credit
+# limit (level 1), restricted users and a site custom field.
+for group in Retail Wholesale; do
+  "$BIN" doc insert customer_group --doctypes "$DOCTYPES" --data "{\"title\":\"$group\"}" > /dev/null
+done
 "$BIN" doc insert customer --doctypes "$DOCTYPES" \
-  --data '{"email":"ada@example.com","full_name":"Ada Lovelace"}' > /dev/null
-echo "seeded: users e2e_manager, e2e_clerk and e2e_admin, customer ada@example.com, DocTypes in $DOCTYPES"
+  --data '{"email":"ada@example.com","full_name":"Ada Lovelace","credit_limit":"1250.50"}' > /dev/null
+"$BIN" doc insert customer --doctypes "$DOCTYPES" \
+  --data '{"email":"rita@example.com","full_name":"Rita Retail","customer_group":"Retail","credit_limit":"500.00"}' > /dev/null
+"$BIN" doc insert customer --doctypes "$DOCTYPES" \
+  --data '{"email":"walt@example.com","full_name":"Walt Wholesale","customer_group":"Wholesale","credit_limit":"9000.00"}' > /dev/null
+printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_auditor --role "Credit Auditor" > /dev/null
+printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_sales --role "Sales User" > /dev/null
+printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_retail --role "Sales User" > /dev/null
+printf '%s\n' "$PASSWORD" | "$BIN" user create e2e_retail_manager --role "Sales Manager" > /dev/null
+for user in e2e_retail e2e_retail_manager; do
+  "$BIN" user permission add --user "$user" --doctype customer_group --value Retail --doctypes "$DOCTYPES" > /dev/null
+done
+printf 'name = "custom_region"\nlabel = "Region"\ntype = "data"\n' \
+  | "$BIN" customize field add --doctype customer --field - --doctypes "$DOCTYPES" > /dev/null
+echo "seeded: users e2e_manager, e2e_clerk, e2e_admin, e2e_auditor, e2e_sales, e2e_retail and e2e_retail_manager, customers ada@example.com, rita@example.com and walt@example.com, DocTypes in $DOCTYPES"
