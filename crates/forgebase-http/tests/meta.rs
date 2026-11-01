@@ -487,11 +487,12 @@ async fn rights_of_a_restricted_user_say_none_for_create_and_amend() {
         .admin_insert(&root, "bill", json!({"title": "b1"}))
         .await;
     env.user("limited", &["Biller"]).await;
-    env.exec(&format!(
-        "INSERT INTO fb_user_permission (user_id, doctype, value) \
+    env.db
+        .exec(&format!(
+            "INSERT INTO fb_user_permission (user_id, doctype, value) \
          SELECT id, 'bill', '{name}' FROM fb_user WHERE username = 'limited'"
-    ))
-    .await;
+        ))
+        .await;
     let rights = |data: &Json, doctype: &str| entry(data, doctype)["rights"].clone();
 
     let limited = env.login("limited").await;
@@ -516,11 +517,12 @@ async fn rights_of_a_restricted_user_say_none_for_create_and_amend() {
     let data = env.send(get("/api/v1/meta").session(&biller)).await.data();
     assert_eq!(rights(&data, "bill")["create"], "all");
     assert_eq!(rights(&data, "bill")["amend"], "all");
-    env.exec(
-        "INSERT INTO fb_user_permission (user_id, doctype, value) \
+    env.db
+        .exec(
+            "INSERT INTO fb_user_permission (user_id, doctype, value) \
          SELECT id, 'bill', 'x' FROM fb_user WHERE username = 'root'",
-    )
-    .await;
+        )
+        .await;
     let root = env.login("root").await;
     let data = env.send(get("/api/v1/meta").session(&root)).await.data();
     assert_eq!(rights(&data, "bill")["create"], "all");
