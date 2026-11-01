@@ -225,9 +225,32 @@ Run `cargo test` in both crates (`crm` still passes on its own). The rules of th
 
 - `depends_on` names apps that must be registered **earlier**. Nothing is sorted; a wrong order is an error.
 - An app may link to, and register hooks for, DocTypes of **itself and its dependencies** only.
-- An app **cannot change another app's DocType** (adding a field to `crm_note` from `tasks`, for example). Extend by hooks and by DocTypes of your own; custom fields on another app's DocType are planned for a later milestone.
+- An app **cannot redefine another app's DocType**, but it can **add fields** to it with an overlay (the next subsection). Everything else is extended by hooks and by DocTypes of your own.
 - Hooks of one DocType run in app order, then in registration order: the hook of `tasks` runs after the hooks of `crm`, and can reject what `crm` accepted.
 - Every DocType reports its owner in the metadata API (`"app"`).
+
+### Add a field to another app's DocType (overlays)
+
+`tasks` depends on `crm`, so it may add fields to `crm_note` without changing the DocType or the `crm` crate ([ADR 0023](../adr/0023-metadata-overlays.md)). An overlay file holds only `[[fields]]` entries, written exactly like those of a DocType file, with every property a field has except the type `table`:
+
+```toml
+# overlays/crm_note.toml
+[[fields]]
+name = "priority"
+type = "select"
+options = ["low", "normal", "high"]
+```
+
+```rust
+.depends_on(&["crm"])
+.extend_doctype("crm_note", forgebase::overlays!["overlays/crm_note.toml"])
+```
+
+`overlays!` embeds files like `doctypes!`, relative to the crate's root. The fields are appended after the fields of `crm_note` (apps in order, files in order), `migrate` adds the column, the hooks of every app see the field, and the `[[permissions]]` of `crm_note` apply to it. The DocType is still owned by `crm` (`"app": "crm"` in the metadata API).
+
+Startup errors, each naming the app and the file: an unknown target; a target that none of your dependencies owns (your **own** DocTypes too: put the field in the DocType's file); a child DocType; a `table` field; a field name that the DocType or another overlay already has (the message names both apps); and a name that starts with `custom_`, a prefix reserved for [site custom fields](cli.md#customize-field-commands-m101) (an app's own DocType fields may not start with it either).
+
+Two things are yours to watch: a `required` overlay field on a DocType that already has documents makes the next update of each of them fail until the field is filled in, and a `unique` field creates a unique index over the existing rows (they hold NULL for it, and NULLs never collide). The overlay of the example is `examples/sales_extension/overlays/customer.toml` (`loyalty_tier`).
 
 ## 6. Upgrade with migrations
 
