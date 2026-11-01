@@ -153,7 +153,7 @@ async fn migrate_site(
     let ctx = site
         .context(Arc::new(composed.registry.clone()), None)
         .await?;
-    let report = composed.migrate(&ctx.pool, options).await?;
+    let mut report = composed.migrate(&ctx.pool, options).await?;
     let client = ctx.pool.get().await.map_err(DbError::from)?;
     for name in forgebase_db::recorded_apps(&client).await? {
         if !composed.has_app(&name) {
@@ -174,6 +174,12 @@ async fn migrate_site(
         );
     }
     let mut text = migrate_report(&report, options.dry_run, composed.app_count());
+    // What was applied is reported first (the migrations are committed), then the fixtures of an
+    // app that were refused, which were rolled back.
+    if let Some(error) = report.fixtures_failure.take() {
+        write_stdout(&text)?;
+        return Err(error.into());
+    }
     // The reports read the tables the migrations create, so they are checked after them, and
     // never in a dry run (nothing was applied, so the tables may not be there).
     let reports = composed.report_count();

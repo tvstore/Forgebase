@@ -449,7 +449,7 @@ Owner decision 9 of the M9 plan, 2026-10-30 (*"setuju semua rencana mu"*; [ADR 0
 
 ### 16. Fixtures (M9.4): no new package
 
-Owner decision 10 of the M9 plan, 2026-10-30 ([ADR 0022](../adr/0022-fixtures.md)). **No dependency is added and the lockfile does not change.** The checksum of a fixture record is SHA-256 of its canonical JSON (the compact form with sorted keys), computed with `sha2`, which `forgebase` has depended on directly since M9.2 (the webhook signature); the JSON is read with `serde_json`, already a dependency of every crate. The canonical form relies on `serde_json` keeping objects in a sorted map, which holds while its `preserve_order` feature is off (it is, see open question 11, and a unit test fails if that changes). `forgebase-db` does not need `sha2`: it gets the checksum as text.
+Owner decision 10 of the M9 plan, 2026-10-30 ([ADR 0022](../adr/0022-fixtures.md)). **No dependency is added and the lockfile does not change.** The checksum of a fixture record is SHA-256 of its canonical JSON (the compact form with sorted keys), computed with `sha2`, which `forgebase` has depended on directly since M9.2 (the webhook signature); the JSON is read with `serde_json`, already a dependency of every crate. The canonical form is written by a small function in `forgebase` (sorted keys, one form for numbers), not by `serde_json`'s serializer, so it does not depend on `serde_json` features such as `preserve_order` or `arbitrary_precision` that another crate of an app may enable (open question 11). `forgebase-db` does not need `sha2`: it gets the checksum as text.
 
 ## Recommended baseline
 

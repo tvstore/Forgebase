@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use forgebase_core::document::Document;
-use forgebase_core::meta::{DocType, Naming, Registry};
+use forgebase_core::meta::{DocType, FieldType, Naming, Registry};
 use forgebase_db::FixtureRecord;
 use forgebase_http::json::input_from_json;
 use serde_json::Value as Json;
@@ -45,17 +45,76 @@ impl OwnedRecord {
     }
 }
 
-/// The checksum of a record: SHA-256, as lower-case hex, of its canonical JSON, which is the
-/// compact form with the keys of every object sorted. Whitespace and the order of keys in the
-/// file do not change it; a changed value does. (`serde_json` keeps objects in a sorted map as
-/// long as its `preserve_order` feature is off; a unit test fails if that ever changes.)
+/// The checksum of a record: SHA-256, as lower-case hex, of its canonical JSON ([`canonical`]).
+/// Whitespace and the order of keys in the file do not change it; a changed value does.
 pub(crate) fn checksum(record: &Json) -> String {
-    let canonical = serde_json::to_string(record).expect("a JSON value can always be written");
     let mut text = String::with_capacity(64);
-    for byte in Sha256::digest(canonical.as_bytes()) {
+    for byte in Sha256::digest(canonical(record).as_bytes()) {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+/// The canonical JSON of a value, written here and not by `serde_json`'s own serializer, so that
+/// it does not depend on which features of `serde_json` the app's dependency graph enables
+/// (`preserve_order` would change the order of keys, `arbitrary_precision` the form of numbers).
+/// Stored checksums must never change for that reason: the next `migrate` would update every
+/// record and overwrite the site's edits.
+///
+/// The form: compact (no white space); object keys sorted by their bytes; strings escaped as
+/// `serde_json` does; an integer that fits `i64` or `u64` as its decimal digits; any other number
+/// as the shortest `f64` text (`serde_json`'s form for a float). It is the same text as
+/// `serde_json::to_string` gives with the default features, so checksums computed before this
+/// writer existed are unchanged.
+pub(crate) fn canonical(value: &Json) -> String {
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &Json, out: &mut String) {
+    match value {
+        Json::Null => out.push_str("null"),
+        Json::Bool(true) => out.push_str("true"),
+        Json::Bool(false) => out.push_str("false"),
+        Json::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                let _ = write!(out, "{i}");
+            } else if let Some(u) = n.as_u64() {
+                let _ = write!(out, "{u}");
+            } else {
+                let f = n.as_f64().unwrap_or(f64::NAN);
+                // A float always has a form (JSON has no NaN or infinity); `serde_json` writes a
+                // primitive `f64` the same way in every feature setting.
+                out.push_str(&serde_json::to_string(&f).unwrap_or_else(|_| "null".to_owned()));
+            }
+        }
+        Json::String(text) => out.push_str(&serde_json::to_string(text).expect("a string")),
+        Json::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        Json::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).expect("a string"));
+                out.push(':');
+                write_canonical(&map[key.as_str()], out);
+            }
+            out.push('}');
+        }
+    }
 }
 
 /// Checks the fixtures of `apps` and returns the records of each app, in app order (the result
@@ -143,7 +202,7 @@ pub(crate) fn check(
                     ));
                     continue;
                 }
-                if let Some(text) = field_problems(doctype, object) {
+                if let Some(text) = field_problems(registry, doctype, object) {
                     errors.apps.push(record_problem(Some(&name), text));
                     continue;
                 }
@@ -243,20 +302,51 @@ fn usable_doctype<'r>(
     }
 }
 
-/// What is wrong with the keys of a record: a key that is not a field of the DocType, and a key
-/// the pipeline would refuse from a caller (a `read_only` field). `None` when there is nothing.
-fn field_problems(doctype: &DocType, record: &serde_json::Map<String, Json>) -> Option<String> {
+/// What is wrong with the keys of a record and of the rows of its Table fields: a key that is not
+/// a field of the DocType (of the child DocType, for a row), and a key the pipeline would refuse
+/// from a caller (a `read_only` field). `None` when there is nothing.
+fn field_problems(
+    registry: &Registry,
+    doctype: &DocType,
+    record: &serde_json::Map<String, Json>,
+) -> Option<String> {
     let mut problems = Vec::new();
-    for key in record.keys() {
+    keys_problems(doctype, record, "", &mut problems);
+    for (key, value) in record {
+        let Some(FieldType::Table { target }) = doctype.field(key).map(|f| &f.field_type) else {
+            continue;
+        };
+        let (Some(child), Json::Array(rows)) = (registry.get(target), value) else {
+            continue;
+        };
+        for (i, row) in rows.iter().enumerate() {
+            if let Json::Object(row) = row {
+                let prefix = format!("`{key}` row {}: ", i + 1);
+                keys_problems(child, row, &prefix, &mut problems);
+            }
+        }
+    }
+    (!problems.is_empty()).then(|| problems.join("; "))
+}
+
+fn keys_problems(
+    doctype: &DocType,
+    object: &serde_json::Map<String, Json>,
+    prefix: &str,
+    problems: &mut Vec<String>,
+) {
+    for key in object.keys() {
         match doctype.field(key) {
-            None => problems.push(format!("`{key}` is not a field of `{}`", doctype.name)),
+            None => problems.push(format!(
+                "{prefix}`{key}` is not a field of `{}`",
+                doctype.name
+            )),
             Some(field) if field.read_only => problems.push(format!(
-                "`{key}` is a read_only field: only hooks may write it"
+                "{prefix}`{key}` is a read_only field: only hooks may write it"
             )),
             Some(_) => {}
         }
     }
-    (!problems.is_empty()).then(|| problems.join("; "))
 }
 
 #[cfg(test)]
@@ -301,11 +391,39 @@ mod tests {
     }
 
     #[test]
-    fn the_canonical_form_has_sorted_keys() {
-        // Guards the claim in `checksum`: with serde_json's `preserve_order` on, this fails.
+    fn the_canonical_form_does_not_depend_on_the_order_of_a_map() {
+        // Keys inserted out of order, nested objects and arrays: the map's own order (insertion
+        // order under `preserve_order`, sorted otherwise) must not matter.
+        let mut inner = serde_json::Map::new();
+        inner.insert("z".into(), json("1"));
+        inner.insert("y".into(), json(r#"[{"q": 2, "p": 1}, 3]"#));
+        let mut out_of_order = serde_json::Map::new();
+        out_of_order.insert("b".into(), Json::Object(inner));
+        out_of_order.insert("c".into(), json("[true, null, \"x\\ny\", 1.5, -7]"));
+        out_of_order.insert("a".into(), json("3"));
+        let mut sorted_inner = serde_json::Map::new();
+        sorted_inner.insert("y".into(), json(r#"[{"p": 1, "q": 2}, 3]"#));
+        sorted_inner.insert("z".into(), json("1"));
+        let mut sorted = serde_json::Map::new();
+        sorted.insert("a".into(), json("3"));
+        sorted.insert("b".into(), Json::Object(sorted_inner));
+        sorted.insert("c".into(), json("[true, null, \"x\\ny\", 1.5, -7]"));
+        let (left, right) = (Json::Object(out_of_order), Json::Object(sorted));
+        let expected = r#"{"a":3,"b":{"y":[{"p":1,"q":2},3],"z":1},"c":[true,null,"x\ny",1.5,-7]}"#;
+        assert_eq!(canonical(&left), expected);
+        assert_eq!(canonical(&right), expected);
+        assert_eq!(checksum(&left), checksum(&right));
+        // The same text as serde_json's default form for a sorted value.
+        assert_eq!(serde_json::to_string(&right).unwrap(), expected);
+    }
+
+    #[test]
+    fn numbers_have_one_form() {
         assert_eq!(
-            serde_json::to_string(&json(r#"{"b": {"z": 1, "y": 2}, "a": 3}"#)).unwrap(),
-            r#"{"a":3,"b":{"y":2,"z":1}}"#
+            canonical(&json(
+                "[0, 12, -12, 18446744073709551615, 1.0, 2.5e3, 1e-7]"
+            )),
+            "[0,12,-12,18446744073709551615,1.0,2500.0,1e-7]"
         );
     }
 
@@ -569,6 +687,20 @@ mod tests {
                 r#"{"doctype": "parent", "records": [{"code": "a", "size": "big"}]}"#,
             )],
             &["record 1 (`a`)", "size"],
+        );
+    }
+
+    #[test]
+    fn the_rows_of_a_table_field_are_checked_against_the_child_doctype() {
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "parent", "records": [{"code": "a", "rows": [{"qty": 1}, {"qty": 2, "nope": 3}]}]}"#,
+            )],
+            &[
+                "record 1 (`a`)",
+                "`rows` row 2: `nope` is not a field of `row`",
+            ],
         );
     }
 

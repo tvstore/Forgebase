@@ -176,6 +176,11 @@ pub struct MigrateReport {
     /// False in a dry run while framework migrations are pending: the fixtures are listed, but
     /// only with their number of records, because the plan needs tables those migrations create.
     pub fixtures_planned: bool,
+    /// The fixtures of one app were refused ([`DbError::FixtureFailed`]): that app's fixtures were
+    /// rolled back, the later apps' were not tried, and everything else in this report was
+    /// committed. `migrate` still returns the report, so that the caller can show what was
+    /// applied before it reports the failure. **A caller must check it.**
+    pub fixtures_failure: Option<DbError>,
 }
 
 /// Applies the framework migrations, then syncs the DocType schema. Same as [`migrate_apps`]
@@ -210,7 +215,8 @@ pub async fn migrate(
 ///
 /// After the app migrations, the workflow backfill and the schedules, the fixtures of every app
 /// are applied (ADR 0022), in app order, one transaction per app (a failing record rolls back
-/// that app's fixtures and is [`DbError::FixtureFailed`]).
+/// that app's fixtures and is [`DbError::FixtureFailed`], returned in
+/// [`MigrateReport::fixtures_failure`] together with the report of what was applied).
 ///
 /// With `dry_run` nothing is kept: the report lists the pending framework and app migrations
 /// and the sync plan. While framework migrations are pending the sync plan is `None`. The app
@@ -320,6 +326,7 @@ async fn migrate_locked(
                 })
                 .collect(),
             fixtures_planned: false,
+            fixtures_failure: None,
         });
     }
     let pending = app_migrations::pending(client, apps).await?;
@@ -350,12 +357,20 @@ async fn migrate_locked(
     // Last, after the app migrations (which may create what a record links to) and the backfill:
     // one transaction per app, in app order. A failure leaves everything above applied.
     let mut fixtures = Vec::new();
+    let mut fixtures_failure = None;
     for app in apps.iter().filter(|a| !a.fixtures.is_empty()) {
-        fixtures.push(if options.dry_run {
-            fixtures::plan(client, app).await?
-        } else {
-            fixtures::apply(client, registry, app, options.lock_timeout).await?
-        });
+        if options.dry_run {
+            fixtures.push(fixtures::plan(client, app).await?);
+            continue;
+        }
+        match fixtures::apply(client, registry, app, options.lock_timeout).await {
+            Ok(done) => fixtures.push(done),
+            Err(error @ DbError::FixtureFailed { .. }) => {
+                fixtures_failure = Some(error);
+                break;
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(MigrateReport {
         migrations,
@@ -365,5 +380,6 @@ async fn migrate_locked(
         workflow_warnings,
         fixtures,
         fixtures_planned: true,
+        fixtures_failure,
     })
 }

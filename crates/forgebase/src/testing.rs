@@ -153,6 +153,9 @@ pub struct Migrated {
     /// would do. `TestDb::migrate` applies fixtures like `forgebase migrate` does, so a test
     /// database has the records of the apps' fixture files.
     pub fixtures: Vec<AppliedFixtures>,
+    /// False in a dry run on a database whose framework migrations are pending: the fixtures are
+    /// listed, but their counts are all zero because nothing could be planned yet.
+    pub fixtures_planned: bool,
 }
 
 /// A database created for one test, and dropped by [`TestDb::cleanup`] or when it is dropped
@@ -211,7 +214,9 @@ impl TestDb {
     }
 
     /// Runs what `forgebase migrate` runs for `forgebase`: the framework migrations, the
-    /// DocType schema sync and the app migrations in app order. With `dry_run` nothing is kept.
+    /// DocType schema sync, the app migrations in app order and then the **fixtures** of the apps
+    /// (ADR 0022; [`Migrated::fixtures`] has the counts, and a refused record is an error). With
+    /// `dry_run` nothing is kept.
     pub async fn migrate(
         &self,
         forgebase: &Forgebase,
@@ -226,6 +231,10 @@ impl TestDb {
             .migrate(&self.pool, &options)
             .await
             .map_err(|e| MigrateError::Failed(e.to_string()))?;
+        let mut report = report;
+        if let Some(error) = report.fixtures_failure.take() {
+            return Err(MigrateError::Failed(error.to_string()));
+        }
         // Like `forgebase migrate`: after the migrations, and not in a dry run.
         if !dry_run {
             let problems = composed
@@ -261,6 +270,7 @@ impl TestDb {
                     unchanged: f.unchanged,
                 })
                 .collect(),
+            fixtures_planned: report.fixtures_planned,
         })
     }
 

@@ -382,6 +382,15 @@ fn fixtures(runtime: &tokio::runtime::Runtime) {
             && stderr.contains("a banned customer is not allowed"),
         "{stderr}"
     );
+    // What was applied (and committed) is printed first, as for a failed report check.
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("framework migrations: 11 applied")
+            && stdout.contains("schema sync: applied")
+            && stdout.contains("app migrations: 1 applied\n  crm 0001 seed\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("fixtures: crm"), "{stdout}");
     let rows = runtime.block_on(db.rows("SELECT count(*)::text FROM doc_customer"));
     assert_eq!(rows, vec![vec!["0".to_owned()]]);
     runtime.block_on(db.cleanup());

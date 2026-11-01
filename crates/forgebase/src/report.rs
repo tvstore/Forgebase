@@ -142,6 +142,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         assert_eq!(
             migrate_report(&report, false, 0),
@@ -159,6 +160,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         assert!(!migrate_report(&report, false, 0).contains("schedules"));
         report.schedules = vec!["add crm.digest (daily 06:30)".to_owned()];
@@ -185,6 +187,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         let text = migrate_report(&report, false, 0);
         assert!(
@@ -211,6 +214,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         let text = migrate_report(&report, true, 0);
         assert!(text.contains("11 pending"), "{text}");
@@ -227,6 +231,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         let text = migrate_report(&report, true, 0);
         assert!(text.contains("would apply 2 step(s)"), "{text}");
@@ -251,6 +256,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         // No fixtures: nothing is said.
         assert!(!migrate_report(&report, false, 2).contains("fixtures"));
@@ -291,6 +297,7 @@ mod tests {
             workflow_warnings: vec![],
             fixtures: vec![],
             fixtures_planned: true,
+            fixtures_failure: None,
         };
         // No apps: nothing is said. Apps without pending migrations: up to date.
         assert!(!migrate_report(&report, false, 0).contains("app migrations"));

@@ -162,7 +162,7 @@ pub(crate) async fn apply(
                 report.updated += 1;
             }
             (_, None) => {
-                insert(
+                let inserted = insert(
                     &mut tx,
                     registry,
                     record.doctype,
@@ -171,6 +171,14 @@ pub(crate) async fn apply(
                 )
                 .await
                 .map_err(fail)?;
+                // A hook may change the naming field; the record would then be tracked under a
+                // name its document does not have, and inserted again at every changed version.
+                if inserted.name != record.name {
+                    return Err(failed(format!(
+                        "a hook changed the naming field of fixture record `{}` to `{}`; fixtures need a stable name",
+                        record.name, inserted.name
+                    )));
+                }
                 report.inserted += 1;
             }
         }

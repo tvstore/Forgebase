@@ -160,6 +160,18 @@ impl DocTypeHooks for Rank99 {
     }
 }
 
+/// Upper-cases the naming field: a record would be tracked under a name its document lacks.
+struct Shout;
+
+impl DocTypeHooks for Shout {
+    fn validate(&self, _ctx: &HookContext<'_>, doc: &mut Document) -> Result<(), HookError> {
+        if let Some(Value::Text(title)) = doc.values.get_mut("title") {
+            *title = title.to_uppercase();
+        }
+        Ok(())
+    }
+}
+
 fn base(groups: &'static [FixtureFile], lists: &'static [FixtureFile]) -> App {
     App::new("base")
         .doctypes(
@@ -687,6 +699,29 @@ async fn an_unchanged_fixture_is_not_compared_with_its_document() {
     assert_eq!(
         summary(&again),
         vec![("base", 0, 0, 0, 2), ("ext", 0, 0, 0, 1)]
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_hook_that_changes_the_naming_field_fails_the_app_s_fixtures() {
+    let db = TestDb::new().await;
+    let shouting = Forgebase::new().app(base(GROUP_FILES_V1, &[]).hooks("customer_group", Shout));
+    let error = db.migrate(&shouting, false).await.expect_err("must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("a hook changed the naming field of fixture record `Retail` to `RETAIL`")
+            && message.contains("fixtures need a stable name")
+            && message.contains("record 1 (`Retail`)"),
+        "{message}"
+    );
+    assert_eq!(
+        scalar(&db, "SELECT count(*)::text FROM doc_customer_group").await,
+        "0"
+    );
+    assert_eq!(
+        scalar(&db, "SELECT count(*)::text FROM fb_fixture").await,
+        "0"
     );
     db.cleanup().await;
 }
