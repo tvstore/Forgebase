@@ -1,0 +1,619 @@
+//! Fixtures at startup (M9.4, ADR 0022): reading the files of the apps, checking them and turning
+//! each record into what `forgebase_db` applies at `migrate`.
+//!
+//! A problem is collected with the other app problems ([`StartupError`](crate::StartupError)) and
+//! names the app, the file and the record. Only what can be decided without the database is
+//! checked here: the file, the DocType and the rules for it, the identity of every record and
+//! that every value has the JSON type of its field. Whether a value is valid (required fields,
+//! lengths, options, links) is decided when the record is applied, by the document pipeline,
+//! because a `before_insert` or `validate` hook may fill or change fields.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+
+use forgebase_core::document::Document;
+use forgebase_core::meta::{DocType, Naming, Registry};
+use forgebase_db::FixtureRecord;
+use forgebase_http::json::input_from_json;
+use serde_json::Value as Json;
+use sha2::{Digest, Sha256};
+
+use crate::app::App;
+use crate::compose::StartupError;
+
+/// One fixture record, owned: what `forgebase_db` gets a [`FixtureRecord`] view of.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedRecord {
+    pub(crate) doctype: String,
+    pub(crate) file: String,
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) checksum: String,
+    pub(crate) document: Document,
+}
+
+impl OwnedRecord {
+    pub(crate) fn view(&self) -> FixtureRecord<'_> {
+        FixtureRecord {
+            doctype: &self.doctype,
+            file: &self.file,
+            index: self.index,
+            name: &self.name,
+            checksum: &self.checksum,
+            document: &self.document,
+        }
+    }
+}
+
+/// The checksum of a record: SHA-256, as lower-case hex, of its canonical JSON, which is the
+/// compact form with the keys of every object sorted. Whitespace and the order of keys in the
+/// file do not change it; a changed value does. (`serde_json` keeps objects in a sorted map as
+/// long as its `preserve_order` feature is off; a unit test fails if that ever changes.)
+pub(crate) fn checksum(record: &Json) -> String {
+    let canonical = serde_json::to_string(record).expect("a JSON value can always be written");
+    let mut text = String::with_capacity(64);
+    for byte in Sha256::digest(canonical.as_bytes()) {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+/// Checks the fixtures of `apps` and returns the records of each app, in app order (the result
+/// has one entry per app, empty for an app without fixtures). `reach` has, per app, the apps it
+/// depends on, directly or not.
+pub(crate) fn check(
+    apps: &[App],
+    reach: &BTreeMap<String, BTreeSet<String>>,
+    registry: &Registry,
+    errors: &mut StartupError,
+) -> Vec<Vec<OwnedRecord>> {
+    // (doctype, name) -> the app that has the record.
+    let mut identities: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut result = Vec::new();
+    for app in apps {
+        let mut records = Vec::new();
+        // DocType -> the file of this app that has its records.
+        let mut files_of: BTreeMap<String, &str> = BTreeMap::new();
+        for file in &app.fixtures {
+            let problem = |text: String| format!("app `{}`: {}: {text}", app.name, file.path());
+            let parsed = match parse(file.json()) {
+                Ok(parsed) => parsed,
+                Err(text) => {
+                    errors.apps.push(problem(text));
+                    continue;
+                }
+            };
+            let doctype = match usable_doctype(&app.name, &parsed.doctype, reach, registry) {
+                Ok(doctype) => doctype,
+                Err(text) => {
+                    errors.apps.push(problem(text));
+                    continue;
+                }
+            };
+            if let Some(first) = files_of.insert(doctype.name.clone(), file.path()) {
+                errors.apps.push(problem(format!(
+                    "doctype `{}` already has fixtures in {first}; use one file per DocType",
+                    doctype.name
+                )));
+                continue;
+            }
+            let Naming::Field(naming_field) = &doctype.naming else {
+                unreachable!("usable_doctype only returns DocTypes with field naming");
+            };
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            for (position, json) in parsed.records.into_iter().enumerate() {
+                let index = position + 1;
+                let record_problem = |name: Option<&str>, text: String| match name {
+                    Some(name) => problem(format!("record {index} (`{name}`): {text}")),
+                    None => problem(format!("record {index}: {text}")),
+                };
+                let Json::Object(object) = &json else {
+                    errors
+                        .apps
+                        .push(record_problem(None, "must be a JSON object".to_owned()));
+                    continue;
+                };
+                let name = match object.get(naming_field) {
+                    Some(Json::String(name)) if !name.trim().is_empty() => name.clone(),
+                    _ => {
+                        errors.apps.push(record_problem(
+                            None,
+                            format!(
+                                "must have a non-empty text value for `{naming_field}`, the field that names a `{}` document",
+                                doctype.name
+                            ),
+                        ));
+                        continue;
+                    }
+                };
+                if !seen.insert(name.clone()) {
+                    errors.apps.push(record_problem(
+                        Some(&name),
+                        "appears twice in this app".to_owned(),
+                    ));
+                    continue;
+                }
+                if let Some(other) = identities.get(&(doctype.name.clone(), name.clone())) {
+                    errors.apps.push(record_problem(
+                        Some(&name),
+                        format!(
+                            "`{} {name}` is also a fixture of app `{other}`; a record belongs to one app",
+                            doctype.name
+                        ),
+                    ));
+                    continue;
+                }
+                if let Some(text) = field_problems(doctype, object) {
+                    errors.apps.push(record_problem(Some(&name), text));
+                    continue;
+                }
+                let input = match input_from_json(registry, doctype, json.clone()) {
+                    Ok(input) => input,
+                    Err(e) => {
+                        errors.apps.push(record_problem(Some(&name), e.to_string()));
+                        continue;
+                    }
+                };
+                identities.insert((doctype.name.clone(), name.clone()), app.name.clone());
+                records.push(OwnedRecord {
+                    doctype: doctype.name.clone(),
+                    file: file.path().to_owned(),
+                    index,
+                    name,
+                    checksum: checksum(&json),
+                    document: Document {
+                        name: None,
+                        values: input.values,
+                        tables: input.tables,
+                    },
+                });
+            }
+        }
+        result.push(records);
+    }
+    result
+}
+
+/// The content of a fixture file.
+struct Parsed {
+    doctype: String,
+    records: Vec<Json>,
+}
+
+fn parse(text: &str) -> Result<Parsed, String> {
+    let json: Json = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    let Json::Object(mut object) = json else {
+        return Err("must be a JSON object: {\"doctype\": \"...\", \"records\": [...]}".to_owned());
+    };
+    let doctype = match object.remove("doctype") {
+        Some(Json::String(doctype)) => doctype,
+        _ => return Err("needs a `doctype` (the name of the DocType, as text)".to_owned()),
+    };
+    let records = match object.remove("records") {
+        Some(Json::Array(records)) => records,
+        _ => return Err("needs `records` (a list of objects)".to_owned()),
+    };
+    if let Some(key) = object.keys().next() {
+        return Err(format!(
+            "unknown key `{key}`; a fixture file has only `doctype` and `records`"
+        ));
+    }
+    Ok(Parsed { doctype, records })
+}
+
+/// The DocType a fixture file is for, if the rules allow fixtures for it.
+fn usable_doctype<'r>(
+    app: &str,
+    name: &str,
+    reach: &BTreeMap<String, BTreeSet<String>>,
+    registry: &'r Registry,
+) -> Result<&'r DocType, String> {
+    let Some(doctype) = registry.get(name) else {
+        return Err(format!("doctype `{name}` is not defined by any app"));
+    };
+    let owner = registry.owner(name).unwrap_or_default();
+    if owner != app && !reach.get(app).is_some_and(|uses| uses.contains(owner)) {
+        return Err(format!(
+            "doctype `{name}` belongs to app `{owner}`, which app `{app}` does not depend on"
+        ));
+    }
+    if doctype.is_child {
+        return Err(format!(
+            "doctype `{name}` is a child DocType: its rows belong to a parent document; ship the parent's fixture with the rows in its table field"
+        ));
+    }
+    if doctype.submittable {
+        return Err(format!(
+            "doctype `{name}` is submittable: a fixture update must not fight the document lifecycle (draft, submitted, cancelled)"
+        ));
+    }
+    if doctype.workflow.is_some() {
+        return Err(format!(
+            "doctype `{name}` has a workflow: a fixture update must not fight the workflow, which owns the state of its documents"
+        ));
+    }
+    match &doctype.naming {
+        Naming::Field(_) => Ok(doctype),
+        Naming::Random => Err(format!(
+            "doctype `{name}` uses random naming: a fixture record needs a name that is the same on every site; use field naming (naming = {{ field = \"...\" }})"
+        )),
+        Naming::Series(_) => Err(format!(
+            "doctype `{name}` uses a naming series: a fixture record needs a name that is the same on every site; use field naming (naming = {{ field = \"...\" }})"
+        )),
+    }
+}
+
+/// What is wrong with the keys of a record: a key that is not a field of the DocType, and a key
+/// the pipeline would refuse from a caller (a `read_only` field). `None` when there is nothing.
+fn field_problems(doctype: &DocType, record: &serde_json::Map<String, Json>) -> Option<String> {
+    let mut problems = Vec::new();
+    for key in record.keys() {
+        match doctype.field(key) {
+            None => problems.push(format!("`{key}` is not a field of `{}`", doctype.name)),
+            Some(field) if field.read_only => problems.push(format!(
+                "`{key}` is a read_only field: only hooks may write it"
+            )),
+            Some(_) => {}
+        }
+    }
+    (!problems.is_empty()).then(|| problems.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json(text: &str) -> Json {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn whitespace_and_key_order_do_not_change_the_checksum() {
+        let a = checksum(&json(
+            r#"{"title": "Retail", "rows": [{"b": 1, "a": 2}], "x": null}"#,
+        ));
+        let b = checksum(&json(
+            "{\n  \"x\": null,\n  \"rows\": [ { \"a\": 2,\n \"b\": 1 } ],\n  \"title\": \"Retail\"\n}",
+        ));
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(
+            a.bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn a_changed_value_changes_the_checksum() {
+        let base = checksum(&json(r#"{"title": "Retail", "n": 1}"#));
+        assert_ne!(base, checksum(&json(r#"{"title": "Retail ", "n": 1}"#)));
+        assert_ne!(base, checksum(&json(r#"{"title": "Retail", "n": 2}"#)));
+        assert_ne!(base, checksum(&json(r#"{"title": "Retail"}"#)));
+        assert_ne!(
+            base,
+            checksum(&json(r#"{"title": "Retail", "n": 1, "extra": null}"#))
+        );
+        // Row order is a value: it is the order of the rows.
+        assert_ne!(
+            checksum(&json(r#"{"rows": [{"a": 1}, {"a": 2}]}"#)),
+            checksum(&json(r#"{"rows": [{"a": 2}, {"a": 1}]}"#))
+        );
+    }
+
+    #[test]
+    fn the_canonical_form_has_sorted_keys() {
+        // Guards the claim in `checksum`: with serde_json's `preserve_order` on, this fails.
+        assert_eq!(
+            serde_json::to_string(&json(r#"{"b": {"z": 1, "y": 2}, "a": 3}"#)).unwrap(),
+            r#"{"a":3,"b":{"y":2,"z":1}}"#
+        );
+    }
+
+    #[test]
+    fn the_checksum_is_a_known_sha256() {
+        // sha256 of `{"a":1}`.
+        assert_eq!(
+            checksum(&json(r#"{ "a" : 1 }"#)),
+            "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862"
+        );
+    }
+
+    // ---- the startup checks -------------------------------------------------------------------
+
+    use crate::app::{DocTypeFile, FixtureFile};
+    use crate::compose::compose;
+
+    const ITEM: &str = "name = \"item\"\nlabel = \"Item\"\nnaming = { field = \"code\" }\n\
+        [[fields]]\nname = \"code\"\ntype = \"data\"\nrequired = true\nunique = true\n\
+        [[fields]]\nname = \"title\"\ntype = \"data\"\n\
+        [[fields]]\nname = \"stamp\"\ntype = \"data\"\nread_only = true\n";
+    const RANDOM: &str =
+        "name = \"random\"\nlabel = \"R\"\n[[fields]]\nname = \"title\"\ntype = \"data\"\n";
+    const SERIES: &str = "name = \"series\"\nlabel = \"S\"\nnaming = { series = \"N-.####\" }\n[[fields]]\nname = \"title\"\ntype = \"data\"\n";
+    const LOCKED: &str = "name = \"locked\"\nlabel = \"L\"\nsubmittable = true\n[[fields]]\nname = \"title\"\ntype = \"data\"\n";
+    const FLOW: &str = "name = \"flow\"\nlabel = \"F\"\nnaming = { field = \"code\" }\n\
+        [[fields]]\nname = \"code\"\ntype = \"data\"\nrequired = true\nunique = true\n\
+        [workflow]\n[[workflow.states]]\nname = \"Open\"\ndocstatus = 0\n\
+        [[workflow.states]]\nname = \"Done\"\ndocstatus = 0\n\
+        [[workflow.transitions]]\naction = \"Finish\"\nfrom = \"Open\"\nto = \"Done\"\nroles = [\"Admin\"]\n";
+    const PARENT: &str = "name = \"parent\"\nlabel = \"P\"\nnaming = { field = \"code\" }\n\
+        [[fields]]\nname = \"code\"\ntype = \"data\"\nrequired = true\nunique = true\n\
+        [[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"row\"\n\
+        [[fields]]\nname = \"size\"\ntype = \"int\"\n";
+    const ROW: &str = "name = \"row\"\nlabel = \"Row\"\nis_child = true\n[[fields]]\nname = \"qty\"\ntype = \"int\"\n";
+
+    fn leak<T>(value: T) -> &'static T {
+        Box::leak(Box::new(value))
+    }
+
+    /// The app `core` with every DocType above.
+    fn core() -> App {
+        App::new("core").doctypes(
+            const {
+                &[
+                    DocTypeFile::new("doctypes/item.toml", ITEM),
+                    DocTypeFile::new("doctypes/random.toml", RANDOM),
+                    DocTypeFile::new("doctypes/series.toml", SERIES),
+                    DocTypeFile::new("doctypes/locked.toml", LOCKED),
+                    DocTypeFile::new("doctypes/flow.toml", FLOW),
+                    DocTypeFile::new("doctypes/parent.toml", PARENT),
+                    DocTypeFile::new("doctypes/row.toml", ROW),
+                ]
+            },
+        )
+    }
+
+    /// An app `shop` that depends on `core` and has these fixture files (`path`, `json`).
+    fn shop(files: &[(&'static str, &'static str)]) -> App {
+        let files: &'static [FixtureFile] = leak(
+            files
+                .iter()
+                .map(|(path, json)| FixtureFile::new(path, json))
+                .collect::<Vec<_>>(),
+        );
+        App::new("shop").depends_on(&["core"]).fixtures(files)
+    }
+
+    /// The startup error of `core` and `shop`, as text.
+    fn problems(files: &[(&'static str, &'static str)]) -> String {
+        match compose(&[core(), shop(files)], None) {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[track_caller]
+    fn refused(files: &[(&'static str, &'static str)], expected: &[&str]) {
+        let text = problems(files);
+        assert!(!text.is_empty(), "no problem found for {files:?}");
+        for part in expected {
+            assert!(text.contains(part), "`{part}` is not in:\n{text}");
+        }
+        assert!(
+            text.contains("app `shop`: fixtures/f.json"),
+            "the problem does not name app and file:\n{text}"
+        );
+    }
+
+    #[test]
+    fn valid_fixtures_compose_and_are_in_file_and_record_order() {
+        let composed = compose(
+            &[
+                core(),
+                shop(&[(
+                    "fixtures/f.json",
+                    r#"{"doctype": "item", "records": [{"code": "b"}, {"code": "a", "title": "A"}]}"#,
+                ), (
+                    "fixtures/p.json",
+                    r#"{"doctype": "parent", "records": [{"code": "p", "size": 3, "rows": [{"qty": 1}]}]}"#,
+                )]),
+            ],
+            None,
+        )
+        .expect("composes");
+        let records: Vec<_> = composed
+            .fixture_records("shop")
+            .iter()
+            .map(|r| (r.doctype.as_str(), r.name.as_str(), r.index))
+            .collect();
+        assert_eq!(
+            records,
+            [("item", "b", 1), ("item", "a", 2), ("parent", "p", 1)]
+        );
+        assert!(composed.fixture_records("core").is_empty());
+        assert_eq!(
+            composed.fixture_records("shop")[2].document.tables["rows"].len(),
+            1
+        );
+    }
+
+    #[test]
+    fn bad_json_is_refused() {
+        refused(&[("fixtures/f.json", "{\"doctype\": ")], &["invalid JSON"]);
+        refused(&[("fixtures/f.json", "[]")], &["must be a JSON object"]);
+        refused(
+            &[("fixtures/f.json", r#"{"records": []}"#)],
+            &["needs a `doctype`"],
+        );
+        refused(
+            &[("fixtures/f.json", r#"{"doctype": "item"}"#)],
+            &["needs `records`"],
+        );
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [], "extra": 1}"#,
+            )],
+            &["unknown key `extra`"],
+        );
+    }
+
+    #[test]
+    fn an_unknown_doctype_is_refused() {
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "nothing", "records": []}"#,
+            )],
+            &["doctype `nothing` is not defined by any app"],
+        );
+    }
+
+    #[test]
+    fn a_doctype_of_an_app_that_is_not_a_dependency_is_refused() {
+        let stranger = App::new("stranger")
+            .doctypes(const { &[DocTypeFile::new("doctypes/item2.toml", ITEM_OF_STRANGER)] });
+        let shop = App::new("shop").fixtures(leak(vec![FixtureFile::new(
+            "fixtures/f.json",
+            r#"{"doctype": "item2", "records": [{"code": "a"}]}"#,
+        )]));
+        let text = compose(&[stranger, shop], None)
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            text.contains("app `shop`: fixtures/f.json: doctype `item2` belongs to app `stranger`, which app `shop` does not depend on"),
+            "{text}"
+        );
+    }
+
+    const ITEM_OF_STRANGER: &str = "name = \"item2\"\nlabel = \"I\"\nnaming = { field = \"code\" }\n\
+        [[fields]]\nname = \"code\"\ntype = \"data\"\nrequired = true\nunique = true\n";
+
+    #[test]
+    fn random_and_series_naming_are_refused_with_the_reason() {
+        for name in ["random", "series"] {
+            let json: &'static str = leak(format!(
+                r#"{{"doctype": "{name}", "records": [{{"title": "x"}}]}}"#
+            ));
+            refused(
+                &[("fixtures/f.json", json)],
+                &["the same on every site", "use field naming"],
+            );
+        }
+        refused(
+            &[("fixtures/f.json", r#"{"doctype": "random", "records": []}"#)],
+            &["doctype `random` uses random naming"],
+        );
+        refused(
+            &[("fixtures/f.json", r#"{"doctype": "series", "records": []}"#)],
+            &["doctype `series` uses a naming series"],
+        );
+    }
+
+    #[test]
+    fn submittable_workflow_and_child_doctypes_are_refused() {
+        refused(
+            &[("fixtures/f.json", r#"{"doctype": "locked", "records": []}"#)],
+            &["doctype `locked` is submittable", "document lifecycle"],
+        );
+        refused(
+            &[("fixtures/f.json", r#"{"doctype": "flow", "records": []}"#)],
+            &["doctype `flow` has a workflow", "owns the state"],
+        );
+        refused(
+            &[("fixtures/f.json", r#"{"doctype": "row", "records": []}"#)],
+            &["doctype `row` is a child DocType", "table field"],
+        );
+    }
+
+    #[test]
+    fn a_record_must_be_an_object_with_the_naming_field() {
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [{"code": "a"}, 5]}"#,
+            )],
+            &["record 2: must be a JSON object"],
+        );
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [{"title": "no code"}]}"#,
+            )],
+            &["record 1: must have a non-empty text value for `code`"],
+        );
+        for bad in [
+            r#"{"code": ""}"#,
+            r#"{"code": "  "}"#,
+            r#"{"code": null}"#,
+            r#"{"code": 5}"#,
+        ] {
+            let json: &'static str = leak(format!(r#"{{"doctype": "item", "records": [{bad}]}}"#));
+            refused(
+                &[("fixtures/f.json", json)],
+                &["non-empty text value for `code`"],
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_with_unknown_read_only_or_mistyped_values_is_refused() {
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [{"code": "a", "nope": 1}]}"#,
+            )],
+            &["record 1 (`a`)", "`nope` is not a field of `item`"],
+        );
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [{"code": "a", "stamp": "x"}]}"#,
+            )],
+            &["`stamp` is a read_only field"],
+        );
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "parent", "records": [{"code": "a", "size": "big"}]}"#,
+            )],
+            &["record 1 (`a`)", "size"],
+        );
+    }
+
+    #[test]
+    fn a_duplicate_inside_an_app_is_refused() {
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [{"code": "a"}, {"code": "a", "title": "again"}]}"#,
+            )],
+            &["record 2 (`a`): appears twice in this app"],
+        );
+    }
+
+    #[test]
+    fn two_files_for_one_doctype_are_refused() {
+        let text = problems(&[
+            (
+                "fixtures/first.json",
+                r#"{"doctype": "item", "records": [{"code": "a"}]}"#,
+            ),
+            (
+                "fixtures/f.json",
+                r#"{"doctype": "item", "records": [{"code": "b"}]}"#,
+            ),
+        ]);
+        assert!(
+            text.contains("app `shop`: fixtures/f.json: doctype `item` already has fixtures in fixtures/first.json; use one file per DocType"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_across_apps_names_both_apps() {
+        let record = r#"{"doctype": "item", "records": [{"code": "a"}]}"#;
+        let other = App::new("other")
+            .depends_on(&["core"])
+            .fixtures(leak(vec![FixtureFile::new("fixtures/f.json", record)]));
+        let text = compose(&[core(), shop(&[("fixtures/f.json", record)]), other], None)
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            text.contains("app `other`: fixtures/f.json: record 1 (`a`): `item a` is also a fixture of app `shop`; a record belongs to one app"),
+            "{text}"
+        );
+    }
+}
