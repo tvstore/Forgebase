@@ -356,6 +356,7 @@ pub fn app() -> App {
 - `ctx.enqueue("sales.some_job", payload)` writes a job in the method's transaction: it exists only if the method succeeds, and it runs later as the system context.
 - `Ok(json)` commits and answers `200 {"data": json}`. Every error rolls the whole call back: `MethodError::bad_request(message)` (400) and `MethodError::unprocessable(message)` (422) answer `method_error` with **your message, which the client sees**, so write it for users; a `DocError` from `?` keeps the document API's status and code (`permission_denied` 403, `conflict` 409, `validation_failed` 422, ...); anything else, and a panic, is a generic 500.
 - A person without a role of the method, an unknown method and a method of an app that the site does not install all get the same 404.
+- **A real one:** the `sales` example has `sales.order_summary` ([`examples/sales/src/lib.rs`](../../examples/sales/src/lib.rs)), walked through with curl in [Integrating with other systems](integration.md#1-app-methods-another-system-asks-a-question).
 - **Test it** with `forgebase::testing`: `db.client(&binary).login("ann").await.post("/api/v1/method/sales.orders_of", json!({"customer": "ada@example.com"}))`, and `db.create_token(user)` with `client.with_token(..)` for a token call. The route, its statuses and a curl call are in the [HTTP API guide](http-api.md#app-methods).
 
 ## 9. Fixtures
@@ -407,7 +408,7 @@ So a site's edit survives until you ship a new version of that record. To let si
 
 **Tests.** `TestDb::migrate` applies fixtures too, and `Migrated::fixtures` has the counts of each app, so you can test that your records exist after `db.migrate(&binary, false)`. Each site applies its own fixtures: the fixtures of an app that a site does not install are not applied there.
 
-The design and the alternatives are in [ADR 0022](../adr/0022-fixtures.md).
+The `sales` example ships a fixture next to its SQL migration, so one `migrate` shows an insert and an adoption: see [Integrating with other systems](integration.md#4-fixtures-records-the-app-ships). The design and the alternatives are in [ADR 0022](../adr/0022-fixtures.md).
 
 Running your app for real (several sites, a reverse proxy, workers, upgrades, backups and restores) is in the [operations guide](operations.md).
 

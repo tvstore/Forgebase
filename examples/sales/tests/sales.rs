@@ -239,6 +239,8 @@ fn only_the_approve_action_is_limited() {
 
 struct Env {
     db: TestDb,
+    /// Not logged in.
+    anon: HttpClient,
     user: HttpClient,
     manager: HttpClient,
     outsider: HttpClient,
@@ -256,6 +258,7 @@ async fn env() -> Env {
         user: client.login("ann").await,
         manager: client.login("max").await,
         outsider: client.login("eve").await,
+        anon: client,
         db,
     }
 }
@@ -314,12 +317,14 @@ async fn the_migration_creates_the_groups_once() {
         first.app_migrations[0],
         forgebase::testing::AppliedMigration::new("sales", 1, "default_customer_groups")
     );
+    // The migration made Retail and Wholesale; the fixture (below) added Online.
     let groups = db
         .rows("SELECT name, title, owner, version::text FROM doc_customer_group ORDER BY name COLLATE \"C\"")
         .await;
     assert_eq!(
         groups,
         [
+            ["Online", "Online", "fixture:sales", "1"],
             ["Retail", "Retail", "system", "1"],
             ["Wholesale", "Wholesale", "system", "1"]
         ]
@@ -335,8 +340,104 @@ async fn the_migration_creates_the_groups_once() {
     let count = db
         .rows("SELECT count(*)::text FROM doc_customer_group")
         .await;
+    assert_eq!(count, [["3"]]);
+    db.cleanup().await;
+}
+
+// --- The fixture customer_group.json (M9.4, ADR 0022) -------------------------------------------
+
+#[tokio::test]
+async fn the_fixture_adopts_the_migrated_groups_and_inserts_online() {
+    let binary = Forgebase::new().app(app());
+    let db = TestDb::new().await;
+
+    // The first migrate: the SQL migration made Retail and Wholesale, so the fixture finds them
+    // and keeps them as they are (adoption), and inserts Online.
+    let first = db.migrate(&binary, false).await.expect("migrate");
+    assert_eq!(first.fixtures.len(), 1);
+    let fixtures = &first.fixtures[0];
+    assert_eq!(fixtures.app, "sales");
+    assert_eq!(
+        (
+            fixtures.inserted,
+            fixtures.updated,
+            fixtures.kept,
+            fixtures.unchanged
+        ),
+        (1, 0, 2, 0)
+    );
+    let groups = db
+        .rows("SELECT name FROM doc_customer_group ORDER BY name COLLATE \"C\"")
+        .await;
+    assert_eq!(groups, [["Online"], ["Retail"], ["Wholesale"]]);
+    // Every record is tracked from now on, the adopted ones too.
+    let tracked = db
+        .rows("SELECT doctype, name FROM fb_fixture ORDER BY name COLLATE \"C\"")
+        .await;
+    assert_eq!(
+        tracked,
+        [
+            ["customer_group", "Online"],
+            ["customer_group", "Retail"],
+            ["customer_group", "Wholesale"]
+        ]
+    );
+    // The adopted groups were not written: they are still the migration's rows (owner `system`,
+    // version 1); Online is the fixture's.
+    let owners = db
+        .rows(
+            "SELECT name, owner, version::text FROM doc_customer_group ORDER BY name COLLATE \"C\"",
+        )
+        .await;
+    assert_eq!(
+        owners,
+        [
+            ["Online", "fixture:sales", "1"],
+            ["Retail", "system", "1"],
+            ["Wholesale", "system", "1"]
+        ]
+    );
+
+    // The second migrate finds all three unchanged and writes nothing.
+    let second = db.migrate(&binary, false).await.expect("migrate again");
+    let fixtures = &second.fixtures[0];
+    assert_eq!(
+        (
+            fixtures.inserted,
+            fixtures.updated,
+            fixtures.kept,
+            fixtures.unchanged
+        ),
+        (0, 0, 0, 3)
+    );
+    // A site that deletes a group keeps it deleted: the record did not change.
+    db.exec("DELETE FROM doc_customer_group WHERE name = 'Online'")
+        .await;
+    let third = db
+        .migrate(&binary, false)
+        .await
+        .expect("migrate a third time");
+    assert_eq!(third.fixtures[0].unchanged, 3);
+    let count = db
+        .rows("SELECT count(*)::text FROM doc_customer_group")
+        .await;
     assert_eq!(count, [["2"]]);
     db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_fixture_groups_are_usable_by_customers() {
+    let env = env().await;
+    let reply = env
+        .manager
+        .post(
+            "/api/v1/resource/customer",
+            json!({"email": "web@example.com", "full_name": "Web Shopper", "customer_group": "Online"}),
+        )
+        .await;
+    assert_eq!(reply.status, 201, "{:?}", reply.body);
+    assert_eq!(reply.data()["customer_group"], "Online");
+    env.db.cleanup().await;
 }
 
 #[tokio::test]
@@ -349,7 +450,7 @@ async fn the_groups_are_usable_and_the_sql_is_idempotent() {
         .db
         .rows("SELECT count(*)::text FROM doc_customer_group")
         .await;
-    assert_eq!(count, [["2"]]);
+    assert_eq!(count, [["3"]]);
 
     // A row written by the migration is a real document: a customer can link to it.
     let reply = env
@@ -1134,6 +1235,219 @@ async fn the_daily_summary_counts_the_submitted_orders_of_the_day_before_the_tic
         )
         .await,
         "1"
+    );
+    env.db.cleanup().await;
+}
+
+// --- The method sales.order_summary -------------------------------------------------------------
+
+const SUMMARY: &str = "/api/v1/method/sales.order_summary";
+
+/// Four orders in four states, made by the Sales User (so the Sales Manager's rules are not the
+/// only ones at work): Ada's draft of 10.00 on 2026-10-05, Ada's pending order of 20.50 on
+/// 2026-10-10, Bob's approved order of 5.00 on 2026-11-02 and Ada's cancelled order of 1.10 on
+/// 2026-10-20. Together 36.60.
+async fn four_orders(env: &Env) {
+    customer(&env.manager).await;
+    let reply = env
+        .manager
+        .post(
+            "/api/v1/resource/customer",
+            json!({"email": "bob@example.com", "full_name": "Bob"}),
+        )
+        .await;
+    assert_eq!(reply.status, 201, "{:?}", reply.body);
+    order_of(env, "ada@example.com", "2026-10-05", "10.00", false).await;
+    let pending = order_of(env, "ada@example.com", "2026-10-10", "20.50", false).await;
+    let sent = transition(&env.user, &pending, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+    order_of(env, "bob@example.com", "2026-11-02", "5.00", true).await;
+    let cancelled = order_of(env, "ada@example.com", "2026-10-20", "1.10", true).await;
+    let done = transition(&env.manager, &cancelled, "Cancel", 3).await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
+}
+
+#[test]
+fn the_summary_states_are_the_workflow_states() {
+    // STATES is written out in the app; the DocType file is the truth.
+    let doctype = include_str!("../doctypes/sales_order.toml");
+    for state in ["Draft", "Pending Approval", "Approved", "Cancelled"] {
+        assert!(
+            doctype.contains(&format!("[[workflow.states]]\nname = \"{state}\"")),
+            "{state} is not a workflow state of sales_order"
+        );
+    }
+    assert_eq!(doctype.matches("[[workflow.states]]").count(), 4);
+}
+
+#[tokio::test]
+async fn the_summary_counts_orders_totals_and_states() {
+    let env = env().await;
+    four_orders(&env).await;
+
+    let all = env.user.post(SUMMARY, json!({})).await;
+    assert_eq!(all.status, 200, "{:?}", all.body);
+    assert_eq!(
+        all.data(),
+        &json!({"orders": 4, "total": "36.60",
+                "by_state": {"Draft": 1, "Pending Approval": 1, "Approved": 1, "Cancelled": 1}})
+    );
+    // The total is a string with its scale, not a float.
+    assert!(all.data()["total"].is_string());
+
+    // One customer; the bounds are both included; null is the same as absent.
+    let ada = env
+        .user
+        .post(
+            SUMMARY,
+            json!({"customer": "ada@example.com", "from": null}),
+        )
+        .await;
+    assert_eq!(ada.data()["orders"], 3, "{:?}", ada.body);
+    assert_eq!(ada.data()["total"], "31.60");
+    let october = env
+        .user
+        .post(SUMMARY, json!({"from": "2026-10-10", "to": "2026-10-20"}))
+        .await;
+    assert_eq!(
+        october.data(),
+        &json!({"orders": 2, "total": "21.60",
+                "by_state": {"Draft": 0, "Pending Approval": 1, "Approved": 0, "Cancelled": 1}})
+    );
+    let none = env
+        .user
+        .post(SUMMARY, json!({"customer": "nobody@example.com"}))
+        .await;
+    assert_eq!(
+        none.data(),
+        &json!({"orders": 0, "total": "0.00",
+                "by_state": {"Draft": 0, "Pending Approval": 0, "Approved": 0, "Cancelled": 0}})
+    );
+
+    // A Sales Manager is allowed too, and sees the same orders; so does a request without a
+    // body at all.
+    let manager = env.manager.post(SUMMARY, json!({})).await;
+    assert_eq!(manager.data(), all.data());
+    let no_body = env.user.post_raw(SUMMARY, None, b"").await;
+    assert_eq!(no_body.data(), all.data(), "{:?}", no_body.body);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_summary_counts_what_the_roles_can_read() {
+    // `sales_order` has no `if_owner` rule: the read right of Sales User and Sales Manager is for
+    // every order, so an order of the manager is counted for the Sales User too. (The handler
+    // reads through the caller's documents handle, so an `if_owner` rule would narrow the count
+    // with no change to it; the framework tests `if_owner` inside a method handler.)
+    let env = env().await;
+    customer(&env.manager).await;
+    let created = env
+        .manager
+        .post(
+            ORDERS,
+            json!({"customer": "ada@example.com", "items": two_items()}),
+        )
+        .await;
+    assert_eq!(created.status, 201, "{:?}", created.body);
+    let seen = env.user.post(SUMMARY, json!({})).await;
+    assert_eq!(seen.data()["orders"], 1, "{:?}", seen.body);
+    assert_eq!(seen.data()["total"], "32.00");
+    assert_eq!(seen.data()["by_state"]["Draft"], 1);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_summary_is_closed_to_everyone_else() {
+    let env = env().await;
+    four_orders(&env).await;
+
+    // No session: 401.
+    let anonymous = env.anon.post(SUMMARY, json!({})).await;
+    assert_eq!(anonymous.status, 401, "{:?}", anonymous.body);
+    // A role that is not in the method's list: the method does not exist for this user, 404.
+    let outsider = env.outsider.post(SUMMARY, json!({})).await;
+    assert_eq!(outsider.status, 404, "{:?}", outsider.body);
+    // An unknown method is 404 as well, so the two cannot be told apart.
+    let unknown = env
+        .user
+        .post("/api/v1/method/sales.nothing", json!({}))
+        .await;
+    assert_eq!(unknown.status, 404, "{:?}", unknown.body);
+    assert_eq!(unknown.body, outsider.body);
+    // A cookie call needs the CSRF header.
+    let no_csrf = env.user.without_csrf().post(SUMMARY, json!({})).await;
+    assert_eq!(no_csrf.status, 403, "{:?}", no_csrf.body);
+    // An API token needs no CSRF header.
+    let token = env.db.create_token("ann").await;
+    let by_token = env.anon.with_token(&token).post(SUMMARY, json!({})).await;
+    assert_eq!(by_token.status, 200, "{:?}", by_token.body);
+    assert_eq!(by_token.data()["orders"], 4);
+    // The token of the Accountant is no better than the session.
+    let eve = env.db.create_token("eve").await;
+    let denied = env.anon.with_token(&eve).post(SUMMARY, json!({})).await;
+    assert_eq!(denied.status, 404, "{:?}", denied.body);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_summary_refuses_a_bad_input_with_a_clear_message() {
+    let env = env().await;
+    let cases = [
+        (json!({"from": "2026-13-01"}), "from must be a date"),
+        (json!({"from": "2026-10-1"}), "from must be a date"),
+        (json!({"to": "yesterday"}), "to must be a date"),
+        (json!({"to": 20_261_031}), "to must be a date"),
+        (json!({"customer": 5}), "customer must be the name"),
+        (json!({"customer": "  "}), "customer must be the name"),
+        (json!({"limit": 10}), "unknown key 'limit'"),
+        (
+            json!({"from": "2026-10-31", "to": "2026-10-01"}),
+            "from must not be after to",
+        ),
+    ];
+    for (body, message) in cases {
+        let reply = env.user.post(SUMMARY, body.clone()).await;
+        assert_eq!(reply.status, 400, "{body}: {:?}", reply.body);
+        assert_eq!(reply.error_code(), Some("method_error"), "{body}");
+        assert!(
+            reply.error_message().is_some_and(|m| m.contains(message)),
+            "{body}: {:?}",
+            reply.body
+        );
+    }
+    // A body that is not an object.
+    let array = env.user.post(SUMMARY, json!([1])).await;
+    assert_eq!(array.status, 400, "{:?}", array.body);
+    env.db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_summary_pages_through_more_than_one_page_of_orders() {
+    let env = env().await;
+    customer(&env.manager).await;
+    // 1 001 drafts of 2.00 written with SQL (through the API it would take minutes; a Link column
+    // holds the id of the target): two full
+    // pages of 500 and a page of one, which is where a paging mistake shows. One pending order
+    // of 3.00 through the API.
+    env.db
+        .exec(
+            "INSERT INTO doc_sales_order
+               (id, name, owner, created_at, modified_at, modified_by, customer, total, workflow_state)
+             SELECT gen_random_uuid(), 'SO-BULK-' || lpad(n::text, 5, '0'), 'ann', now(), now(), 'ann',
+                    (SELECT id FROM doc_customer WHERE name = 'ada@example.com'), 2.00, 'Draft'
+             FROM generate_series(1, 1001) AS n",
+        )
+        .await;
+    let pending = order_of(&env, "ada@example.com", "2026-10-05", "3.00", false).await;
+    let sent = transition(&env.user, &pending, "Submit for Approval", 1).await;
+    assert_eq!(sent.status, 200, "{:?}", sent.body);
+
+    let reply = env.user.post(SUMMARY, json!({})).await;
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    assert_eq!(
+        reply.data(),
+        &json!({"orders": 1002, "total": "2005.00",
+                "by_state": {"Draft": 1001, "Pending Approval": 1, "Approved": 0, "Cancelled": 0}})
     );
     env.db.cleanup().await;
 }

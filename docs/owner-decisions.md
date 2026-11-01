@@ -367,3 +367,35 @@ M9.4 implements owner decision 10 of the M9 plan above (the owner's *"setuju sem
 | **A choice inside the plan: only DocTypes with field naming**, because the name must be the same on every site; submittable DocTypes, DocTypes with a workflow and child DocTypes are refused (a fixture update must not fight the lifecycle or the workflow). | [ADR 0022](adr/0022-fixtures.md#only-field-naming-and-why) |
 | **A choice inside the plan: one transaction per app**, through the document pipeline as `fixture:<app>`; hooks, validation, naming and webhooks run (a fixture write fires webhooks). A failing record rolls back that app's fixtures and fails `migrate`, after the migrations before it are applied. | [ADR 0022](adr/0022-fixtures.md#through-the-pipeline-in-one-transaction-per-app) |
 | **A choice inside the plan: no new dependency.** The checksum is SHA-256 from `sha2` (a direct dependency since M9.2) of the canonical JSON (compact, sorted keys). | [ADR 0022](adr/0022-fixtures.md#the-checksum-and-the-canonical-json) |
+
+### M9.5 the example apps and M9 Done (2026-11-01; working session)
+
+M9.5 implements owner decision 11 of the M9 plan (*"M9 is split into M9.1 to M9.5, and M9.5 (the example apps) touches no file under `crates/`."*, the owner's *"setuju semua rencana mu"* of 2026-10-30) and completes M9. **No new owner decision was taken by the working session**: this pull request touches no file under `crates/` and adds no dependency. This file is append-only, so the "planned" rows of the section "M9 Integration (2026-10-30 ...)" above stand; the table below records where each decision of that plan was recorded and delivered. **M9 is Done (2026-11-01).**
+
+| Decision | Recorded in |
+|---|---|
+| **1** (methods `<app>.<method>`, roles or `any_user`, no guest methods): recorded and delivered by M9.1, #43; shown by `sales.order_summary` in M9.5. | [M9.1 section](#m91-app-method-endpoints-2026-10-31-working-session), [ADR 0019](adr/0019-app-method-endpoints.md), [integration guide](guide/integration.md#1-app-methods-another-system-asks-a-question) |
+| **2** (methods run as the caller, one transaction): recorded and delivered by M9.1, #43. | [M9.1 section](#m91-app-method-endpoints-2026-10-31-working-session), [ADR 0019](adr/0019-app-method-endpoints.md) |
+| **3** (webhooks configured per site at runtime), **4** (delivery through the outbox, HMAC-SHA256) and **5** (the SSRF guard): recorded and delivered by M9.2, #44; M9.5 adds a webhook on the submit of a sales order delivered to a test receiver in CI. | [M9.2 section](#m92-outgoing-webhooks-2026-10-31-working-session), [ADR 0020](adr/0020-outgoing-webhooks.md), [integration guide](guide/integration.md#2-webhooks-forgebase-tells-another-system) |
+| **6** (the HTTP client dependencies `hyper-util`, `hyper-rustls` with `ring` and `rustls-native-certs`, approved by the owner): recorded and delivered by M9.2, #44 (and M9.0, #42, for the shared TLS stack). | [M9.2 section](#m92-outgoing-webhooks-2026-10-31-working-session), [dependency evaluation](blueprint/dependency-evaluation.md) |
+| **7** (the rights `export` and `import`), **8** (import all-or-nothing with a dry run, per-row errors, insert or upsert, CSV and JSON) and **9** (the `csv` crate, approved by the owner): recorded and delivered by M9.3, #45; M9.5 shows both rights on `customer` and a dry-run import in the guide. | [M9.3 section](#m93-import-and-export-2026-10-31-working-session), [ADR 0021](adr/0021-import-and-export.md), [integration guide](guide/integration.md#3-import-and-export-files-in-and-out) |
+| **10** (fixtures: insert if missing, update only when the record changed, never delete): recorded and delivered by M9.4, #46; M9.5 ships `fixtures/customer_group.json` in the `sales` example. | [M9.4 section](#m94-fixtures-2026-11-01-working-session), [ADR 0022](adr/0022-fixtures.md), [integration guide](guide/integration.md#4-fixtures-records-the-app-ships) |
+| **11** (M9 split into M9.1 to M9.5; M9.5 touches no file under `crates/`): recorded by M9.1, #43; kept by M9.5, whose diff has no file under `crates/`. | [M9.1 section](#m91-app-method-endpoints-2026-10-31-working-session), [milestones](blueprint/milestones.md#m9-integration) |
+| **M9 is Done (2026-11-01).** Delivered by #42 (M9.0), #43, #44, #45, #46 and the M9.5 pull request. The exit criteria of the plan, with their evidence and what is only partly evidenced, are in the milestones. The next milestone, M10, has not started. | [milestones](blueprint/milestones.md#m9-exit-criteria-and-evidence) |
+
+### M10 Customization (2026-10-31, "setuju semua rencana mu"; information session)
+
+The owner approved the M10 plan in the information session on 2026-10-31: *"setuju semua rencana mu"* (all ten decisions). **M10 starts after M9 is Done** and has not started; this section is the only record of its decisions until the M10 pull requests land.
+
+| Decision | Recorded in |
+|---|---|
+| 1: app overlays (an app adds fields to a DocType of an app it depends on) and site custom fields (per site, at runtime). | planned: the M10.1 pull request |
+| 2: overlays only add fields (every type except Table); no property setters in M10. | planned: the M10.1 pull request |
+| 3: site custom field names start with `custom_`. | planned: the M10.1 pull request |
+| 4: disabling a site custom field hides it everywhere; its column and data are kept. | planned: the M10.1 pull request |
+| 5: running `serve` and `worker` pick up site changes without a restart, within about 10 seconds (a per-site metadata version, an atomic swap of that site's registry). | planned: the M10.1 pull request |
+| 6: field levels 0 to 9 (`perm_level`, a rule's `level = n`); fields above the caller's levels are omitted everywhere and cannot be filtered, sorted or grouped by; query reports are exempt. | planned: the M10.2 pull request |
+| 7: user permissions: for a restricted user every non-empty Link to the target DocType must point to an allowed value (empty links stay visible), applied in SQL on every path; query reports are exempt. | planned: the M10.3 pull request |
+| 8: customization through the CLI and an Administrator-only API; no admin UI. | planned: the M10.1 and M10.3 pull requests |
+| 9: sharing is Later. | planned: [milestones](blueprint/milestones.md) |
+| 10: M10 is split into M10.1 to M10.4, and M10.4 (desk checks, example apps and the guide) touches no file under `crates/`. | planned: [milestones](blueprint/milestones.md) |

@@ -58,14 +58,14 @@ Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message"
 
 ## App methods
 
-An app can register its own endpoints ([first app, section 8](first-app.md#8-app-methods), [ADR 0019](../adr/0019-app-method-endpoints.md)): `POST /api/v1/method/<app>.<method>` with a JSON object body (an empty body is `{}`) answers `200 {"data": ..}`. The caller must be logged in (a cookie with the CSRF header, or an API token) and have a role of the method, or the method must be declared `any_user`; **there are no guest methods**. The call runs as that user in one transaction. The `sales` example has no method yet (M9.5 adds one); this is a call to the `sales.orders_of` method of the first-app guide, after logging in again as in the first example above (it ends with a logout):
+An app can register its own endpoints ([first app, section 8](first-app.md#8-app-methods), [ADR 0019](../adr/0019-app-method-endpoints.md)): `POST /api/v1/method/<app>.<method>` with a JSON object body (an empty body is `{}`) answers `200 {"data": ..}`. The caller must be logged in (a cookie with the CSRF header, or an API token) and have a role of the method, or the method must be declared `any_user`; **there are no guest methods**. The call runs as that user in one transaction. The `sales` example has the method `sales.order_summary` (a Sales User or Sales Manager may call it; the walkthrough is [Integrating with other systems](integration.md#1-app-methods-another-system-asks-a-question)). These calls need a user with one of those roles and, for the cookie call, a login as in the first example above (it ends with a logout):
 
 ```sh
 curl -s -b jar.txt -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
-  -d '{"customer": "ann@example.com"}' http://localhost:8000/api/v1/method/sales.orders_of
+  -d '{"from": "2026-10-01", "to": "2026-10-31"}' http://localhost:8000/api/v1/method/sales.order_summary
 # a token call: no cookie and no CSRF header
 curl -s -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"customer": "ann@example.com"}' http://localhost:8000/api/v1/method/sales.orders_of
+  -d '{"customer": "ann@example.com"}' http://localhost:8000/api/v1/method/sales.order_summary
 ```
 
 | Status | When |

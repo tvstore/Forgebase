@@ -111,7 +111,7 @@ Rules that matter:
 - Migrations do not send webhooks: app SQL migrations and the workflow-state backfill of `migrate` write without the document operations.
 - After `webhook rotate-secret` the receiver must use the new secret. Switch both at the same time, or accept both for a while.
 
-A complete receiver is about twenty more lines with `http.server`; the recipe above is the part that matters.
+A complete receiver is about twenty more lines with `http.server`; the recipe above is the part that matters. [`examples/sites/receiver.py`](../../examples/sites/receiver.py) is one, run by CI against a real worker, and [Integrating with other systems](integration.md#2-webhooks-forgebase-tells-another-system) walks through the whole flow on the `sales` example.
 
 ## Trying it locally
 

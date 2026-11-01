@@ -6,8 +6,9 @@
 
 use forgebase::serde_json::json;
 use forgebase::{
-    App, Column, Date, Decimal, DocTypeHooks, Document, FilterOp, HookContext, HookError,
-    JobContext, JobError, JobFuture, JobHandler, ListQuery, Param, Report, Row, Schedule, Value,
+    App, Column, Date, Decimal, DocTypeHooks, Document, Documents, FilterOp, HookContext,
+    HookError, JobContext, JobError, JobFuture, JobHandler, ListQuery, Method, MethodContext,
+    MethodError, MethodFuture, MethodHandler, Param, Report, Row, Schedule, Value,
 };
 
 /// The largest `total` a **Sales User** may approve: 10 000.00. Above it the `"Approve"` transition is
@@ -37,6 +38,13 @@ pub fn app() -> App {
         .job("daily_summary", DailySummary)
         // Every day at 02:00 UTC. Run `migrate` after changing a schedule: it stores them.
         .schedule("daily_summary", Schedule::daily_at(2, 0))
+        // An app method (ADR 0019): `POST /api/v1/method/sales.order_summary`, JSON in and out. It runs
+        // as the caller, so the read rules of `sales_order` decide what it counts. See the guide
+        // docs/guide/integration.md.
+        .method(
+            "order_summary",
+            Method::new(OrderSummary).roles(&["Sales User", "Sales Manager"]),
+        )
         // A query report (ADR 0016): SQL compiled into the binary, run by the roles named here in a
         // read-only transaction. Parameters and columns are positional, see the SQL file.
         .report(
@@ -58,6 +66,11 @@ pub fn app() -> App {
             "default_customer_groups",
             "migrations/0001_default_customer_groups.sql"
         )])
+        // Fixtures (ADR 0022): records `migrate` inserts when missing and updates only when the
+        // app changes them, after the migrations above. This file names `Retail` and `Wholesale`
+        // too, which the migration made already: the first `migrate` adopts them ("kept") and
+        // inserts `Online`.
+        .fixtures(forgebase::fixtures!["fixtures/customer_group.json"])
 }
 
 /// Business rules of a sales order: computed amounts and total, and what a submit needs.
@@ -271,6 +284,169 @@ impl JobHandler for LogOrderEvent {
             }
             Ok(())
         })
+    }
+}
+
+/// The workflow states of `sales_order` (see its `[workflow]`), the keys of the `by_state` object
+/// of `sales.order_summary`. A test checks that the DocType file names each of them.
+const STATES: [&str; 4] = ["Draft", "Pending Approval", "Approved", "Cancelled"];
+
+/// The method `sales.order_summary`: how many sales orders there are, their total and how many
+/// are in each workflow state.
+///
+/// **Input** (a JSON object, every key optional, any other key is a `400`):
+/// `{"customer": "<customer name>", "from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}`. `from` and `to`
+/// bound `order_date`, both included.
+///
+/// **Output:** `{"orders": 3, "total": "123.50", "by_state": {"Draft": 1, "Pending Approval": 0,
+/// "Approved": 2, "Cancelled": 0}}`. `total` is a decimal **as a string** (never a float), the
+/// sum over every counted order whatever its state.
+///
+/// **As the caller.** The orders are read through `ctx.documents()`, which acts as the user who
+/// called, so the permission rules of `sales_order` apply: an order the caller may not read is
+/// not counted. (`sales_order` has no `if_owner` rule: a Sales User and a Sales Manager read
+/// every order. With such a rule the same code would count only the caller's own orders, with
+/// no change here.)
+///
+/// **No limit.** `Documents::list` returns at most one page of 500 and has no offset, so the
+/// handler pages by `name` (the sort ends with it and it is unique): it asks for the orders
+/// whose name is greater than the last one it saw. The workflow state is a filter, one run per
+/// state, because the public `StoredDocument` does not carry it.
+struct OrderSummary;
+
+impl MethodHandler for OrderSummary {
+    fn call<'a>(&'a self, ctx: &'a mut MethodContext<'_>) -> MethodFuture<'a> {
+        Box::pin(async move {
+            let filters = summary_filters(ctx.body())?;
+            let mut documents = ctx.documents();
+            let mut orders = 0_u64;
+            let mut total = Decimal::ZERO;
+            let mut by_state = forgebase::serde_json::Map::new();
+            for state in STATES {
+                let (count, sum) = state_totals(&mut documents, &filters, state).await?;
+                total = total
+                    .checked_add(sum)
+                    .ok_or_else(|| MethodError::unprocessable("the total is too large"))?;
+                orders += count;
+                by_state.insert(state.to_owned(), json!(count));
+            }
+            total.rescale(2);
+            Ok(json!({"orders": orders, "total": total.to_string(), "by_state": by_state}))
+        })
+    }
+}
+
+/// A filter of the summary: field, operator, value.
+type SummaryFilter = (&'static str, FilterOp, Value);
+
+/// Checks the body of `sales.order_summary` and turns it into list filters. Every problem is a
+/// `400` whose message says what to fix.
+fn summary_filters(body: &forgebase::serde_json::Value) -> Result<Vec<SummaryFilter>, MethodError> {
+    let Some(input) = body.as_object() else {
+        return Err(MethodError::bad_request("the body must be a JSON object"));
+    };
+    if let Some(key) = input
+        .keys()
+        .find(|key| !["customer", "from", "to"].contains(&key.as_str()))
+    {
+        return Err(MethodError::bad_request(format!(
+            "unknown key '{key}': the keys are customer, from and to"
+        )));
+    }
+    let mut filters = Vec::new();
+    match input.get("customer") {
+        None | Some(forgebase::serde_json::Value::Null) => {}
+        Some(forgebase::serde_json::Value::String(name)) if !name.trim().is_empty() => {
+            filters.push(("customer", FilterOp::Eq, Value::Text(name.clone())));
+        }
+        Some(_) => {
+            return Err(MethodError::bad_request(
+                "customer must be the name of a customer, a non-empty string",
+            ));
+        }
+    }
+    let mut dates = Vec::new();
+    for (key, op) in [("from", FilterOp::Ge), ("to", FilterOp::Le)] {
+        match input.get(key) {
+            None | Some(forgebase::serde_json::Value::Null) => {}
+            Some(forgebase::serde_json::Value::String(text)) => {
+                let date = parse_date(text).ok_or_else(|| {
+                    MethodError::bad_request(format!("{key} must be a date like 2026-10-31"))
+                })?;
+                dates.push(date);
+                filters.push(("order_date", op, Value::Date(date)));
+            }
+            Some(_) => {
+                return Err(MethodError::bad_request(format!(
+                    "{key} must be a date like 2026-10-31"
+                )));
+            }
+        }
+    }
+    if let [from, to] = dates[..]
+        && from > to
+    {
+        return Err(MethodError::bad_request("from must not be after to"));
+    }
+    Ok(filters)
+}
+
+/// A date written `YYYY-MM-DD` (four, two and two digits), or `None`.
+fn parse_date(text: &str) -> Option<Date> {
+    let bytes = text.as_bytes();
+    let shape = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    if !shape {
+        return None;
+    }
+    let year: i32 = text[..4].parse().ok()?;
+    let month: u8 = text[5..7].parse().ok()?;
+    let day: u8 = text[8..].parse().ok()?;
+    Date::from_calendar_date(year, month.try_into().ok()?, day).ok()
+}
+
+/// How many orders in `state` the caller can read (with the `filters`) and the sum of their
+/// totals, paging through the list by `name`.
+async fn state_totals(
+    documents: &mut Documents<'_>,
+    filters: &[SummaryFilter],
+    state: &str,
+) -> Result<(u64, Decimal), MethodError> {
+    let mut count = 0_u64;
+    let mut sum = Decimal::ZERO;
+    let mut last: Option<String> = None;
+    loop {
+        let mut query = ListQuery::new()
+            .filter(
+                "workflow_state",
+                FilterOp::Eq,
+                Value::Text(state.to_owned()),
+            )
+            .limit(PAGE);
+        for (field, op, value) in filters {
+            query = query.filter(field, *op, value.clone());
+        }
+        if let Some(name) = &last {
+            query = query.filter("name", FilterOp::Gt, Value::Text(name.clone()));
+        }
+        let page = documents.list("sales_order", &query).await?;
+        for order in &page {
+            count += 1;
+            if let Some(Value::Decimal(amount)) = order.document().values.get("total") {
+                sum = sum
+                    .checked_add(*amount)
+                    .ok_or_else(|| MethodError::unprocessable("the total is too large"))?;
+            }
+        }
+        if page.len() < PAGE as usize {
+            return Ok((count, sum));
+        }
+        last = page.last().map(|order| order.name().to_owned());
     }
 }
 
