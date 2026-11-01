@@ -26,6 +26,7 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool, apps: usize) -> Str
             "schema sync: not planned yet, it needs the tables the pending framework migrations create; run without --dry-run to apply them\n",
         );
         app_migrations(&mut text, report, dry_run, apps);
+        fixtures(&mut text, report, dry_run);
         return text;
     };
     if sync.steps.is_empty() {
@@ -39,6 +40,7 @@ pub fn migrate_report(report: &MigrateReport, dry_run: bool, apps: usize) -> Str
     }
     app_migrations(&mut text, report, dry_run, apps);
     schedules(&mut text, report, dry_run);
+    fixtures(&mut text, report, dry_run);
     if !sync.warnings.is_empty() {
         let _ = writeln!(text, "warnings: {}", sync.warnings.len());
         for warning in &sync.warnings {
@@ -60,6 +62,32 @@ fn schedules(text: &mut String, report: &MigrateReport, dry_run: bool) {
     let _ = writeln!(text, "schedules: {verb} {}", report.schedules.len());
     for line in &report.schedules {
         let _ = writeln!(text, "  {line}");
+    }
+}
+
+/// One line per app that has fixtures (nothing for the others): what was done, or in a dry run
+/// what would be.
+fn fixtures(text: &mut String, report: &MigrateReport, dry_run: bool) {
+    for app in &report.fixtures {
+        if !report.fixtures_planned {
+            let _ = writeln!(
+                text,
+                "fixtures: {}: {} record(s), not planned yet (they are applied after the pending framework migrations)",
+                app.app, app.records
+            );
+        } else if dry_run {
+            let _ = writeln!(
+                text,
+                "fixtures: {}: would insert {}, update {}, keep {}, {} unchanged",
+                app.app, app.inserted, app.updated, app.kept, app.unchanged
+            );
+        } else {
+            let _ = writeln!(
+                text,
+                "fixtures: {}: {} inserted, {} updated, {} kept, {} unchanged",
+                app.app, app.inserted, app.updated, app.kept, app.unchanged
+            );
+        }
     }
 }
 
@@ -112,6 +140,8 @@ mod tests {
             app_migrations: vec![],
             schedules: vec![],
             workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
         };
         assert_eq!(
             migrate_report(&report, false, 0),
@@ -127,6 +157,8 @@ mod tests {
             app_migrations: vec![],
             schedules: vec![],
             workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
         };
         assert!(!migrate_report(&report, false, 0).contains("schedules"));
         report.schedules = vec!["add crm.digest (daily 06:30)".to_owned()];
@@ -151,11 +183,13 @@ mod tests {
             app_migrations: vec![],
             schedules: vec![],
             workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
         };
         let text = migrate_report(&report, false, 0);
         assert!(
             text.starts_with(
-                "framework migrations: 10 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n  0009 saved_views\n  0010 webhooks\n"
+                "framework migrations: 11 applied\n  0001 init\n  0002 series\n  0003 auth\n  0004 apps\n  0005 jobs\n  0006 schedules\n  0007 finished_jobs_index\n  0008 workflow_log\n  0009 saved_views\n  0010 webhooks\n  0011 fixtures\n"
             ),
             "{text}"
         );
@@ -175,9 +209,11 @@ mod tests {
             app_migrations: vec![],
             schedules: vec![],
             workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
         };
         let text = migrate_report(&report, true, 0);
-        assert!(text.contains("10 pending"), "{text}");
+        assert!(text.contains("11 pending"), "{text}");
         assert!(text.contains("schema sync: not planned yet"), "{text}");
     }
 
@@ -189,10 +225,55 @@ mod tests {
             app_migrations: vec![],
             schedules: vec![],
             workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
         };
         let text = migrate_report(&report, true, 0);
         assert!(text.contains("would apply 2 step(s)"), "{text}");
         assert!(text.ends_with("dry run: nothing was changed\n"), "{text}");
+    }
+
+    #[test]
+    fn fixtures_are_listed_one_line_per_app() {
+        let app = |name: &str, counts: [usize; 4]| forgebase_db::AppFixtures {
+            app: name.to_owned(),
+            records: counts.iter().sum(),
+            inserted: counts[0],
+            updated: counts[1],
+            kept: counts[2],
+            unchanged: counts[3],
+        };
+        let mut report = MigrateReport {
+            migrations: vec![],
+            sync: Some(sync(0, vec![], false)),
+            app_migrations: vec![],
+            schedules: vec![],
+            workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
+        };
+        // No fixtures: nothing is said.
+        assert!(!migrate_report(&report, false, 2).contains("fixtures"));
+        report.fixtures = vec![app("crm", [2, 1, 0, 5]), app("sales", [0, 0, 0, 3])];
+        assert_eq!(
+            migrate_report(&report, false, 2),
+            "framework migrations: up to date\nschema sync: up to date\napp migrations: up to date\n\
+             fixtures: crm: 2 inserted, 1 updated, 0 kept, 5 unchanged\n\
+             fixtures: sales: 0 inserted, 0 updated, 0 kept, 3 unchanged\n"
+        );
+        let dry = migrate_report(&report, true, 2);
+        assert!(
+            dry.contains("fixtures: crm: would insert 2, update 1, keep 0, 5 unchanged\n"),
+            "{dry}"
+        );
+        // While framework migrations are pending the plan is not made.
+        report.sync = None;
+        report.fixtures_planned = false;
+        let text = migrate_report(&report, true, 2);
+        assert!(
+            text.contains("fixtures: crm: 8 record(s), not planned yet"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -208,6 +289,8 @@ mod tests {
             app_migrations: vec![],
             schedules: vec![],
             workflow_warnings: vec![],
+            fixtures: vec![],
+            fixtures_planned: true,
         };
         // No apps: nothing is said. Apps without pending migrations: up to date.
         assert!(!migrate_report(&report, false, 0).contains("app migrations"));

@@ -124,6 +124,24 @@ impl AppliedMigration {
     }
 }
 
+/// What [`TestDb::migrate`] did with the fixtures of one app (ADR 0022); in a dry run, what it
+/// would do. Only apps that have fixture records are listed. Read the fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AppliedFixtures {
+    /// The app.
+    pub app: String,
+    /// Records inserted (also the ones inserted again after the site deleted them and the app
+    /// shipped a new version).
+    pub inserted: usize,
+    /// Records whose new version was applied to an existing document.
+    pub updated: usize,
+    /// Records whose document existed already: left as it is and tracked from now on.
+    pub kept: usize,
+    /// Records that did not change since they were last applied: nothing was done.
+    pub unchanged: usize,
+}
+
 /// What [`TestDb::migrate`] did. Only read it: the type is `#[non_exhaustive]`, so a field can
 /// be added later without breaking tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +149,10 @@ impl AppliedMigration {
 pub struct Migrated {
     /// The app migrations applied, in the order they ran; with a dry run, the pending ones.
     pub app_migrations: Vec<AppliedMigration>,
+    /// What the fixtures of each app that has any did, in app order; with a dry run, what they
+    /// would do. `TestDb::migrate` applies fixtures like `forgebase migrate` does, so a test
+    /// database has the records of the apps' fixture files.
+    pub fixtures: Vec<AppliedFixtures>,
 }
 
 /// A database created for one test, and dropped by [`TestDb::cleanup`] or when it is dropped
@@ -226,6 +248,17 @@ impl TestDb {
                     app: m.app,
                     version: m.version,
                     name: m.name,
+                })
+                .collect(),
+            fixtures: report
+                .fixtures
+                .into_iter()
+                .map(|f| AppliedFixtures {
+                    app: f.app,
+                    inserted: f.inserted,
+                    updated: f.updated,
+                    kept: f.kept,
+                    unchanged: f.unchanged,
                 })
                 .collect(),
         })
