@@ -196,9 +196,11 @@ impl ApiError {
 pub const MAX_MESSAGE_CHARS: usize = 512;
 
 /// The total of serialized (JSON-escaped) bytes that the message, the details and the keys and
-/// strings of an error body or an import summary may use: 64 KiB. The envelope and the numbers
-/// come on top, and so does one "and N more" entry per array, so the body is about 64 KiB plus
-/// a few KB, whatever the request.
+/// strings of an error body or an import summary may use: 64 KiB. The numbers, the punctuation
+/// and the "and N more" entries are paid from the budget too; only the envelope and a small
+/// overshoot after the last entry admitted (a cut string's `…`, one "and N more" per container
+/// left unfinished) come on top, so the body is about 64 KiB plus the envelope, whatever the
+/// request.
 pub const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// What is left of the budget of one body.
@@ -296,14 +298,15 @@ pub(crate) fn capped(problems: Vec<String>) -> Vec<String> {
     capped_in(problems, &mut Budget::new())
 }
 
-/// `value` within the budget. The budget is exact: it is charged the strings and keys as escaped
+/// `value` within the budget. The budget is exact up to the last entry admitted: it is charged the strings and keys as escaped
 /// with their quotes, the numbers, booleans and null as written, 2 bytes per container (the
 /// brackets), 1 per array entry and 2 per object entry (the comma, and the colon). Strings and keys
 /// are cut, arrays take entries in order while the count and the budget last and end with "and N
 /// more". An object is walked with its keys sorted, in three groups: numbers, booleans and null
 /// first (the counts of a summary), then strings (each at most [`MAX_MESSAGE_CHARS`] characters, so
 /// `mode`, `code` and `message` survive), then arrays and objects; an entry that finds no room is
-/// left out. Linear in what it keeps: the rest is only counted.
+/// left out. The entries of an object are sorted (O(n log n) in the object); the rest is linear in
+/// what it keeps, and what is dropped is only counted.
 fn bound_in(value: Value, budget: &mut Budget) -> Value {
     match value {
         Value::String(text) => Value::String(cut(&text, budget)),
