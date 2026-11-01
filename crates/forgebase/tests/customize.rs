@@ -1082,6 +1082,7 @@ async fn a_busy_migrate_lock_is_a_503_that_changes_nothing() {
         .await;
     assert_eq!(busy.status, 503, "{:?}", busy.body);
     assert_eq!(busy.error_code(), Some("lock_timeout"));
+    assert_eq!(busy.header("retry-after"), Some("5"));
     held.execute("SELECT pg_advisory_unlock(5062693908242366465)", &[])
         .await
         .expect("unlock");

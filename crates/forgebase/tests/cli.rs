@@ -3300,3 +3300,89 @@ fn the_data_and_doc_commands_see_enabled_custom_fields_and_refuse_disabled_ones(
         Some("1")
     );
 }
+
+#[test]
+fn malformed_json_and_filters_fail_before_the_database_is_used() {
+    // The URL points at nothing: a connection error would show if the database were opened.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_forgebase"))
+            .args(args)
+            .env(
+                "FORGEBASE_DATABASE_URL",
+                "postgres://nobody:nothing@127.0.0.1:1/none",
+            )
+            .stdin(Stdio::null())
+            .output()
+            .expect("run forgebase")
+    };
+    for args in [
+        vec![
+            "doc",
+            "insert",
+            "customer",
+            "--data",
+            "{bad",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "update",
+            "customer",
+            "a",
+            "--version",
+            "1",
+            "--data",
+            "[1]",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            "{bad",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            r#"{"field":"a"}"#,
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            r#"[{"field":"a"}]"#,
+            "--doctypes",
+            DOCTYPES,
+        ],
+        vec![
+            "data",
+            "export",
+            "customer",
+            "--filter",
+            "{bad",
+            "--doctypes",
+            DOCTYPES,
+        ],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), Some(1), "{args:?}");
+        let text = stderr(&out);
+        assert!(
+            text.starts_with("error: invalid JSON")
+                || text.starts_with("error: the data must be a JSON object")
+                || text.starts_with("error: invalid filter"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("site `"), "{args:?}: {text}");
+    }
+}

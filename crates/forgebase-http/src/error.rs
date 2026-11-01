@@ -24,6 +24,7 @@
 //! | `import_failed` | 422 | at least one row of an import has an error, so nothing was imported; `details` is the summary with the per-row errors (M9.3) |
 //! | `unsupported_media_type` | 415 | the body is not `application/json` (for an import: not the type of its format) |
 //! | `too_many_logins` | 503 | login concurrency bound; `Retry-After` is set |
+//! | `lock_timeout` | 503 | a database lock stayed busy for the `lock_timeout` (for example a `migrate` is running, M10.1); `Retry-After` is set |
 //! | `method_error` | 400 or 422 | an app method refused the call; the message is the app's, written for users (M9.1) |
 //! | `report_timeout` | 504 | a query report ran over its time limit (M8.4) |
 //! | `internal` | 500 | generic message; the real error goes to standard error |
@@ -422,7 +423,7 @@ impl From<DbError> for ApiError {
                 let mut error = Self::new(
                     S::SERVICE_UNAVAILABLE,
                     "lock_timeout",
-                    "the database schema is being changed (a migrate is running); retry shortly",
+                    "a database lock is busy (for example a migrate is running); retry shortly",
                 );
                 error.retry_after = Some(5);
                 error
@@ -471,7 +472,7 @@ impl From<DbError> for ApiError {
             // A job that a hook enqueued has an unknown name or a payload that is too large: a
             // mistake of the app, not of the caller. Logged, and answered like any internal error.
             DbError::Job(_) => Self::internal(&text),
-            // Postgres, Pool, Decode, LockTimeout and everything else: the caller cannot help.
+            // Postgres, Pool, Decode and everything else: the caller cannot help.
             other => Self::internal(&other),
         }
     }
@@ -677,6 +678,24 @@ mod bound_tests {
             bytes.len() < MAX_ERROR_BODY_BYTES + 2_048,
             "{} bytes",
             bytes.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_lock_is_a_503_with_retry_after() {
+        let error = ApiError::from(DbError::LockTimeout);
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "lock_timeout");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(RETRY_AFTER),
+            Some(&HeaderValue::from_static("5"))
         );
     }
 }

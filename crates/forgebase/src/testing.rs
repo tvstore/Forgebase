@@ -634,9 +634,18 @@ pub struct Reply {
     pub status: u16,
     /// The JSON body; `null` when the reply has no body (204) or it is not JSON.
     pub body: Json,
+    headers: Vec<(String, String)>,
 }
 
 impl Reply {
+    /// The value of a response header (name in any case), for example `retry-after`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
     /// `data` of a success reply.
     pub fn data(&self) -> &Json {
         &self.body["data"]
@@ -849,7 +858,13 @@ impl HttpClient {
             .and_then(|rest| rest.split(';').next())
             .map(str::to_owned);
         let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
+        let headers = parts
+            .headers
+            .iter()
+            .filter_map(|(n, v)| Some((n.as_str().to_owned(), v.to_str().ok()?.to_owned())))
+            .collect();
         let reply = Reply {
+            headers,
             status: parts.status.as_u16(),
             body: serde_json::from_slice(&bytes).unwrap_or(Json::Null),
         };

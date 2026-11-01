@@ -21,8 +21,9 @@ use crate::run::write_stdout;
 /// The system actor of `data export`, which only reads.
 const EXPORT_ACTOR: &str = "cli";
 
-/// A `data` command with its input checked: nothing touches the database when the DocType, the
-/// filter, the fields or the file is wrong.
+/// A `data` command with its input checked against the registry of the site context (enabled
+/// custom fields included): the file is read, and the syntax of the filter checked, before the
+/// database is opened.
 pub(crate) enum Prepared {
     Export {
         doctype: String,
@@ -47,8 +48,15 @@ fn format(text: &str) -> Result<Format, CliError> {
 }
 
 /// The bytes of the file of an `import`, read before the database is opened (`None` for an
-/// export).
+/// export), and the syntax check of an export's `--filter`.
 pub(crate) fn read_input(command: &DataCommand) -> Result<Option<Vec<u8>>, CliError> {
+    if let DataCommand::Export {
+        filter: Some(filter),
+        ..
+    } = command
+    {
+        forgebase_http::json::check_filters_syntax(filter)?;
+    }
     match command {
         DataCommand::Import { file, .. } => std::fs::read(file)
             .map(Some)

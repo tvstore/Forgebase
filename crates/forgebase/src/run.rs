@@ -91,6 +91,9 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             let (dir, name) = target(&command);
             let base = Arc::new(find_doctype(site, apps, dir, name)?);
             let text = read_doc_input(&command)?;
+            // Syntax errors fail before the database is opened; field names and values are
+            // checked later against the registry of the site context.
+            check_doc_syntax(&command, text.as_deref())?;
             let ctx = site.context(base, None).await?;
             let operation = prepare(command, &ctx.registry, text)?;
             execute(&ctx, operation).await
@@ -354,9 +357,10 @@ fn site_registry(site: &Site, apps: &[App]) -> Result<Arc<Registry>, CliError> {
     Ok(Arc::new(site_composed(site, apps, &none)?.registry))
 }
 
-/// A document operation with its input already read and checked, so that nothing touches the
-/// database when the DocType, the JSON or standard input is wrong. It runs against the registry
-/// of the site context.
+/// A document operation with its input already read and checked: the DocType, the files and the
+/// syntax of the JSON are checked before the database is opened, and the field names and values
+/// against the registry of the site context (custom fields included) right after. It runs against
+/// that registry.
 enum Operation {
     Insert {
         doctype: String,
@@ -442,8 +446,8 @@ fn target(command: &DocCommand) -> (&DocTypesDir, &str) {
     }
 }
 
-/// Checks a `doc` command and reads its input. Returns the registry it was checked against and
-/// the operation.
+/// Checks a `doc` command against `registry`, the registry of the site context (enabled custom
+/// fields included), with the `--data` text that `read_doc_input` read, and returns the operation.
 fn prepare(
     command: DocCommand,
     registry: &Registry,
@@ -536,6 +540,22 @@ fn prepare(
         },
     };
     Ok(operation)
+}
+
+/// The syntax-only checks of a `doc` command: `--data` is a JSON object and `--filter` is a list
+/// of filters. Nothing here needs a registry.
+fn check_doc_syntax(command: &DocCommand, text: Option<&str>) -> Result<(), CliError> {
+    if let Some(text) = text {
+        forgebase_http::json::check_input_syntax(text)?;
+    }
+    if let DocCommand::List {
+        filter: Some(filter),
+        ..
+    } = command
+    {
+        forgebase_http::json::check_filters_syntax(filter)?;
+    }
+    Ok(())
 }
 
 /// The `--data` text of an `insert` or `update` (standard input for `-`), read before the
