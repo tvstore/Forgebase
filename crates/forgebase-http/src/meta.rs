@@ -9,7 +9,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use forgebase_core::meta::{DocField, DocType, FieldType, Naming, Registry};
-use forgebase_core::permission::{Access, Caller, Right, evaluate, field_access, readable_fields};
+use forgebase_core::permission::{
+    Access, Caller, Right, evaluate, field_access, may_make_documents, readable_fields,
+};
 use forgebase_db::DbError;
 use serde_json::{Map, Value as Json, json};
 
@@ -29,12 +31,16 @@ fn access_name(access: Access) -> &'static str {
 
 /// The caller's rights on `doctype`, one entry per [`Right`]. Submit, cancel and amend are
 /// `"none"` for a DocType that is not submittable (the API refuses them with `not_submittable`
-/// even for an administrator, so the desk must not offer them).
+/// even for an administrator, so the desk must not offer them). Create and amend are `"none"`
+/// for a user restricted on the DocType itself (user permissions, ADR 0025).
 fn rights(doctype: &DocType, caller: &Caller) -> Json {
     let mut map = Map::new();
     for right in Right::ALL {
         let lifecycle = matches!(right, Right::Submit | Right::Cancel | Right::Amend);
-        let access = if lifecycle && !doctype.submittable {
+        let makes_new = matches!(right, Right::Create | Right::Amend);
+        let access = if (lifecycle && !doctype.submittable)
+            || (makes_new && !may_make_documents(doctype, caller))
+        {
             Access::Denied
         } else {
             evaluate(doctype, caller, right)

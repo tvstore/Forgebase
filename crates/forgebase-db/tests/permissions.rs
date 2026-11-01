@@ -94,6 +94,38 @@ type = "link"
 target = "party"
 "#;
 
+/// A workflow DocType with the export right, for the matrix of user permissions (M10.3): `Agent`
+/// reads, exports and takes the transition "Close".
+const AGENT_CASE: &str = r#"
+name = "agent_case"
+label = "Agent Case"
+[[fields]]
+name = "title"
+type = "data"
+required = true
+[[fields]]
+name = "customer"
+type = "link"
+target = "party"
+[[permissions]]
+role = "Agent"
+read = true
+write = true
+export = true
+[workflow]
+[[workflow.states]]
+name = "Open"
+docstatus = 0
+[[workflow.states]]
+name = "Closed"
+docstatus = 0
+[[workflow.transitions]]
+action = "Close"
+from = "Open"
+to = "Closed"
+roles = ["Agent"]
+"#;
+
 /// A Link target: `Reader` reads all, `OwnReader` reads own, `PartyAdmin` reads and deletes all.
 const PARTY: &str = r#"
 name = "party"
@@ -156,7 +188,15 @@ async fn setup_with(reg: Registry) -> (TestDb, Registry) {
 }
 
 async fn setup() -> (TestDb, Registry) {
-    setup_with(registry(&[TICKET, TICKET_LINE, PARTY, MEMO, SECRET])).await
+    setup_with(registry(&[
+        TICKET,
+        TICKET_LINE,
+        PARTY,
+        MEMO,
+        SECRET,
+        AGENT_CASE,
+    ]))
+    .await
 }
 
 fn user(name: &str, roles: &[&str]) -> Caller {
@@ -1570,4 +1610,295 @@ async fn a_before_submit_hook_cannot_link_to_an_unreadable_document() {
     .await
     .unwrap();
     assert_eq!(submitted.values["customer"], text(&hidden.name));
+}
+
+// ---- the matrix with user permissions (M10.3, ADR 0025) ---------------------------------------
+
+/// Every right of the matrix on tickets whose Link to `party` is allowed, empty or hidden by
+/// the user permissions of the caller: the same rights, the same roles, one more dimension.
+/// A hidden ticket is `NotFound` for every operation (before the right, the version or the
+/// state), a visible one behaves as without the restriction, and the Administrator and the
+/// system ignore the rows.
+#[tokio::test]
+async fn the_matrix_with_user_permissions() {
+    use forgebase_core::permission::UserRestrictions;
+
+    let (db, reg) = setup().await;
+    make_party(&db, &reg, "ok@x.y", &sys()).await;
+    make_party(&db, &reg, "other@x.y", &sys()).await;
+    let all_rights = [
+        "Reader",
+        "Writer",
+        "Creator",
+        "Deleter",
+        "Submitter",
+        "Canceller",
+        "Amender",
+    ];
+    let restricted = user("rita", &all_rights)
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+    let plain = user("pat", &all_rights);
+    let admin_restricted = user("root", &[ADMINISTRATOR])
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+
+    let rights = [
+        Right::Read,
+        Right::Write,
+        Right::Delete,
+        Right::Submit,
+        Right::Cancel,
+        Right::Amend,
+    ];
+    // (the Link of the ticket, whether the restricted user sees it)
+    let tickets = [
+        (Some("ok@x.y"), true),
+        (None, true),
+        (Some("other@x.y"), false),
+    ];
+    for right in rights {
+        for (customer, visible) in tickets {
+            for (who, expect_visible, label) in [
+                (&restricted, visible, "restricted"),
+                (&plain, true, "unrestricted"),
+                (&admin_restricted, true, "administrator"),
+                (&sys(), true, "system"),
+            ] {
+                let result = attempt_linked(&db, &reg, right, who, customer).await;
+                match (result, expect_visible) {
+                    (Ok(()), true) => {}
+                    (Err(DbError::NotFound { .. }), false) => {}
+                    (other, _) => {
+                        panic!("{right} on a ticket linked to {customer:?} by {label}: {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    // A workflow transition and the export, on cases with an allowed, an empty and a hidden Link:
+    // the hidden one is `NotFound` for the transition and absent from the export, for the
+    // restricted user only.
+    let agent = user("rita", &["Agent"])
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+    let agent_plain = user("pat", &["Agent"]);
+    let agent_admin = user("root", &[ADMINISTRATOR])
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+    for (customer, visible) in tickets {
+        let mut client = db.pool.get().await.unwrap();
+        let client = &mut **client;
+        let mut d = doc(&[("title", text(customer.unwrap_or("none")))]);
+        if let Some(customer) = customer {
+            d.values.insert("customer".into(), text(customer));
+        }
+        let made = insert(client, &reg, "agent_case", d, &sys()).await.unwrap();
+        for (who, expect_visible, label) in [
+            (&agent, visible, "restricted"),
+            (&agent_plain, true, "unrestricted"),
+            (&agent_admin, true, "administrator"),
+            (&sys(), true, "system"),
+        ] {
+            // The export lists the case only to a caller who sees it.
+            let tx = forgebase_db::begin_export(client).await.unwrap();
+            let query = forgebase_db::ExportQuery {
+                doctype: "agent_case",
+                filters: &[forgebase_db::Filter::new(
+                    "name",
+                    forgebase_db::FilterOp::Eq(text(&made.name)),
+                )],
+                sort: &[],
+                limit: 10,
+                with_tables: false,
+            };
+            let export = forgebase_db::Export::start(&tx, &reg, who, &query)
+                .await
+                .unwrap();
+            assert_eq!(
+                export.count() == 1,
+                expect_visible,
+                "export of a case linked to {customer:?} by {label}"
+            );
+            drop(export);
+            drop(tx);
+            // A stale version is `NotFound` for a hidden case, before the version is compared.
+            let stale = forgebase_db::transition(
+                client,
+                &reg,
+                "agent_case",
+                &made.name,
+                "Close",
+                made.version + 7,
+                who,
+            )
+            .await;
+            match (stale, expect_visible) {
+                (Err(DbError::NotFound { .. }), false) | (Err(DbError::Conflict { .. }), true) => {}
+                (other, _) => panic!("stale transition on {customer:?} by {label}: {other:?}"),
+            }
+            let transitions =
+                forgebase_db::available_transitions(client, &reg, "agent_case", &made.name, who)
+                    .await;
+            assert_eq!(
+                transitions.is_ok(),
+                expect_visible,
+                "{label}: {transitions:?}"
+            );
+        }
+        // The real transition: refused for the restricted user on a hidden case, taken otherwise.
+        let moved = forgebase_db::transition(
+            client,
+            &reg,
+            "agent_case",
+            &made.name,
+            "Close",
+            made.version,
+            &agent,
+        )
+        .await;
+        match (moved, visible) {
+            (Ok(_), true) | (Err(DbError::NotFound { .. }), false) => {}
+            (other, _) => panic!("transition on {customer:?}: {other:?}"),
+        }
+    }
+
+    // Creating, and the links a write resolves: a hidden target is a missing one for the
+    // restricted user, in the document and in a row, on insert and on update.
+    let mut client = db.pool.get().await.unwrap();
+    let client = &mut **client;
+    for (customer, contact, ok) in [
+        ("ok@x.y", Some("ok@x.y"), true),
+        ("other@x.y", None, false),
+        ("ok@x.y", Some("other@x.y"), false),
+    ] {
+        let result = insert(
+            client,
+            &reg,
+            "ticket",
+            ticket_linking(customer, contact),
+            &restricted,
+        )
+        .await;
+        assert_eq!(result.is_ok(), ok, "{customer} {contact:?}: {result:?}");
+        if !ok {
+            assert!(!link_not_found(&result.unwrap_err()).is_empty());
+        }
+        insert(
+            client,
+            &reg,
+            "ticket",
+            ticket_linking(customer, contact),
+            &plain,
+        )
+        .await
+        .unwrap();
+    }
+    // The restricted DocType itself: the party the user may see is the only one they read, and
+    // they cannot create one (the system and the unrestricted user can).
+    let seen = get(client, &reg, "party", "other@x.y", &restricted)
+        .await
+        .unwrap();
+    assert!(seen.is_none());
+    assert!(
+        get(client, &reg, "party", "ok@x.y", &restricted)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let creator = user("rita", &["PartyCreator"])
+        .with_restrictions(UserRestrictions::from_pairs([("party", "ok@x.y")]));
+    let error = insert(
+        client,
+        &reg,
+        "party",
+        doc(&[("email", text("n@x.y"))]),
+        &creator,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::PermissionDenied {
+                right: Right::Create,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+/// A ticket made by the system with this Link, moved to the state `right` needs, then `right`
+/// attempted by `caller`: the result of the attempt only (`list` counts as a read of
+/// that one ticket).
+async fn attempt_linked(
+    db: &TestDb,
+    reg: &Registry,
+    right: Right,
+    caller: &Caller,
+    customer: Option<&str>,
+) -> Result<(), DbError> {
+    let mut client = db.pool.get().await.unwrap();
+    let client = &mut **client;
+    let mut d = doc(&[("title", text("m"))]);
+    if let Some(customer) = customer {
+        d.values.insert("customer".into(), text(customer));
+    }
+    let made = insert(client, reg, "ticket", d, &sys()).await.unwrap();
+    let (name, mut version) = (made.name, made.version);
+    if matches!(right, Right::Cancel | Right::Amend) {
+        version = submit(client, reg, "ticket", &name, version, &sys())
+            .await
+            .unwrap()
+            .version;
+    }
+    if right == Right::Amend {
+        version = cancel(client, reg, "ticket", &name, version, &sys())
+            .await
+            .unwrap()
+            .version;
+    }
+    let not_found = || DbError::NotFound {
+        doctype: "ticket".into(),
+        name: name.clone(),
+    };
+    match right {
+        Right::Read => {
+            // Both paths: `get`, and the page of a list that finds the ticket by its name.
+            let got = get(client, reg, "ticket", &name, caller).await?;
+            let query = forgebase_db::ListQuery {
+                filters: vec![forgebase_db::Filter {
+                    field: "name".into(),
+                    op: forgebase_db::FilterOp::Eq(text(&name)),
+                }],
+                ..forgebase_db::ListQuery::default()
+            };
+            let listed = forgebase_db::list(&*client, reg, "ticket", caller, &query).await?;
+            assert_eq!(got.is_some(), listed.len() == 1, "get and list agree");
+            got.map(drop).ok_or_else(not_found)
+        }
+        Right::Write => update(
+            client,
+            reg,
+            "ticket",
+            &name,
+            version,
+            &change("title", text("x")),
+            caller,
+        )
+        .await
+        .map(drop),
+        Right::Delete => delete(client, reg, "ticket", &name, version, caller).await,
+        Right::Submit => submit(client, reg, "ticket", &name, version, caller)
+            .await
+            .map(drop),
+        Right::Cancel => cancel(client, reg, "ticket", &name, version, caller)
+            .await
+            .map(drop),
+        Right::Amend => amend(client, reg, "ticket", &name, version, caller)
+            .await
+            .map(drop),
+        // The export has its own rights (`tests/user_permissions.rs` exports as a restricted user).
+        Right::Export | Right::Create | Right::Import => {
+            unreachable!("not an operation of this matrix")
+        }
+    }
 }

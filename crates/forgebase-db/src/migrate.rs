@@ -89,6 +89,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "custom_fields",
         sql: include_str!("../migrations/0012_custom_fields.sql"),
     },
+    Migration {
+        version: 13,
+        name: "user_permissions",
+        sql: include_str!("../migrations/0013_user_permissions.sql"),
+    },
 ];
 
 /// Applies the pending framework migrations and returns them.

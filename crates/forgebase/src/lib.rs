@@ -66,7 +66,7 @@
 //! and `transition` of documents; `update`, `delete`, `submit`, `cancel`, `amend` and `transition`
 //! need `--version`; `transition` takes the action of a workflow, M8.1),
 //! `user` (`create`, `set-password`, `add-role`, `remove-role`, `disable`, `enable`; passwords
-//! come from standard input), `token` (`create`, `revoke`), `serve` (the HTTP API; no
+//! come from standard input; `permission add`, `remove` and `list`: user permissions, M10.3), `token` (`create`, `revoke`), `serve` (the HTTP API; no
 //! migrations), `worker` (runs background jobs until Ctrl-C or SIGTERM), `job` (`list`, `show`,
 //! `retry` and `enqueue`; the command line is the only interface to jobs), `customize` (`field add`,
 //! `list`, `disable` and `enable`: the custom fields of a site, M10.1) and `new-app` (writes a new app crate that builds and passes its tests; needs no
@@ -123,6 +123,7 @@ mod report;
 mod reports;
 mod run;
 mod schedule;
+mod user_permission_cmd;
 mod webhook_client;
 mod webhook_cmd;
 mod worker;

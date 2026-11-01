@@ -2,7 +2,7 @@
 //! a count and optional sum, average, minimum and maximum per group.
 //!
 //! It is a read like [`list`](crate::list), and takes **everything that decides what is read
-//! from the list**: the read scope ([`read_owner`], so an `if_owner` read counts the caller's own
+//! from the list**: the read scope ([`read_scope`], so an `if_owner` read counts the caller's own
 //! documents only and a missing read right is [`DbError::PermissionDenied`]) and the filters
 //! ([`conditions`], so a filter is checked and bound exactly as in a list). No second
 //! permission check exists. A summary gives no right: it sees only rows the list sees.
@@ -37,9 +37,11 @@ use tokio_postgres::GenericClient;
 use tokio_postgres::types::ToSql;
 
 use crate::document::document_doctype;
+use crate::document::read_scope;
 use crate::error::DbError;
 use crate::ident::quote_ident;
-use crate::list::{Binds, Filter, column, conditions, invalid, read_owner};
+use crate::list::{Binds, Filter, column, conditions, invalid};
+use crate::scope::ReadScope;
 use crate::value::{SqlValue, decode};
 
 /// The most groups a summary returns.
@@ -128,11 +130,11 @@ pub async fn summary(
     query: &SummaryQuery,
 ) -> Result<Summary, DbError> {
     let doctype = document_doctype(registry, doctype)?;
-    let owner = read_owner(doctype, caller)?;
+    let scope = read_scope(doctype, caller)?;
     // A group-by, an aggregate or a filter on a field the caller cannot read is an unknown
     // field (ADR 0024).
     let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
-    let (sql, binds, key_type, selected) = build(doctype, owner, query)?;
+    let (sql, binds, key_type, selected) = build(doctype, &scope, query)?;
     let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
     let params: Vec<&(dyn ToSql + Sync)> =
         params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
@@ -211,7 +213,7 @@ fn group_key(doctype: &DocType, name: &str) -> Result<(String, FieldType, bool),
 
 type Built = (String, Vec<Value>, FieldType, Vec<Selected>);
 
-fn build(doctype: &DocType, owner: Option<&str>, query: &SummaryQuery) -> Result<Built, DbError> {
+fn build(doctype: &DocType, scope: &ReadScope<'_>, query: &SummaryQuery) -> Result<Built, DbError> {
     let table = quote_ident(&table_name(&doctype.name));
     let (key, key_type, text_key) = group_key(doctype, &query.group_by)?;
     if query.aggregates.len() > MAX_AGGREGATES {
@@ -280,7 +282,7 @@ fn build(doctype: &DocType, owner: Option<&str>, query: &SummaryQuery) -> Result
     }
 
     let mut binds = Binds::default();
-    let conditions = conditions(doctype, owner, &query.filters, &mut binds)?;
+    let conditions = conditions(doctype, scope, &query.filters, &mut binds)?;
     let mut select = vec![format!("{key} AS \"key\""), "count(*)".to_owned()];
     select.extend(items);
     let mut sql = format!("SELECT {} FROM {table}", select.join(", "));

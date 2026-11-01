@@ -19,11 +19,19 @@
 //! metadata. A field the caller cannot read is *unknown* to the caller: it is not in the
 //! metadata the caller works with, so every lookup of it fails exactly like a lookup of a name
 //! that does not exist.
+//!
+//! **User permissions (M10.3, ADR 0025).** A [`Caller::User`] carries its [`UserRestrictions`]:
+//! for some DocTypes, the names of the only documents the user may see. [`row_scope`] turns them
+//! into a [`RowScope`] for one DocType, the rows of it the caller may see on top of the rights
+//! of [`evaluate`]: `forgebase-db` only turns that into SQL, so what a caller may see is decided
+//! here and nowhere else.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
-use crate::meta::{DocField, DocType};
+use crate::meta::{DocField, DocType, FieldType};
 use crate::method::MethodAccess;
 use crate::workflow::Transition;
 
@@ -32,6 +40,10 @@ pub const ADMINISTRATOR: &str = "Administrator";
 
 /// The highest permission level of a field or a rule (levels are 0 to 9).
 pub const MAX_PERM_LEVEL: u8 = 9;
+
+/// The most documents one user can be restricted to on one DocType (M10.3, ADR 0025). The names
+/// are bound as one array in every statement that reads documents, so the number is kept small.
+pub const MAX_USER_PERMISSIONS: usize = 1000;
 
 /// Longest allowed role name, in characters.
 pub const MAX_ROLE_LEN: usize = 140;
@@ -192,6 +204,9 @@ pub enum Caller {
         username: String,
         /// The user's roles.
         roles: Vec<String>,
+        /// The documents the user is restricted to (M10.3, ADR 0025); empty for a user without
+        /// user permissions. Read from the database with the roles.
+        restrictions: UserRestrictions,
     },
     /// The trusted system context: bypasses every permission rule. For code that is not acting for
     /// a user, such as the command-line tool, migrations, jobs and tests. **Never build one from
@@ -209,6 +224,22 @@ impl Caller {
         Caller::User {
             username: username.into(),
             roles,
+            restrictions: UserRestrictions::default(),
+        }
+    }
+
+    /// This caller with the given user permissions (see [`UserRestrictions`]). The system
+    /// context is returned unchanged: it is never restricted.
+    pub fn with_restrictions(self, restrictions: UserRestrictions) -> Self {
+        match self {
+            Caller::User {
+                username, roles, ..
+            } => Caller::User {
+                username,
+                roles,
+                restrictions,
+            },
+            system => system,
         }
     }
 
@@ -235,6 +266,127 @@ impl Caller {
             Caller::System { .. } => true,
             Caller::User { roles, .. } => roles.iter().any(|r| r == ADMINISTRATOR),
         }
+    }
+}
+
+/// The user permissions of one user (M10.3, ADR 0025): for a DocType, the names of the only
+/// documents of it the user may see. A DocType that is not listed is **not restricted** for the
+/// user, and so is one with an empty list (the empty value means unrestricted). Cheap to clone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserRestrictions(Arc<BTreeMap<String, Vec<String>>>);
+
+impl UserRestrictions {
+    /// The restrictions made of `(doctype, name)` pairs: each DocType's names are sorted and
+    /// deduplicated.
+    pub fn from_pairs<I, D, N>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (D, N)>,
+        D: Into<String>,
+        N: Into<String>,
+    {
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (doctype, name) in pairs {
+            map.entry(doctype.into()).or_default().push(name.into());
+        }
+        for names in map.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+        Self(Arc::new(map))
+    }
+
+    /// The names the user may see of `doctype`, sorted; `None` when the user is not restricted
+    /// on it.
+    pub fn allowed(&self, doctype: &str) -> Option<&[String]> {
+        self.0
+            .get(doctype)
+            .map(Vec::as_slice)
+            .filter(|names| !names.is_empty())
+    }
+
+    /// True when the user has no user permissions at all.
+    pub fn is_empty(&self) -> bool {
+        self.0.values().all(Vec::is_empty)
+    }
+}
+
+/// One top-level Link field of a DocType whose target the caller is restricted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkScope<'a> {
+    /// The Link field.
+    pub field: &'a str,
+    /// The DocType the field points at.
+    pub target: &'a str,
+    /// The names of the target the caller may see (sorted, never empty).
+    pub allowed: &'a [String],
+}
+
+/// Which documents of one DocType a caller may see because of their user permissions, as decided
+/// by [`row_scope`]. It is **in addition to** the rights of [`evaluate`] (and to `if_owner`):
+/// every part must hold. Empty for a caller without a restriction that touches the DocType.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowScope<'a> {
+    /// The DocType itself is restricted: the document's own name must be one of these.
+    pub names: Option<&'a [String]>,
+    /// Every top-level Link field to a restricted target: its value must be empty or one of
+    /// the allowed names of its target. All of them must hold (AND), in declaration order.
+    pub links: Vec<LinkScope<'a>>,
+}
+
+impl RowScope<'_> {
+    /// True when nothing is restricted: every statement is then exactly what it is without user
+    /// permissions.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_none() && self.links.is_empty()
+    }
+}
+
+/// Whether the caller may make **new** documents of `doctype` (create, and amend, which makes
+/// a new document) as far as user permissions go: a user restricted on the DocType itself may
+/// not, because the new name could not be checked against the allowed names and the user could
+/// not see the result (ADR 0025). The role right is [`evaluate`]'s business; `forgebase-db`
+/// and the metadata API both ask this one function.
+pub fn may_make_documents(doctype: &DocType, caller: &Caller) -> bool {
+    row_scope(doctype, caller).names.is_none()
+}
+
+/// Decides which documents of `doctype` `caller` may see because of their user permissions
+/// (M10.3, ADR 0025). Pure, like [`evaluate`].
+///
+/// - The system context, an administrator and a user without restrictions get the empty scope.
+/// - **Own name.** If the caller is restricted on `doctype` itself, the name of a document must
+///   be one of the allowed names.
+/// - **Links.** For each top-level Link field of `doctype` whose target the caller is restricted
+///   on, the value must be empty or one of the allowed names of the target. Every such field
+///   must hold, whatever its `perm_level`: a field the caller cannot read still restricts, and
+///   its value is never revealed. A field that is not in `doctype` (a disabled custom field is
+///   not in the effective registry) restricts nothing.
+/// - **Child rows are not considered**: a Link inside a row of a Table field does not decide the
+///   parent's visibility. A child DocType is never read alone and has an empty scope.
+pub fn row_scope<'a>(doctype: &'a DocType, caller: &'a Caller) -> RowScope<'a> {
+    let Caller::User { restrictions, .. } = caller else {
+        return RowScope::default();
+    };
+    if doctype.is_child || restrictions.is_empty() || caller.bypasses_permissions() {
+        return RowScope::default();
+    }
+    let links = doctype
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let FieldType::Link { target } = &field.field_type else {
+                return None;
+            };
+            Some(LinkScope {
+                field: &field.name,
+                target,
+                allowed: restrictions.allowed(target)?,
+            })
+        })
+        .collect();
+    RowScope {
+        names: restrictions.allowed(&doctype.name),
+        links,
     }
 }
 
@@ -979,5 +1131,153 @@ roles = ["Manager"]
             transition_access(&d, &Caller::system("cli"), &unknown_state),
             Access::Denied
         );
+    }
+
+    // ---- user permissions (M10.3, ADR 0025) ----
+
+    fn link_field(name: &str, target: &str, perm_level: u8) -> DocField {
+        DocField {
+            name: name.into(),
+            label: name.into(),
+            field_type: FieldType::Link {
+                target: target.into(),
+            },
+            required: false,
+            unique: false,
+            allow_on_submit: false,
+            read_only: false,
+            perm_level,
+        }
+    }
+
+    fn with_links(name: &str, links: &[(&str, &str)]) -> DocType {
+        let mut d = doctype(vec![only("Clerk", Right::Read, false)]);
+        d.name = name.into();
+        d.fields = links.iter().map(|(f, t)| link_field(f, t, 0)).collect();
+        d
+    }
+
+    fn restricted(roles: &[&str], pairs: &[(&str, &str)]) -> Caller {
+        user(roles).with_restrictions(UserRestrictions::from_pairs(pairs.iter().copied()))
+    }
+
+    fn link<'a>(field: &'a str, target: &'a str, allowed: &'a [String]) -> LinkScope<'a> {
+        LinkScope {
+            field,
+            target,
+            allowed,
+        }
+    }
+
+    #[test]
+    fn restrictions_are_sorted_deduplicated_and_empty_means_unrestricted() {
+        let r = UserRestrictions::from_pairs([("group", "b"), ("group", "a"), ("group", "b")]);
+        assert_eq!(
+            r.allowed("group"),
+            Some(&["a".to_owned(), "b".to_owned()][..])
+        );
+        assert_eq!(r.allowed("other"), None);
+        assert!(!r.is_empty());
+        let none = UserRestrictions::default();
+        assert!(none.is_empty());
+        assert_eq!(none.allowed("group"), None);
+        // An empty list is the same as no entry.
+        let empty = UserRestrictions(Arc::new(BTreeMap::from([("group".to_owned(), vec![])])));
+        assert!(empty.is_empty());
+        assert_eq!(empty.allowed("group"), None);
+    }
+
+    #[test]
+    fn a_user_without_restrictions_has_an_empty_scope() {
+        let d = with_links("customer", &[("group", "group")]);
+        assert!(row_scope(&d, &user(&["Clerk"])).is_empty());
+        // A restriction on something the DocType does not touch changes nothing.
+        let c = restricted(&["Clerk"], &[("territory", "North")]);
+        assert!(row_scope(&d, &c).is_empty());
+    }
+
+    #[test]
+    fn the_own_name_is_restricted_when_the_doctype_is() {
+        let d = with_links("group", &[]);
+        let c = restricted(&["Clerk"], &[("group", "Retail"), ("group", "Online")]);
+        let scope = row_scope(&d, &c);
+        assert_eq!(
+            scope.names,
+            Some(&["Online".to_owned(), "Retail".to_owned()][..])
+        );
+        assert!(scope.links.is_empty());
+        assert!(!scope.is_empty());
+    }
+
+    #[test]
+    fn a_link_to_a_restricted_target_is_restricted_and_a_link_to_another_is_not() {
+        let d = with_links("customer", &[("group", "group"), ("region", "region")]);
+        let c = restricted(&["Clerk"], &[("group", "Retail")]);
+        let scope = row_scope(&d, &c);
+        assert_eq!(scope.names, None);
+        let allowed = ["Retail".to_owned()];
+        assert_eq!(scope.links, vec![link("group", "group", &allowed)]);
+    }
+
+    #[test]
+    fn two_links_to_the_same_target_both_restrict() {
+        let d = with_links(
+            "customer",
+            &[("group", "group"), ("billing_group", "group")],
+        );
+        let c = restricted(&["Clerk"], &[("group", "Retail")]);
+        let fields: Vec<&str> = row_scope(&d, &c).links.iter().map(|l| l.field).collect();
+        assert_eq!(fields, ["group", "billing_group"]);
+    }
+
+    #[test]
+    fn links_to_two_restricted_targets_all_restrict() {
+        let d = with_links("order", &[("customer", "customer"), ("group", "group")]);
+        let c = restricted(&["Clerk"], &[("group", "Retail"), ("customer", "C-1")]);
+        let scope = row_scope(&d, &c);
+        let targets: Vec<&str> = scope.links.iter().map(|l| l.target).collect();
+        assert_eq!(targets, ["customer", "group"]);
+        // The own name and the links together.
+        let d = with_links("customer", &[("group", "group")]);
+        let c = restricted(&["Clerk"], &[("group", "Retail"), ("customer", "C-1")]);
+        let scope = row_scope(&d, &c);
+        assert_eq!(scope.names, Some(&["C-1".to_owned()][..]));
+        assert_eq!(scope.links.len(), 1);
+    }
+
+    #[test]
+    fn a_hidden_link_field_still_restricts() {
+        let mut d = with_links("customer", &[]);
+        d.fields.push(link_field("group", "group", 3));
+        let c = restricted(&["Clerk"], &[("group", "Retail")]);
+        assert_eq!(row_scope(&d, &c).links.len(), 1);
+    }
+
+    #[test]
+    fn administrator_and_system_are_never_restricted() {
+        let d = with_links("customer", &[("group", "group")]);
+        let pairs = [("group", "Retail"), ("customer", "C-1")];
+        let admin = restricted(&[ADMINISTRATOR], &pairs);
+        assert!(row_scope(&d, &admin).is_empty());
+        let system = Caller::system("cli").with_restrictions(UserRestrictions::from_pairs(pairs));
+        assert_eq!(system, Caller::system("cli"));
+        assert!(row_scope(&d, &system).is_empty());
+    }
+
+    #[test]
+    fn a_child_doctype_has_an_empty_scope() {
+        let mut line = with_links("line", &[("group", "group")]);
+        line.is_child = true;
+        let c = restricted(&["Clerk"], &[("group", "Retail"), ("line", "x")]);
+        assert!(row_scope(&line, &c).is_empty());
+        // The parent does not look at the Link fields of its child rows.
+        let mut parent = with_links("order", &[]);
+        parent.fields.push(DocField {
+            field_type: FieldType::Table {
+                target: "line".into(),
+            },
+            ..link_field("lines", "line", 0)
+        });
+        assert!(row_scope(&parent, &c).is_empty());
     }
 }

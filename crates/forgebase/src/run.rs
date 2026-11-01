@@ -17,7 +17,7 @@ use forgebase_http::{AppConfig, AppState, Sites};
 use crate::app::App;
 use crate::args::{
     ActorArg, Cli, Command, CustomizeCommand, DataCommand, DocCommand, DocTypesDir, FieldCommand,
-    SiteCommand, TokenCommand, UserCommand, VersionArg, WebhookCommand,
+    PermissionCommand, SiteCommand, TokenCommand, UserCommand, VersionArg, WebhookCommand,
 };
 use crate::backup::{site_backup, site_restore};
 use crate::compose::{Composed, compose};
@@ -27,6 +27,7 @@ use crate::error::CliError;
 use crate::job_cmd::{job, read_payload};
 use crate::new_app::new_app;
 use crate::report::migrate_report;
+use crate::user_permission_cmd::permission as user_permission;
 use crate::webhook_cmd::{read_secret, webhook};
 use crate::worker::{Worker, WorkerConfig, run_worker, worker_id};
 use forgebase_http::json::{
@@ -114,7 +115,13 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             crate::data_cmd::execute(&ctx, prepared).await
         }
         Command::User(command) => {
-            let registry = site_registry(site, apps)?;
+            // `user permission add` checks the DocType against the `--doctypes` directory too.
+            let registry = match &command {
+                UserCommand::Permission(PermissionCommand::Add { doctypes, .. }) => {
+                    Arc::new(site_composed(site, apps, doctypes)?.registry)
+                }
+                _ => site_registry(site, apps)?,
+            };
             // Standard input is read before the database is opened.
             let password = read_user_password(&command)?;
             let ctx = site.context(registry, None).await?;
@@ -718,8 +725,8 @@ fn read_user_password(command: &UserCommand) -> Result<String, CliError> {
 /// Runs a `user` command with the `password` already read from standard input; it is never
 /// printed.
 async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Result<(), CliError> {
-    let mut client = site.pool.get().await.map_err(DbError::from)?;
-    let client = &mut **client;
+    let mut conn = site.pool.get().await.map_err(DbError::from)?;
+    let client = &mut **conn;
     let text = match command {
         UserCommand::Create { username, roles } => {
             let roles: Vec<&str> = roles.iter().map(String::as_str).collect();
@@ -751,6 +758,11 @@ async fn user(site: &SiteContext, command: UserCommand, password: &str) -> Resul
         UserCommand::Enable { username } => {
             auth::set_enabled(client, &username, true).await?;
             format!("enabled user {username}\n")
+        }
+        UserCommand::Permission(command) => {
+            // It takes its own connection: give this one back first.
+            drop(conn);
+            return user_permission(site, &site.registry, command).await;
         }
     };
     write_stdout(&text)

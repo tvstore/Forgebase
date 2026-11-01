@@ -110,6 +110,32 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
 
 A custom field may have a `perm_level` (0 to 9, see [field permission levels](getting-started.md#field-permission-levels)): the rules for it are the `level` rules of the DocType, and a caller without the level does not see the field at all. A custom field is a field of its DocType in every other respect: `GET /api/v1/meta/{doctype}` lists it (after the fields of the app), the `[[permissions]]` of the DocType apply to it, and it can be filtered, sorted, summarized, exported and imported. A disabled field is none of that: input with it is `422` (unknown field) and a filter or sort on it is `400 invalid_query`.
 
+## User permissions (M10.3)
+
+Which documents a user is restricted to, over HTTP ([ADR 0025](../adr/0025-user-permissions.md); the command line does the same, see [User permissions](cli.md#user-permissions-m103), and the rule is in [getting started](getting-started.md#user-permissions)). **Only the Administrator role** may use these routes: any other authenticated user gets `403 permission_denied`, a cookie call needs the CSRF header like any write, and no credentials is `401`. A change applies on the affected user's **next request**.
+
+| Route | Effect |
+|---|---|
+| `GET /api/v1/user-permissions?user=U&doctype=D` | The rows, sorted by user, DocType and value; both parameters are optional filters: `{"data": [{"user", "doctype", "value", "created_at"}]}`. An unknown `user` is `404`. |
+| `POST /api/v1/user-permissions` | Body `{"user", "doctype", "value"}` (all strings, no other key). `201` with `{"data": {"user", "doctype", "value", "added": true}}`, or `200` with `"added": false` when the row exists. |
+| `POST /api/v1/user-permissions/remove` | The same body. `200` with `{"data": {"user", "doctype", "value", "removed": true}}`, or `"removed": false` when the user did not have the row. This API has no `DELETE` with a body, so a removal is a `POST` to `.../remove`, like `.../disable`. |
+
+```sh
+# Restrict ann to the customer group Retail (a POST with a session cookie needs the CSRF header)
+curl -s -b jar.txt -X POST -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"user": "ann", "doctype": "customer_group", "value": "Retail"}' \
+  http://localhost:8000/api/v1/user-permissions
+curl -s -b jar.txt 'http://localhost:8000/api/v1/user-permissions?user=ann'
+```
+
+| Status | When |
+|---|---|
+| `404` | The user does not exist. |
+| `422 validation_failed` | The DocType is unknown or a child DocType, the document does not exist, the value is empty, the username is invalid, or the user has 1000 documents for the DocType already. `details` says which. |
+| `400` | The body is not an object of three strings, or a query parameter is unknown or repeated. |
+
+For the restricted user nothing changes in the API except what they see: a document outside their permissions is `404` for get, patch and delete (like a missing one), absent from lists, summaries and exports, and a Link to a target they cannot see is `422` with the message of a name that does not exist. Creating a document of the DocType they are restricted on is `403 permission_denied`.
+
 ## Import and export (M9.3)
 
 Files in and out ([ADR 0021](../adr/0021-import-and-export.md)). Both are **rights of their own**, off for every role until a DocType's `[[permissions]]` grant them: **export** needs `read` and `export`, **import** needs `import` and `create` (and `write` for an upsert). An `if_owner` right limits an export to the caller's own documents.

@@ -231,7 +231,9 @@ impl<'c> MethodContext<'c> {
     /// The user who called the method.
     pub fn caller(&self) -> MethodCaller<'_> {
         match &self.caller {
-            Caller::User { username, roles } => MethodCaller { username, roles },
+            Caller::User {
+                username, roles, ..
+            } => MethodCaller { username, roles },
             // Never built from a request: the dispatcher refuses it. Kept total instead of
             // panicking.
             Caller::System { actor } => MethodCaller {

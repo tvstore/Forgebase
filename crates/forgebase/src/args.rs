@@ -148,6 +148,10 @@ impl Command {
             }) => Some(doctypes),
             // Only `webhook add` needs the DocTypes (to check the DocType of the webhook).
             Command::Webhook(WebhookCommand::Add { doctypes, .. }) => Some(doctypes),
+            // Only `user permission add` needs the DocTypes (the DocType must be one of the site's).
+            Command::User(UserCommand::Permission(PermissionCommand::Add { doctypes, .. })) => {
+                Some(doctypes)
+            }
             // Only `customize field add` needs the DocTypes (to check the field against them).
             Command::Customize(CustomizeCommand::Field(FieldCommand::Add { doctypes, .. })) => {
                 Some(doctypes)
@@ -385,6 +389,55 @@ pub enum UserCommand {
     Enable {
         /// Username.
         username: String,
+    },
+    /// Restrict what a user sees (user permissions, ADR 0025): add, remove and list the
+    /// documents a user is limited to. A user with permissions for a DocType sees only those
+    /// documents of it, and only the documents of other DocTypes whose Links to it are empty or
+    /// point at them. Changes apply on the user's next request. Administrators are never
+    /// restricted.
+    #[command(subcommand)]
+    Permission(PermissionCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PermissionCommand {
+    /// Restrict a user to one document of a DocType (repeat to allow several; at most 1000 per
+    /// DocType). The user and the document must exist, and the DocType must be one of the site's
+    /// (a child DocType cannot be restricted). Adding a row that exists succeeds.
+    Add {
+        /// Username.
+        #[arg(long, value_name = "USERNAME")]
+        user: String,
+        /// The DocType to restrict.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: String,
+        /// The name of the document the user may see.
+        #[arg(long, value_name = "NAME")]
+        value: String,
+        #[command(flatten)]
+        doctypes: DocTypesDir,
+    },
+    /// Take one restriction from a user. With the last one of a DocType the user is no longer
+    /// restricted on it. Removing a row that does not exist succeeds and says so.
+    Remove {
+        /// Username.
+        #[arg(long, value_name = "USERNAME")]
+        user: String,
+        /// The DocType.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: String,
+        /// The name of the document.
+        #[arg(long, value_name = "NAME")]
+        value: String,
+    },
+    /// List the restrictions, sorted by user, DocType and value, as a table.
+    List {
+        /// Only this user's.
+        #[arg(long, value_name = "USERNAME")]
+        user: Option<String>,
+        /// Only this DocType's.
+        #[arg(long, value_name = "DOCTYPE")]
+        doctype: Option<String>,
     },
 }
 

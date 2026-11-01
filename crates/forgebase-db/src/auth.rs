@@ -4,7 +4,9 @@
 //! `fb_session`, `fb_api_token`, `fb_login_failure`). There is no HTTP, cookie or permission
 //! handling here (`forgebase-http` has it, M3.3): this module only stores and checks credentials. The roles it stores are
 //! what the permission rules of M3.2 match against: [`AuthUser::caller`] turns an authenticated
-//! user into the [`Caller`] that the document functions take.
+//! user into the [`Caller`] that the document functions take. So are the user permissions of
+//! M10.3 (ADR 0025), read with the roles: [`validate_session`] and [`validate_api_token`] load
+//! them for every request, so a change applies on the user's next request.
 //!
 //! **Secrets.** A password is stored as an Argon2id PHC string (m = 19456 KiB, t = 2, p = 1,
 //! random 16-byte salt). Verification uses the parameters inside the stored string, so the
@@ -42,7 +44,7 @@ use std::sync::OnceLock;
 
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
-use forgebase_core::permission::{self, Caller};
+use forgebase_core::permission::{self, Caller, UserRestrictions};
 use time::OffsetDateTime;
 use tokio_postgres::GenericClient;
 use tokio_postgres::error::SqlState;
@@ -105,6 +107,12 @@ pub enum AuthError {
     /// No user has this username.
     #[error("user `{0}` not found")]
     UserNotFound(String),
+    /// A user permission cannot be added (M10.3, ADR 0025): the DocType is unknown or a child
+    /// DocType, the document does not exist, the value is not usable, or the user has the
+    /// limit of [`MAX_USER_PERMISSIONS`](permission::MAX_USER_PERMISSIONS) documents for the
+    /// DocType. The message says what to change.
+    #[error("invalid user permission: {0}")]
+    InvalidUserPermission(String),
     /// No API token has this key.
     #[error("API token `{0}` not found")]
     TokenNotFound(String),
@@ -141,14 +149,17 @@ pub struct AuthUser {
     pub username: String,
     /// The user's roles, sorted.
     pub roles: Vec<String>,
+    /// The documents the user is restricted to (user permissions, M10.3, ADR 0025).
+    pub restrictions: UserRestrictions,
 }
 
 impl AuthUser {
-    /// The [`Caller`] for the document operations of `forgebase-db`: the username and the roles.
-    /// Build it from the result of [`validate_session`] or [`validate_api_token`] (the roles are
-    /// read from the database then), not from request data.
+    /// The [`Caller`] for the document operations of `forgebase-db`: the username, the roles and
+    /// the user permissions. Build it from the result of [`validate_session`] or
+    /// [`validate_api_token`] (they are read from the database then), not from request data.
     pub fn caller(&self) -> Caller {
         Caller::user(self.username.clone(), self.roles.clone())
+            .with_restrictions(self.restrictions.clone())
     }
 }
 
@@ -197,7 +208,7 @@ impl fmt::Debug for ApiTokenSecret {
 // Rules
 // ---------------------------------------------------------------------------------------------
 
-fn check_username(username: &str) -> Result<(), AuthError> {
+pub(crate) fn check_username(username: &str) -> Result<(), AuthError> {
     let valid_chars = username
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '@' | '-'));
@@ -440,7 +451,10 @@ pub async fn remove_role(
     Ok(removed > 0)
 }
 
-async fn user_id(client: &impl GenericClient, username: &str) -> Result<UserId, AuthError> {
+pub(crate) async fn user_id(
+    client: &impl GenericClient,
+    username: &str,
+) -> Result<UserId, AuthError> {
     client
         .query_opt("SELECT id FROM fb_user WHERE username = $1", &[&username])
         .await?
@@ -457,6 +471,31 @@ async fn load_roles(client: &impl GenericClient, id: UserId) -> Result<Vec<Strin
     Ok(roles)
 }
 
+/// The user permissions of a user (M10.3, ADR 0025): one pair per row of `fb_user_permission`.
+/// A database that an older binary migrated has no such table yet; its users have none.
+async fn load_restrictions(
+    client: &impl GenericClient,
+    id: UserId,
+) -> Result<UserRestrictions, AuthError> {
+    let present = client
+        .query_one("SELECT to_regclass('fb_user_permission') IS NOT NULL", &[])
+        .await?;
+    if !present.try_get::<_, bool>(0)? {
+        return Ok(UserRestrictions::default());
+    }
+    let rows = client
+        .query(
+            "SELECT doctype, value FROM fb_user_permission WHERE user_id = $1",
+            &[&id],
+        )
+        .await?;
+    let mut pairs = Vec::with_capacity(rows.len());
+    for row in &rows {
+        pairs.push((row.try_get::<_, String>(0)?, row.try_get::<_, String>(1)?));
+    }
+    Ok(UserRestrictions::from_pairs(pairs))
+}
+
 async fn load_user(
     client: &impl GenericClient,
     id: UserId,
@@ -466,6 +505,7 @@ async fn load_user(
         id,
         username,
         roles: load_roles(client, id).await?,
+        restrictions: load_restrictions(client, id).await?,
     })
 }
 
@@ -869,10 +909,21 @@ mod tests {
             id: Uuid::nil(),
             username: "ann".to_owned(),
             roles: vec!["Sales User".to_owned()],
+            restrictions: UserRestrictions::default(),
         };
         assert_eq!(
             user.caller(),
             Caller::user("ann", vec!["Sales User".to_owned()])
+        );
+        // The user permissions go into the caller.
+        let user = AuthUser {
+            restrictions: UserRestrictions::from_pairs([("group", "Retail")]),
+            ..user
+        };
+        assert_eq!(
+            user.caller(),
+            Caller::user("ann", vec!["Sales User".to_owned()])
+                .with_restrictions(UserRestrictions::from_pairs([("group", "Retail")]))
         );
     }
 
@@ -940,6 +991,7 @@ mod tests {
                 id: Uuid::nil(),
                 username: "alice".to_owned(),
                 roles: vec![],
+                restrictions: UserRestrictions::default(),
             },
             expires_at: OffsetDateTime::UNIX_EPOCH,
         };

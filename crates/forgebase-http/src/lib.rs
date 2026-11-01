@@ -59,6 +59,9 @@
 //! | `GET /customize/{doctype}/fields` (M10.1, ADR 0023) | 200 `{"data": [{"doctype", "name", "label", "type", "definition", "enabled", "created_at", "modified_at", "modified_by"}]}`: the site custom fields of the DocType, enabled and disabled; **Administrator role only** (403 `permission_denied`), 404 for an unknown DocType |
 //! | `POST /customize/{doctype}/fields` body: the field as JSON, with the keys of a TOML `[[fields]]` entry (M10.1) | 201 `{"data": field}`; Administrator only; 404 unknown DocType; 422 `validation_failed` (the name must start with `custom_`; no `required`, `read_only` or `table`; not a child DocType; a bad Link target; an unknown key); 409 `conflict` for a name the DocType has already, a disabled custom field included. The column is added in the same transaction, and this server's registry is rebuilt before the answer; other servers follow within `meta_reload_interval` |
 //! | `POST /customize/{doctype}/fields/{name}/disable` and `/enable` (M10.1) | 200 `{"data": field}`; Administrator only; 404 for an unknown DocType or field. Disabling hides the field everywhere (meta, input, filters, export) and keeps its column and data; enabling brings both back |
+//! | `GET /user-permissions?user=U&doctype=D` (M10.3, ADR 0025) | 200 `{"data": [{"user", "doctype", "value", "created_at"}]}` sorted by user, DocType and value; both parameters are optional filters; **Administrator role only** (403 `permission_denied`); 404 for an unknown user |
+//! | `POST /user-permissions` body `{"user", "doctype", "value"}` (M10.3) | 201 `{"data": {"user", "doctype", "value", "added": true}}`, or 200 with `"added": false` when the row exists; Administrator only; CSRF as every write; 404 unknown user; 422 for an unknown or child DocType, a document that does not exist or more than 1000 documents for the user and DocType. Applies on the user's next request |
+//! | `POST /user-permissions/remove` body as above (M10.3) | 200 `{"data": {"user", "doctype", "value", "removed": bool}}`; Administrator only; 404 unknown user. A `POST` to `.../remove` because this API has no `DELETE` with a body (the other actions, `.../disable`, are `POST`s too) |
 //!
 //! Anything else is 404, a wrong method is 405.
 //!
@@ -79,6 +82,7 @@ mod reports;
 mod routes;
 pub mod transfer;
 mod transfer_routes;
+mod user_permissions;
 mod views;
 
 use std::collections::HashMap;
@@ -518,6 +522,14 @@ fn site_router(state: AppState) -> Router {
         .route(
             "/api/v1/customize/{doctype}/fields/{name}/enable",
             post(customize::enable),
+        )
+        .route(
+            "/api/v1/user-permissions",
+            get(user_permissions::list).post(user_permissions::add),
+        )
+        .route(
+            "/api/v1/user-permissions/remove",
+            post(user_permissions::remove),
         );
     // The desk routes exist only when a directory is configured.
     if state.config().desk_dir.is_some() {

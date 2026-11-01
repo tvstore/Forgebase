@@ -475,3 +475,56 @@ async fn the_meta_shows_read_only_fields_title_field_and_list_fields() {
     );
     assert_eq!(child[1]["label"], "Amount");
 }
+
+/// A user restricted on a DocType itself (user permissions, ADR 0025) cannot create or amend
+/// documents of it, so the metadata says `none` for those two and is unchanged for the rest;
+/// a DocType they are not restricted on, and a user without rows, are unchanged.
+#[tokio::test]
+async fn rights_of_a_restricted_user_say_none_for_create_and_amend() {
+    let env = env_with_users().await;
+    let root = env.login("root").await;
+    let name = env
+        .admin_insert(&root, "bill", json!({"title": "b1"}))
+        .await;
+    env.user("limited", &["Biller"]).await;
+    env.db
+        .exec(&format!(
+            "INSERT INTO fb_user_permission (user_id, doctype, value) \
+         SELECT id, 'bill', '{name}' FROM fb_user WHERE username = 'limited'"
+        ))
+        .await;
+    let rights = |data: &Json, doctype: &str| entry(data, doctype)["rights"].clone();
+
+    let limited = env.login("limited").await;
+    let data = env.send(get("/api/v1/meta").session(&limited)).await.data();
+    assert_eq!(
+        rights(&data, "bill"),
+        json!({"read": "all", "write": "all", "create": "none", "delete": "all",
+               "submit": "all", "cancel": "all", "amend": "none",
+               "export": "none", "import": "none"})
+    );
+    // The single-DocType route says the same.
+    let one = env
+        .send(get("/api/v1/meta/bill").session(&limited))
+        .await
+        .data();
+    assert_eq!(one["rights"]["create"], "none");
+    assert_eq!(one["rights"]["amend"], "none");
+    assert_eq!(one["rights"]["write"], "all");
+
+    // Unchanged for a user without rows, and for the Administrator whatever rows exist.
+    let biller = env.login("biller").await;
+    let data = env.send(get("/api/v1/meta").session(&biller)).await.data();
+    assert_eq!(rights(&data, "bill")["create"], "all");
+    assert_eq!(rights(&data, "bill")["amend"], "all");
+    env.db
+        .exec(
+            "INSERT INTO fb_user_permission (user_id, doctype, value) \
+         SELECT id, 'bill', 'x' FROM fb_user WHERE username = 'root'",
+        )
+        .await;
+    let root = env.login("root").await;
+    let data = env.send(get("/api/v1/meta").session(&root)).await.data();
+    assert_eq!(rights(&data, "bill")["create"], "all");
+    assert_eq!(rights(&data, "bill")["amend"], "all");
+}
