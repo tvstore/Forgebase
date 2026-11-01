@@ -234,6 +234,7 @@ JSON mapping (`forgebase_http::json`, shared by the CLI and the HTTP API since M
 ## 7. API (REST resource API implemented in M3.3, metadata and session routes in M4.1; the rest Proposed)
 
 - REST: `/api/v1/resource/{doctype}` (list with filters/sort/paging, get, create, update with version, delete) is implemented (M3.3, below). `POST /api/v1/method/{app}.{method}` for explicitly registered app endpoints is implemented (M9.1, [ADR 0019](../adr/0019-app-method-endpoints.md), below).
+- The M9 parts of this section (app methods, outgoing webhooks, export and import) are Accepted ([ADR 0019](../adr/0019-app-method-endpoints.md), [0020](../adr/0020-outgoing-webhooks.md), [0021](../adr/0021-import-and-export.md)) and implemented; "Proposed" in the heading is about the parts that are not built.
 - JSON only; consistent error envelope; stable versioned prefix from day one; default page limit with a hard maximum.
 - No GraphQL, no RPC-by-dotted-path.
 - HTTP stack: axum on tokio ([ADR 0005](../adr/0005-http-stack.md)): `axum` 0.8 with `http1`, `json`, `query` and `tokio` features, no `tower-http` (the body limit is axum's `DefaultBodyLimit`; no CORS, no compression, no tracing layer), cookies built and parsed by hand. TLS is terminated at a reverse proxy.

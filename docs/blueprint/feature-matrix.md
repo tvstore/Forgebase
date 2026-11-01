@@ -79,7 +79,7 @@ The [Project Goal](vision.md#project-goal) lists ten core capabilities, delivere
 | 3 | Document engine | M2 (done) |
 | 4 | Database and migrations | M1 (done) |
 | 5 | Security and permissions | M3 (done), M10 |
-| 6 | API and integration | M3 (done), M9 (M9.1 methods, M9.2 webhooks and M9.3 import and export done) |
+| 6 | API and integration | M3 (done), M9 (done: M9.1 methods, M9.2 webhooks, M9.3 import and export, M9.4 fixtures, M9.5 the example apps and the [integration guide](../guide/integration.md)) |
 | 7 | Frontend and Desk | M4 |
 | 8 | Business features (workflow, reports, jobs, scheduler, realtime as needed) | M6 (done), M8 (done); realtime on demand |
 | 9 | Developer experience | M5 |
