@@ -49,7 +49,7 @@ pub fn field_access(doctype: &DocType, caller: &Caller) -> FieldAccess
 
 - **System and Administrator:** every level, read and write.
 - **Level 0:** readable when `evaluate(Read)` is not `Denied`; writable when `evaluate(Write)` or `evaluate(Create)` is not `Denied`. One "writable" bit is enough: `forgebase-db` checks the right of the operation itself first (`create` for an insert, `write` for an update, with `PermissionDenied`), and `FieldAccess` decides about fields only.
-- **Level `n > 0`:** readable when level 0 is readable **and** a role of the caller has a rule `level = n` with `read`; writable when level 0 is writable **and** a role of the caller has a rule `level = n` with `write`. So `if_owner` at level 0 alone limits the documents on which a level is seen.
+- **Level `n > 0`:** readable when level 0 is readable **and** a role of the caller has a rule `level = n` with `read`; writable when level 0 is writable **and** a role of the caller has a rule `level = n` with `write`. So `if_owner` at level 0 alone limits the documents on which a level is seen. Rights are a union over roles: a level granted by one role applies to every document the caller can read through any of its roles, not only through the role that carries the level rule. A caller who can only create (no read at level 0) can never set a field above level 0: higher levels need level 0 to be readable, and an unreadable field is refused as unknown.
 - **Level 0 fields are never hidden by levels** (`shows(0)` is always true): a DocType without `perm_level` is unchanged, also for a caller who may only create.
 
 Helpers: `readable_fields(doctype, access)`, `readable_field(doctype, access, name)` (a hidden field gives `None`, **exactly like a name that is not a field**) and `readable_doctype(doctype, access)` / `readable_doctype_for(doctype, caller)`, the DocType as the caller sees it (borrowed, no copy, when nothing is hidden).
@@ -108,6 +108,8 @@ Every place that names a field in an error or a response was checked.
 - `DbError::Decode` (a stored value that cannot be read, which only manual SQL can produce) names the column, also a hidden one, on a write path.
 - A stored hidden value that is invalid makes every update of the document by a caller who cannot read it fail with the generic message (the whole merged document is validated). The Administrator fixes the value.
 - `ViewExists` can tell that a shared view with a label exists although it is not listed.
+- A user's own private view that names a field they can no longer read is not listed to them any more; it can still be deleted by its id.
+- `amend` copies hidden values of the cancelled document, and its Links are resolved again with the caller's rights. A hidden Link to a target the caller cannot read, or a hidden `unique` value, then makes the amend fail with the generic message, and the caller cannot fix it; a caller who can read the level (or the Administrator) amends instead.
 - A visible unique field leaks existence as in ADR 0011.
 - The row count of a list or export, and the existence of documents, are not about fields and are as before.
 
