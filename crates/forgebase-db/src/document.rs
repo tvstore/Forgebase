@@ -47,6 +47,15 @@
 //!   the caller cannot read is reported exactly like a missing one.
 //! - Child rows follow the parent document; they are never addressed alone.
 //!
+//! - **Field levels (M10.2, ADR 0024).** A field has a `perm_level`; a field the caller cannot read
+//!   is unknown to them. [`get`] does not select it, and every operation that returns a document
+//!   removes it from the result (after the hooks and the webhook deliveries, which carry the
+//!   whole document). The caller's *input* for such a field is an unknown field, and for a field
+//!   they can read but not write [`ValidationError::NotPermitted`] when it would change the
+//!   field, both before any hook runs. Hooks and the merge of an update see every field, so an
+//!   update by a user who cannot see a field keeps its value. A DocType without `perm_level`, and
+//!   the system context and the `Administrator` role, are not affected.
+//!
 //! The [`Caller::System`] context and the `Administrator` role bypass the rules.
 
 use std::collections::{BTreeMap, BTreeSet};

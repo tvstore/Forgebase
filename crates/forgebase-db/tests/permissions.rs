@@ -74,6 +74,11 @@ submit = true
 cancel = true
 amend = true
 if_owner = true
+[[permissions]]
+role = "LevelOnly"
+level = 1
+read = true
+write = true
 "#;
 
 const TICKET_LINE: &str = r#"
@@ -365,6 +370,38 @@ async fn every_right_is_allowed_with_its_role_and_denied_without() {
     assert!(is_denied(&result, Right::Write), "{result:?}");
     let result = attempt(&db, &reg, Right::Read, &user("u", &["WriteOnly"])).await;
     assert!(is_denied(&result, Right::Read), "{result:?}");
+}
+
+/// M10.2 (ADR 0024): a rule of a level above 0 is about fields; it grants no document right, with
+/// or without a level 0 role next to it.
+#[tokio::test]
+async fn a_rule_of_a_field_level_grants_no_document_right() {
+    let (db, reg) = setup().await;
+    for (right, _) in ROLE_OF {
+        let alone = attempt(&db, &reg, right, &user("u", &["LevelOnly"])).await;
+        assert!(
+            is_denied(&alone, right),
+            "{right} with a level rule only: {alone:?}"
+        );
+        // Next to the role of another right it adds nothing: the matrix is the same.
+        for (other, other_role) in ROLE_OF {
+            if other == right {
+                continue;
+            }
+            let result = attempt(&db, &reg, right, &user("u", &["LevelOnly", other_role])).await;
+            if right == Right::Read {
+                assert!(
+                    result.is_ok(),
+                    "read with {other_role} and a level rule: {result:?}"
+                );
+            } else {
+                assert!(
+                    is_denied(&result, right),
+                    "{right} with {other_role} and a level rule: {result:?}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

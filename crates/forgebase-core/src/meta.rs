@@ -126,7 +126,7 @@ pub struct DocField {
     /// `required` (a caller could never provide the value).
     pub read_only: bool,
     /// The permission level of the field (`perm_level`, M10.2, ADR 0024): 0 to
-    /// [`MAX_PERM_LEVEL`](crate::permission::MAX_PERM_LEVEL), 0 by default. A caller reads or
+    /// [`MAX_PERM_LEVEL`], 0 by default. A caller reads or
     /// writes a field at level `n > 0` only with a `[[permissions]]` rule of `level = n`
     /// ([`field_access`](crate::permission::field_access)); a field they cannot read is unknown
     /// to them. Not allowed on a field of a child DocType (protect the whole table with the

@@ -3,7 +3,7 @@
 //! **Internal crate, not a public API:** applications use the `forgebase` crate, and nothing here
 //! has a compatibility promise (ADR 0012). Depends only on `forgebase-core`. See ADR 0002 and `docs/blueprint/architecture.md` (section 5).
 //!
-//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1, M8.3, M9.0 and M10.1):
+//! Implemented so far (milestones M1.2, M1.3, M2.1, M2.2, M2.3, M2.4, M3.1, M3.2, M6.1, M6.2, M8.1, M8.3, M9.0, M10.1 and M10.2):
 //!
 //! - [`connect`]: a connection pool. TLS to PostgreSQL follows the `sslmode` of the URL (M9.0,
 //!   ADR 0018): none by default, `sslmode=require` for TLS with full verification (rustls with
@@ -33,6 +33,7 @@
 //!   changed in one transaction under the migrate lock with the statements of the schema sync;
 //!   [`RegistryHolder`] keeps a site's registry (the apps' plus its enabled custom fields) behind
 //!   an atomically swapped `Arc`, rebuilt when `fb_meta_version` changes.
+//! - **Field permission levels (M10.2, ADR 0024)**, enforced in the document functions, [`list`], [`summary`], export and saved views with the pure evaluator `forgebase_core::permission::field_access`: a field the caller cannot read is unknown to them (not selected, refused in filters, sort and group-by with the error of a missing field, refused in input as an unknown field), a field they can read but not write is refused in input with `ValidationError::NotPermitted`, and the documents that the write functions return are redacted. Hooks and the update merge see the whole document. See the `field_levels` module documentation (private) and ADR 0024.
 //! - [`quote_ident`]: quoting for every identifier in generated SQL.
 //! - [`insert`], [`get`], [`update`], [`delete`]: one document (with its child table rows) at a
 //!   time, on a pooled client or a caller-owned [`Transaction`]; each call runs in its own

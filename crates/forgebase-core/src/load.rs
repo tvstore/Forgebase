@@ -2119,4 +2119,50 @@ to = "Nowhere"
             "{errors:?}"
         );
     }
+
+    /// The example of `docs/guide/getting-started.md` ("Field permission levels"), in a file.
+    #[test]
+    fn the_example_of_the_guide_loads_and_means_what_it_says() {
+        use crate::permission::{Caller, field_access};
+        let d = from_toml_str(
+            r#"
+name = "customer"
+label = "Customer"
+
+[[fields]]
+name = "full_name"
+type = "data"
+
+[[fields]]
+name = "credit_limit"
+type = "decimal"
+precision = 12
+scale = 2
+perm_level = 1
+
+[[permissions]]
+role = "Sales User"
+read = true
+write = true
+create = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+
+# Level 1: the manager sees and changes credit_limit, the sales user does not even know it exists.
+[[permissions]]
+role = "Sales Manager"
+level = 1
+read = true
+write = true
+"#,
+        )
+        .unwrap();
+        let user = field_access(&d, &Caller::user("u", vec!["Sales User".into()]));
+        assert!(user.shows(0) && !user.shows(1));
+        let manager = field_access(&d, &Caller::user("m", vec!["Sales Manager".into()]));
+        assert!(manager.can_read(1) && manager.can_write(1));
+    }
 }
