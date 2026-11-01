@@ -235,6 +235,9 @@ pub async fn migrate_apps(
 /// schedules the binary declares ([`schedule::sync`]) when `schedules` is `Some`: schedules the
 /// binary does not declare are **deleted**, so the binary that migrates is the source of truth.
 /// With `None` the schedule table is left alone.
+///
+/// A refused fixture is not an `Err`: it is [`MigrateReport::fixtures_failure`] in the returned
+/// report, which also says what was committed. **Check it.**
 pub async fn migrate_all(
     pool: &Pool,
     registry: &Registry,

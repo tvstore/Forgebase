@@ -105,12 +105,22 @@ pub(crate) async fn apply(
 ) -> Result<AppFixtures, DbError> {
     let mut report = AppFixtures::new(app.name, app.fixtures.len());
     let caller = Caller::system(actor(app.name));
-    let mut tx = client.transaction().await?;
+    let setup_failed = |e: DbError| DbError::FixtureFailed {
+        app: app.name.to_owned(),
+        file: "(all fixture files)".to_owned(),
+        record: "transaction".to_owned(),
+        message: e.to_string(),
+    };
+    let mut tx = client
+        .transaction()
+        .await
+        .map_err(|e| setup_failed(e.into()))?;
     tx.query(
         "SELECT set_config('lock_timeout', $1, true)",
         &[&lock_timeout_setting(lock_timeout)],
     )
-    .await?;
+    .await
+    .map_err(|e| setup_failed(e.into()))?;
     for record in app.fixtures {
         let failed = |message: String| DbError::FixtureFailed {
             app: app.name.to_owned(),
@@ -127,9 +137,11 @@ pub(crate) async fn apply(
                 "SELECT checksum FROM fb_fixture WHERE doctype = $1 AND name = $2",
                 &[&record.doctype, &record.name],
             )
-            .await?
+            .await
+            .map_err(|e| fail(e.into()))?
             .map(|row| row.try_get(0))
-            .transpose()?;
+            .transpose()
+            .map_err(|e| fail(e.into()))?;
         if previous.as_deref() == Some(record.checksum) {
             report.unchanged += 1;
             continue;
@@ -188,9 +200,12 @@ pub(crate) async fn apply(
              checksum = excluded.checksum, applied_at = now()",
             &[&record.doctype, &record.name, &app.name, &record.checksum],
         )
-        .await?;
+        .await
+        .map_err(|e| fail(e.into()))?;
     }
-    tx.commit().await?;
+    // A database error here is still the fixtures' failure: `migrate` then keeps and prints the
+    // report of what was committed before.
+    tx.commit().await.map_err(|e| setup_failed(e.into()))?;
     Ok(report)
 }
 

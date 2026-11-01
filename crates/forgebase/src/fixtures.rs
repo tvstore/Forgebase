@@ -55,17 +55,21 @@ pub(crate) fn checksum(record: &Json) -> String {
     text
 }
 
-/// The canonical JSON of a value, written here and not by `serde_json`'s own serializer, so that
-/// it does not depend on which features of `serde_json` the app's dependency graph enables
-/// (`preserve_order` would change the order of keys, `arbitrary_precision` the form of numbers).
-/// Stored checksums must never change for that reason: the next `migrate` would update every
-/// record and overwrite the site's edits.
+/// The canonical JSON of a value. What is guaranteed, and by whom:
 ///
-/// The form: compact (no white space); object keys sorted by their bytes; strings escaped as
-/// `serde_json` does; an integer that fits `i64` or `u64` as its decimal digits; any other number
-/// as the shortest `f64` text (`serde_json`'s form for a float). It is the same text as
-/// `serde_json::to_string` gives with the default features, so checksums computed before this
-/// writer existed are unchanged.
+/// - **Keys.** Written here, not by `serde_json`'s serializer: object keys are sorted by their
+///   bytes, whatever order the map iterates in, so `preserve_order` cannot change the text.
+/// - **Numbers.** The parser is `serde_json`'s, whose features are chosen by the app's
+///   dependency graph (`arbitrary_precision`, `float_roundtrip`) and change how some numbers
+///   parse or print. [`number_problem`] therefore **refuses at startup** every number that could
+///   differ (negative zero, an integer outside `i64`/`u64`, a non-integer with more than 15
+///   significant digits or a decimal exponent beyond 22), so a number that gets here has one
+///   value and one text in every build: an integer as its digits, any other number as the
+///   shortest `f64` text.
+///
+/// Stored checksums must never change for these reasons: the next `migrate` would update every
+/// record and overwrite the site's edits. For accepted values the text equals `serde_json`'s
+/// default compact output, so checksums computed before this writer existed are unchanged.
 pub(crate) fn canonical(value: &Json) -> String {
     let mut out = String::new();
     write_canonical(value, &mut out);
@@ -114,6 +118,61 @@ fn write_canonical(value: &Json, out: &mut String) {
             }
             out.push('}');
         }
+    }
+}
+
+/// Why a number cannot be part of a fixture record, or `None`: it must have the same value and the
+/// same canonical text in every build of the app (see [`canonical`]). Accepted: an integer in the
+/// `i64` or `u64` range (not negative zero), and a non-integer, or an integer written as a float,
+/// (below 2^63) whose shortest `f64` text has at most 15 significant digits and a decimal exponent within
+/// ±22, which is exact in every parsing mode (the fast path of `serde_json`). Refused: negative
+/// zero (`-0` is `-0.0` by default and `0` with `arbitrary_precision`), a number that is not
+/// finite, an integer beyond the `i64`/`u64` range (it goes through `f64`), and any number with
+/// more digits or a larger exponent (`float_roundtrip` and `arbitrary_precision` can parse
+/// those to another `f64`). A number that is out of range for `f64` (`1e400`) is a parse error
+/// by default and refused here when it parses under `arbitrary_precision`.
+fn number_problem(n: &serde_json::Number) -> Option<String> {
+    let text = n.to_string();
+    let advice = "write it with at most 15 significant digits, or as a string";
+    // Negative zero: a sign and no non-zero digit before any exponent.
+    let mantissa = text.split(['e', 'E']).next().unwrap_or("");
+    if mantissa.starts_with('-') && !mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b)) {
+        return Some(format!(
+            "number `{text}` is a negative zero, which cannot be represented the same way in every build; write 0"
+        ));
+    }
+    if n.as_i64().is_some() || n.as_u64().is_some() {
+        return None;
+    }
+    let Some(f) = n.as_f64().filter(|f| f.is_finite()) else {
+        return Some(format!("number `{text}` is out of range"));
+    };
+    // An integer beyond the 64-bit range goes through `f64`, whatever it is written like.
+    if f.fract() == 0.0 && f.abs() >= 9_223_372_036_854_775_808.0 {
+        return Some(format!(
+            "number `{text}` is an integer outside the 64-bit range and cannot be represented the same way in every build; write it as a string"
+        ));
+    }
+    // `{:e}` is the shortest text that reads back as `f`: `d.ddde<exp>`.
+    let shortest = format!("{f:e}");
+    let (digits, exponent) = shortest.split_once('e').unwrap_or((&shortest, "0"));
+    let significant = digits.bytes().filter(u8::is_ascii_digit).count();
+    let exponent: i32 = exponent.parse().unwrap_or(i32::MAX);
+    if significant > 15 || !(-22..=22).contains(&exponent) {
+        return Some(format!(
+            "number `{text}` cannot be represented the same way in every build; {advice}"
+        ));
+    }
+    None
+}
+
+/// The problems of every number in `value`, rows of Table fields included.
+fn number_problems(value: &Json, problems: &mut Vec<String>) {
+    match value {
+        Json::Number(n) => problems.extend(number_problem(n)),
+        Json::Array(items) => items.iter().for_each(|i| number_problems(i, problems)),
+        Json::Object(map) => map.values().for_each(|v| number_problems(v, problems)),
+        _ => {}
     }
 }
 
@@ -200,6 +259,14 @@ pub(crate) fn check(
                             doctype.name
                         ),
                     ));
+                    continue;
+                }
+                let mut numbers = Vec::new();
+                number_problems(&json, &mut numbers);
+                if !numbers.is_empty() {
+                    errors
+                        .apps
+                        .push(record_problem(Some(&name), numbers.join("; ")));
                     continue;
                 }
                 if let Some(text) = field_problems(registry, doctype, object) {
@@ -433,6 +500,81 @@ mod tests {
         assert_eq!(
             checksum(&json(r#"{ "a" : 1 }"#)),
             "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862"
+        );
+    }
+
+    fn number(text: &str) -> serde_json::Number {
+        match json(text) {
+            Json::Number(n) => n,
+            other => panic!("{text} is {other}"),
+        }
+    }
+
+    #[test]
+    fn numbers_that_could_parse_differently_are_refused() {
+        for bad in [
+            // negative zero, integer or float
+            "-0",
+            "-0.0",
+            "-0e5",
+            // 16 or more significant digits
+            "9007199254740993.0",
+            "0.1234567890123456",
+            "100000000000000000000000.5",
+            "2.2250738585072011e-308",
+            // beyond the exponent range of the exact fast path
+            "1e23",
+            "1e-23",
+            "1.5e100",
+            // integers outside i64 and u64
+            "18446744073709551616",
+            "-9223372036854775809",
+            "100000000000000000000",
+            "1e19",
+        ] {
+            assert!(number_problem(&number(bad)).is_some(), "{bad} was accepted");
+        }
+        let problem = number_problem(&number("0.1234567890123456")).unwrap();
+        assert!(
+            problem.contains("cannot be represented the same way in every build")
+                && problem.contains("15 significant digits, or as a string"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn numbers_that_parse_the_same_everywhere_are_accepted() {
+        for good in [
+            "0",
+            "0.0",
+            "0.1",
+            "12.50",
+            "1e2",
+            "1e18",
+            "1e-22",
+            "2.5e3",
+            "123456789012345",
+            "-7",
+            "-1.5",
+            "18446744073709551615",
+            "-9223372036854775808",
+            "9223372036854775807",
+        ] {
+            assert_eq!(number_problem(&number(good)), None, "{good} was refused");
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_number_is_refused() {
+        // By default this does not even parse; with `arbitrary_precision` it parses and
+        // `number_problem` refuses it (not finite as an f64).
+        assert!(
+            serde_json::from_str::<Json>("1e400").is_err() || {
+                let Json::Number(n) = json("1e400") else {
+                    unreachable!()
+                };
+                number_problem(&n).is_some()
+            }
         );
     }
 
@@ -701,6 +843,34 @@ mod tests {
                 "record 1 (`a`)",
                 "`rows` row 2: `nope` is not a field of `row`",
             ],
+        );
+    }
+
+    #[test]
+    fn a_number_that_could_parse_differently_is_a_startup_error_also_in_rows() {
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "parent", "records": [{"code": "a", "size": -0}]}"#,
+            )],
+            &["record 1 (`a`)", "negative zero"],
+        );
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "parent", "records": [{"code": "a", "rows": [{"qty": 1}, {"qty": 0.1234567890123456}]}]}"#,
+            )],
+            &[
+                "record 1 (`a`)",
+                "cannot be represented the same way in every build",
+            ],
+        );
+        refused(
+            &[(
+                "fixtures/f.json",
+                r#"{"doctype": "parent", "records": [{"code": "a", "size": 18446744073709551616}]}"#,
+            )],
+            &["record 1 (`a`)", "number `"],
         );
     }
 

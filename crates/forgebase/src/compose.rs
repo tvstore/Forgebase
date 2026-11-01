@@ -144,7 +144,8 @@ impl Composed {
 
     /// Framework migrations, schema sync, the app migrations in app order, the sync of the
     /// declared schedules and then the fixtures of the apps in app order
-    /// ([`forgebase_db::migrate_all`]).
+    /// ([`forgebase_db::migrate_all`]). A refused fixture is `MigrateReport::fixtures_failure`
+    /// in the `Ok` report, not an `Err`: the caller prints what was applied, then the failure.
     pub async fn migrate(
         &self,
         pool: &Pool,

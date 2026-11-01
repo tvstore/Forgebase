@@ -125,7 +125,7 @@ Amendment of 2026-11-01 (the text above is unchanged). [ADR 0022](0022-fixtures.
 | `App::fixtures(&'static [FixtureFile])` | Adds fixture files: records the app ships, applied by `migrate` through the document pipeline (inserted if missing, updated only when the app changes the record, never deleted). Calling it again adds more files. |
 | `fixtures!` | Embeds JSON files with `include_str!`, paths relative to the calling crate's root, like `doctypes!` and `migrations!`. |
 | `FixtureFile` (`new(path, json)`, `path()`, `json()`; `#[non_exhaustive]`, no public fields) | One fixture file, for the macro and for tests. |
-| `testing::Migrated::fixtures` and `testing::AppliedFixtures` (`app`, `inserted`, `updated`, `kept`, `unchanged`; `#[non_exhaustive]`; feature `testing`) | What `TestDb::migrate` did with the fixtures of each app that has any. `TestDb::migrate` applies fixtures like `forgebase migrate`. |
+| `testing::Migrated::fixtures`, `Migrated::fixtures_planned` (false in a dry run while framework migrations are pending, where the counts are zero) and `testing::AppliedFixtures` (`app`, `inserted`, `updated`, `kept`, `unchanged`; `#[non_exhaustive]`; feature `testing`) | What `TestDb::migrate` did with the fixtures of each app that has any. `TestDb::migrate` applies fixtures like `forgebase migrate`. |
 
 Every mistake in a fixture file that needs no database is a startup error with the other app problems (`StartupError`).
 
