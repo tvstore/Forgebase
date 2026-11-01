@@ -2,7 +2,7 @@
 
 For the person who connects Forgebase to other systems: a warehouse tool that reads order totals, an accounting system that wants every approved order, a spreadsheet full of customers. This page is a walkthrough on the [`sales` example app](../../examples/sales/README.md) with four tools: an **app method** (another system asks a question), a **webhook** (Forgebase tells another system something happened), **import and export** (files in and out) and **fixtures** (records the app ships). It links the reference pages instead of repeating them.
 
-Every command and snippet below was run against the `sales` binary (`cargo run -p sales -- ...`) on a scratch PostgreSQL database at the time of writing. Set it up like this; the examples assume a Sales Manager `max` and a Sales User `ann`:
+Every command and snippet below was run against the `sales` binary (`cargo run -p sales -- ...`) on a scratch PostgreSQL database at the time of writing (each section on its own; the sample outputs are illustrative, as the setup creates no orders). Set it up like this; the examples assume a Sales Manager `max` and a Sales User `ann`:
 
 ```sh
 export FORGEBASE_DATABASE_URL=postgres://user:password@localhost:5432/sales
@@ -12,7 +12,7 @@ printf '%s\n' 'a long password' | cargo run -p sales -- user create ann --role "
 FORGEBASE_DEV_INSECURE_COOKIES=1 cargo run -p sales -- serve      # http://127.0.0.1:8000
 ```
 
-and log in as in the [HTTP API guide](http-api.md): `CSRF` holds the token of the login and `jar.txt` the session cookie.
+and log in as in the [HTTP API guide](http-api.md), as `max`: `CSRF` holds the token of the login and `jar.txt` the session cookie (the import in section 3 needs the Sales Manager).
 
 ## 1. App methods: another system asks a question
 
@@ -64,6 +64,7 @@ The access rules, all enforced by the framework and the same for every method:
 - **A user without a role of the method** (here, neither Sales User nor Sales Manager; the Administrator always may) gets `404`, the same answer as a method that does not exist, so names are not revealed. There are no guest methods.
 - **It runs as the caller.** `ctx.documents()` applies the permission rules of `sales_order` to every read. `sales_order` has **no `if_owner` rule** (both roles read every order), so the summary of a Sales User and of a Sales Manager are the same; if you add an `if_owner` read rule, the same code counts only the caller's own orders.
 - **A bad input** (`{"from": "yesterday"}`, an unknown key, `from` after `to`) is `400 method_error` with a message written for the person who sent it. Whatever the method did is rolled back on every error.
+- **`total` counts every order the caller can read, whatever its state, Cancelled included**; `by_state` gives the split. The counts come from one query per state and are not one snapshot: an order that changes state while the method runs may be counted twice or not at all. For an exact report, use a [query report](workflow-and-reports.md) instead.
 - **No limit of 500.** `Documents::list` returns one page of at most 500 and has no offset, so the handler pages by `name` (the sort ends with it, and it is unique) and counts every page.
 
 The route, the statuses and the limits are in the [HTTP API guide](http-api.md#app-methods).
@@ -94,11 +95,12 @@ Give the secret to the receiver. An order of the `sales` app is submitted by the
 **It is tested in CI.** The `sites` job runs [`examples/sites/ci.sh`](../../examples/sites/ci.sh), which starts that receiver, adds a webhook on `sales_order` for `submit`, approves an order, runs the worker and asserts that the receiver recorded **exactly one verified `submit` delivery** of that order (and that a forged signature is refused). To try it on your machine the receiver is on `127.0.0.1` and speaks plain HTTP, which the SSRF guard refuses by default, so the webhook needs two explicit **development-only** flags:
 
 ```sh
+secret="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # never printed
 WEBHOOK_SECRET="$secret" python3 -I examples/sites/receiver.py 9000 deliveries.jsonl &
-printf '%s\n' "$secret" | cargo run -p sales -- webhook add sales_order_submit \
+printf '%s\n' "$secret" | cargo run -p sales -- webhook add local_submit \
   --doctype sales_order --events submit --url http://127.0.0.1:9000/hook \
   --allow-private --insecure-http --secret-stdin
-cargo run -p sales -- webhook test sales_order_submit      # HTTP 200, exit 0
+cargo run -p sales -- webhook test local_submit            # HTTP 200, exit 0
 cargo run -p sales -- worker                                # sends the real deliveries
 ```
 
@@ -145,7 +147,7 @@ The import is **all or nothing**: one transaction, and if any row has an error n
 The same from the command line, as the trusted system context (no permission rules; `--actor` names who is recorded as owner), and the same in the desk, where the list's **Export** menu and the **Import** page (Validate, then Import) do it without curl:
 
 ```sh
-cargo run -p sales -- data export customer --format csv --fields name,full_name,tier --out customers.csv
+cargo run -p sales -- data export customer --format csv --fields name,full_name,tier --out customers-cli.csv
 cargo run -p sales -- data import customer new-customers.csv --format csv --dry-run
 cargo run -p sales -- data import customer new-customers.csv --format csv --actor max
 ```
@@ -173,6 +175,8 @@ Some records should exist on every site that installs the app. `sales` ships its
 app migrations: 1 applied
 fixtures: sales: 1 inserted, 0 updated, 2 kept, 0 unchanged
 ```
+
+(abridged: the lines of the framework migrations, the schema sync and the schedules are left out)
 
 `Online` was missing, so it was **inserted**. `Retail` and `Wholesale` existed already, so they were **kept**: left exactly as they are and tracked from now on (the site's data wins). The next `migrate` finds all three **unchanged** and writes nothing:
 
