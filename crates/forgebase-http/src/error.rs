@@ -145,6 +145,10 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
@@ -412,6 +416,17 @@ impl From<DbError> for ApiError {
             DbError::CustomField(problem) => Self::validation(vec![problem.to_string()]),
             DbError::CustomFieldNotFound { .. } => Self::not_found(text),
             DbError::NotFound { .. } => Self::not_found(text),
+            // The migrate lock is held by a `migrate` or another schema change (M10.1): a clear,
+            // retryable answer instead of an internal error.
+            DbError::LockTimeout => {
+                let mut error = Self::new(
+                    S::SERVICE_UNAVAILABLE,
+                    "lock_timeout",
+                    "the database schema is being changed (a migrate is running); retry shortly",
+                );
+                error.retry_after = Some(5);
+                error
+            }
             // The same answer for a report that does not exist and one the caller may not run.
             DbError::ReportNotFound { .. } => Self::not_found("report not found"),
             DbError::ReportTimeout { .. } => Self::new(

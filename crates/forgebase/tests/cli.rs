@@ -3143,3 +3143,160 @@ fn customize_field_refusals_change_nothing() {
         Some("1")
     );
 }
+
+#[test]
+fn the_data_and_doc_commands_see_enabled_custom_fields_and_refuse_disabled_ones() {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    let added = db.forgebase_with_stdin(
+        &[
+            "customize",
+            "field",
+            "add",
+            "--doctype",
+            "customer",
+            "--field",
+            "-",
+            "--doctypes",
+            DOCTYPES,
+        ],
+        Some("name = \"custom_vip\"\ntype = \"check\"\n"),
+    );
+    assert_eq!(code(&added), Some(0), "{}", stderr(&added));
+    let scratch = Scratch::new();
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--doctypes", DOCTYPES]);
+        db.forgebase(&all)
+    };
+
+    // doc insert and update take the field, and doc get shows it.
+    let out = run(&[
+        "doc",
+        "insert",
+        "customer",
+        "--data",
+        r#"{"email":"a@x.test","full_name":"A","custom_vip":true}"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let doc: Json = serde_json::from_str(&stdout(&out)).expect("JSON");
+    assert_eq!(doc["custom_vip"], true);
+    let version = doc["version"].to_string();
+    let out = run(&[
+        "doc",
+        "update",
+        "customer",
+        "a@x.test",
+        "--version",
+        &version,
+        "--data",
+        r#"{"custom_vip":false}"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let out = run(&[
+        "doc",
+        "list",
+        "customer",
+        "--filter",
+        r#"[{"field":"custom_vip","op":"=","value":false}]"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        serde_json::from_str::<Json>(&stdout(&out))
+            .expect("JSON")
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // A CSV export has the column, --fields and --filter work on it, and an import sets it.
+    let out = run(&["data", "export", "customer", "--format", "csv"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out)
+            .lines()
+            .next()
+            .expect("header")
+            .contains("custom_vip"),
+        "{}",
+        stdout(&out)
+    );
+    let out = run(&[
+        "data",
+        "export",
+        "customer",
+        "--format",
+        "csv",
+        "--fields",
+        "name,custom_vip",
+        "--filter",
+        r#"[{"field":"custom_vip","op":"=","value":false}]"#,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out).replace("\r\n", "\n"),
+        "name,custom_vip\na@x.test,false\n"
+    );
+    let csv = scratch.file("in.csv", "email,full_name,custom_vip\nb@x.test,B,true\n");
+    let out = run(&["data", "import", "customer", &csv, "--format", "csv"]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        db.scalar("SELECT custom_vip::text FROM doc_customer WHERE name = 'b@x.test'")
+            .as_deref(),
+        Some("true")
+    );
+
+    // Disabled: unknown in input, import, --fields and --filter; the column and data stay.
+    let off = db.forgebase(&[
+        "customize",
+        "field",
+        "disable",
+        "--doctype",
+        "customer",
+        "custom_vip",
+    ]);
+    assert_eq!(code(&off), Some(0), "{}", stderr(&off));
+    for args in [
+        vec![
+            "doc",
+            "insert",
+            "customer",
+            "--data",
+            r#"{"email":"c@x.test","full_name":"C","custom_vip":true}"#,
+        ],
+        vec![
+            "doc",
+            "list",
+            "customer",
+            "--filter",
+            r#"[{"field":"custom_vip","op":"=","value":true}]"#,
+        ],
+        vec!["data", "export", "customer", "--fields", "custom_vip"],
+        vec![
+            "data",
+            "export",
+            "customer",
+            "--filter",
+            r#"[{"field":"custom_vip","op":"=","value":true}]"#,
+        ],
+        vec![
+            "data", "import", "customer", &csv, "--format", "csv", "--upsert",
+        ],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), Some(1), "{args:?}: {}", stdout(&out));
+        assert!(
+            stderr(&out).contains("custom_vip"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    let out = run(&["data", "export", "customer", "--format", "csv"]);
+    assert!(!stdout(&out).contains("custom_vip"), "{}", stdout(&out));
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM doc_customer WHERE custom_vip")
+            .as_deref(),
+        Some("1")
+    );
+}

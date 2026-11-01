@@ -118,7 +118,7 @@ The `forgebase` crate now depends on `axum` and `tower` without the `testing` fe
 
 ### Public surface update (M9.4)
 
-Amendment of 2026-11-01 (the text above is unchanged). [ADR 0022](0022-fixtures.md) (the M9 plan, owner decision 10 of 2026-10-30) adds these items; nothing else becomes public and nothing breaks.
+Amendment of 2026-11-01 (the text above is unchanged). [ADR 0022](0022-fixtures.md) (the M9 plan, owner decision 10 of 2026-10-30) adds these items; nothing else becomes public. It fulfils what point 3 of the Decision above left to M10: *"An app cannot change another app's DocType definition (custom fields on another app's DocType are a later milestone, M10: the model leaves room for an overlay applied after the app's own definitions)."* An app still cannot change or redefine a DocType, but it may now **add fields** to one of an app it depends on, through an overlay; the DocType stays owned by its one app. The reservation of the prefix `custom_` below is a **breaking change** for an app that used such a field name.
 
 | Item | Purpose |
 |---|---|

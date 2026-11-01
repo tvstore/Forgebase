@@ -53,6 +53,9 @@ pub enum OverlayError {
     /// A site custom field without the prefix.
     #[error("the name of a site custom field must start with `custom_` (got `{0}`)")]
     MissingPrefix(String),
+    /// A site custom field named just `custom_`: at least one character must follow the prefix.
+    #[error("the name of a site custom field needs at least one character after `custom_`")]
+    EmptyCustomName,
     /// A site custom field with `required`.
     #[error(
         "field `{0}`: a site custom field cannot be required (existing documents have no value for it)"
@@ -362,6 +365,10 @@ mod tests {
         assert_eq!(
             registry.add_custom_field("customer", field("name = \"vip\"\ntype = \"check\"\n")),
             Err(OverlayError::MissingPrefix("vip".to_owned()))
+        );
+        assert_eq!(
+            registry.add_custom_field("customer", field("name = \"custom_\"\ntype = \"check\"\n")),
+            Err(OverlayError::EmptyCustomName)
         );
         assert_eq!(
             registry.add_custom_field(

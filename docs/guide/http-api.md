@@ -106,6 +106,7 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
 | `404` | The DocType, or the field for `disable` and `enable`, does not exist. |
 | `422 validation_failed` | A rule is broken: the name must start with `custom_`; no `required`, `read_only` or `table`; not a child DocType; a Link target that does not exist; an unknown key or type. `details` says which. |
 | `409 conflict` | The DocType has a field of that name already (a disabled custom field included). |
+| `503 lock_timeout` | A `migrate` or another schema change holds the lock longer than 5 s (`Retry-After: 5`); nothing was written, retry. |
 
 A custom field is a field of its DocType in every other respect: `GET /api/v1/meta/{doctype}` lists it (after the fields of the app), the `[[permissions]]` of the DocType apply to it, and it can be filtered, sorted, summarized, exported and imported. A disabled field is none of that: input with it is `422` (unknown field) and a filter or sort on it is `400 invalid_query`.
 

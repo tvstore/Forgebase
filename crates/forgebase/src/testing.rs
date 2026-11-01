@@ -551,9 +551,13 @@ pub async fn run_schedules_at(
 ) -> usize {
     let composed = compose(&forgebase.apps, None)
         .unwrap_or_else(|e| panic!("the apps do not fit together: {e}"));
+    // The same registry as `run_jobs`: the apps' with the database's custom fields.
+    let holder = RegistryHolder::load("default", Arc::new(composed.registry), &db.pool)
+        .await
+        .unwrap_or_else(|e| panic!("run_schedules_at: {e}"));
     let worker = Worker::new(
         db.pool.clone(),
-        plain_holder(composed.registry),
+        Arc::new(holder),
         composed.jobs,
         composed.schedules,
         WorkerConfig::default(),

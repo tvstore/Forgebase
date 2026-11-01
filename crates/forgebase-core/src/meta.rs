@@ -1536,6 +1536,9 @@ impl Registry {
         if !field.name.starts_with(CUSTOM_PREFIX) {
             return Err(OverlayError::MissingPrefix(field.name));
         }
+        if field.name == CUSTOM_PREFIX {
+            return Err(OverlayError::EmptyCustomName);
+        }
         if field.required {
             return Err(OverlayError::Required(field.name));
         }

@@ -620,6 +620,7 @@ async fn the_customize_api_is_for_administrators_and_validates() {
     // The administrator's rules.
     let rules: Vec<(&str, Json, u16)> = vec![
         ("customer", json!({"name": "vip", "type": "check"}), 422),
+        ("customer", json!({"name": "custom_", "type": "check"}), 422),
         (
             "customer",
             json!({"name": "custom_a", "type": "table", "target": "note_line"}),
@@ -1055,5 +1056,51 @@ async fn a_job_sees_the_custom_fields_of_its_site() {
             .await,
         vec![vec!["9".to_owned()]]
     );
+    db.cleanup().await;
+}
+
+/// A schema change waits for the migrate lock; when `migrate` holds it longer than the
+/// `lock_timeout`, the answer is `503 lock_timeout` with `Retry-After`, nothing is written, and the
+/// server still works.
+#[tokio::test]
+async fn a_busy_migrate_lock_is_a_503_that_changes_nothing() {
+    let binary = plain();
+    let db = site(&binary).await;
+    let server = db.client(&binary);
+    let root = server.login("root").await;
+    // Another session holds the lock of `migrate` (the key of `MIGRATE_LOCK_KEY`).
+    let holder = forgebase_db::connect(db.url()).await.expect("pool");
+    let held = holder.get().await.expect("connection");
+    held.execute("SELECT pg_advisory_lock(5062693908242366465)", &[])
+        .await
+        .expect("lock");
+    let busy = root
+        .post(
+            "/api/v1/customize/customer/fields",
+            json!({"name": "custom_a", "type": "int"}),
+        )
+        .await;
+    assert_eq!(busy.status, 503, "{:?}", busy.body);
+    assert_eq!(busy.error_code(), Some("lock_timeout"));
+    held.execute("SELECT pg_advisory_unlock(5062693908242366465)", &[])
+        .await
+        .expect("unlock");
+    assert!(
+        root.get("/api/v1/customize/customer/fields")
+            .await
+            .data()
+            .as_array()
+            .expect("array")
+            .is_empty()
+    );
+    // Once the lock is free the same call works.
+    let ok = root
+        .post(
+            "/api/v1/customize/customer/fields",
+            json!({"name": "custom_a", "type": "int"}),
+        )
+        .await;
+    assert_eq!(ok.status, 201, "{:?}", ok.body);
+    drop(held);
     db.cleanup().await;
 }

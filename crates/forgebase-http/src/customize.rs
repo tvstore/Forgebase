@@ -48,6 +48,22 @@ fn known(state: &AppState, doctype: &str) -> Result<(), ApiError> {
     }
 }
 
+/// Rebuilds this server's registry after a change committed. A failure is only logged: the change
+/// is made and the version poll catches up within the reload interval, so the caller must not be
+/// told that a committed change failed.
+async fn reload_after_commit(state: &AppState) {
+    if let Err(error) = state.reload_registry().await {
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!(
+                "warning: site `{}`: the change was saved but the registry could not be reloaded; the next poll will: {}\n",
+                state.site_name(),
+                error.message()
+            ),
+        );
+    }
+}
+
 fn field_json(field: &CustomField) -> Result<Json, ApiError> {
     let time = |t: &time::OffsetDateTime, name: &str| {
         utc_rfc3339(t).map_err(|problem| {
@@ -117,7 +133,7 @@ pub async fn add(
     )
     .await?;
     drop(client);
-    state.reload_registry().await?;
+    reload_after_commit(&state).await;
     Ok(data(StatusCode::CREATED, field_json(&stored)?))
 }
 
@@ -143,7 +159,7 @@ async fn set_enabled(
     )
     .await?;
     drop(client);
-    state.reload_registry().await?;
+    reload_after_commit(&state).await;
     Ok(data(StatusCode::OK, field_json(&stored)?))
 }
 

@@ -5,7 +5,7 @@ use std::io::{BufRead, Read, Write};
 use std::time::Duration;
 
 use forgebase_core::document::{Changes, Document};
-use forgebase_core::meta::{DocType, Registry};
+use forgebase_core::meta::Registry;
 use forgebase_core::permission::Caller;
 use forgebase_db::auth;
 use forgebase_db::{DbError, ListQuery, StoredDocument, SyncOptions};
@@ -85,8 +85,14 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             write_stdout(&migrate_site(site, &composed, &options).await?)
         }
         Command::Doc(command) => {
-            let (registry, operation) = prepare(command, site, apps)?;
-            let ctx = site.context(Arc::new(registry), None).await?;
+            // The DocType is looked up in the apps (before the database is opened, so an unknown
+            // one never touches it) and the input is read; the input is then checked against the
+            // registry of the site context, which has the site's enabled custom fields.
+            let (dir, name) = target(&command);
+            let base = Arc::new(find_doctype(site, apps, dir, name)?);
+            let text = read_doc_input(&command)?;
+            let ctx = site.context(base, None).await?;
+            let operation = prepare(command, &ctx.registry, text)?;
             execute(&ctx, operation).await
         }
         Command::Data(command) => {
@@ -96,10 +102,12 @@ pub async fn run(cli: Cli, apps: &[App]) -> Result<(), CliError> {
             | DataCommand::Import {
                 doctype, doctypes, ..
             }) = &command;
-            let (registry, found) = find_doctype(site, apps, doctypes, doctype)?;
-            // The file is read and checked before the database is opened.
-            let prepared = crate::data_cmd::prepare(command, &registry, &found)?;
-            let ctx = site.context(Arc::new(registry), None).await?;
+            let base = Arc::new(find_doctype(site, apps, doctypes, doctype)?);
+            // The file is read before the database is opened, and checked against the registry
+            // of the site context (enabled custom fields included) after.
+            let bytes = crate::data_cmd::read_input(&command)?;
+            let ctx = site.context(base, None).await?;
+            let prepared = crate::data_cmd::prepare(command, &ctx.registry, bytes)?;
             crate::data_cmd::execute(&ctx, prepared).await
         }
         Command::User(command) => {
@@ -438,16 +446,19 @@ fn target(command: &DocCommand) -> (&DocTypesDir, &str) {
 /// the operation.
 fn prepare(
     command: DocCommand,
-    site: &Site,
-    apps: &[App],
-) -> Result<(Registry, Operation), CliError> {
-    let (dir, doctype) = target(&command);
-    let (registry, found) = find_doctype(site, apps, dir, doctype)?;
+    registry: &Registry,
+    text: Option<String>,
+) -> Result<Operation, CliError> {
+    let (_, doctype) = target(&command);
+    let found = registry
+        .get(doctype)
+        .cloned()
+        .ok_or_else(|| unknown_doctype(registry, doctype))?;
     let doctype = found.name.clone();
     let operation = match command {
-        DocCommand::Insert { data, actor, .. } => Operation::Insert {
+        DocCommand::Insert { actor, .. } => Operation::Insert {
             doctype,
-            input: parse_input(&registry, &found, &read_data(&data.data)?)?,
+            input: parse_input(registry, &found, text.as_deref().unwrap_or_default())?,
             actor: actor.actor,
         },
         DocCommand::Get { name, .. } => Operation::Get { doctype, name },
@@ -472,14 +483,13 @@ fn prepare(
         DocCommand::Update {
             name,
             version,
-            data,
             actor,
             ..
         } => Operation::Update {
             doctype,
             name,
             expected_version: version.expected_version,
-            input: parse_input(&registry, &found, &read_data(&data.data)?)?,
+            input: parse_input(registry, &found, text.as_deref().unwrap_or_default())?,
             actor: actor.actor,
         },
         DocCommand::Submit {
@@ -525,7 +535,18 @@ fn prepare(
             actor: actor.actor,
         },
     };
-    Ok((registry, operation))
+    Ok(operation)
+}
+
+/// The `--data` text of an `insert` or `update` (standard input for `-`), read before the
+/// database is opened.
+fn read_doc_input(command: &DocCommand) -> Result<Option<String>, CliError> {
+    match command {
+        DocCommand::Insert { data, .. } | DocCommand::Update { data, .. } => {
+            read_data(&data.data).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn status(
@@ -1021,31 +1042,34 @@ fn site_composed(site: &Site, apps: &[App], dir: &DocTypesDir) -> Result<Compose
     Ok(compose(&site.installed(apps), local).map_err(|e| e.for_site(&site.name))?)
 }
 
-/// The registry of the site's apps and the directory, and the DocType called `name` in it.
+/// The registry of the site's apps and the directory (without the site's custom fields), checked
+/// to have a DocType called `name`.
 fn find_doctype(
     site: &Site,
     apps: &[App],
     dir: &DocTypesDir,
     name: &str,
-) -> Result<(Registry, DocType), CliError> {
+) -> Result<Registry, CliError> {
     let registry = site_composed(site, apps, dir)?.registry;
-    match registry.get(name) {
-        Some(doctype) => {
-            let doctype = doctype.clone();
-            Ok((registry, doctype))
-        }
-        None => Err(CliError::UnknownDocType {
-            name: name.to_owned(),
-            known: if registry.is_empty() {
-                "none".to_owned()
-            } else {
-                registry
-                    .iter()
-                    .map(|d| d.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            },
-        }),
+    if registry.get(name).is_some() {
+        Ok(registry)
+    } else {
+        Err(unknown_doctype(&registry, name))
+    }
+}
+
+fn unknown_doctype(registry: &Registry, name: &str) -> CliError {
+    CliError::UnknownDocType {
+        name: name.to_owned(),
+        known: if registry.is_empty() {
+            "none".to_owned()
+        } else {
+            registry
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
     }
 }
 
