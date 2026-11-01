@@ -15,6 +15,7 @@ For people who build on Forgebase or run it.
 | [Desk](guide/desk.md) | The web interface: building and serving it, what it shows, the smoke test and screenshots |
 | [Workflow, saved views and reports](guide/workflow-and-reports.md) | The approval workflow, saved list views and SQL query reports |
 | [Webhooks](guide/webhooks.md) | Sending document events to other systems, and verifying a delivery |
+| [Integrating with other systems](guide/integration.md) | A walkthrough on the sales example: an app method, a webhook, CSV import and export, fixtures, TLS to PostgreSQL |
 | [Operating Forgebase](guide/operations.md) | Configuration, sites, reverse proxy, workers, upgrades, backups and restores |
 | [Deploy](guide/deploy.md) | Run Forgebase on a free or small VM with Docker, HTTPS and backups |
 

@@ -69,7 +69,7 @@ All guides are indexed in [docs/README.md](docs/README.md). The main ones:
 
 - [Getting started](docs/guide/getting-started.md), [Your first app](docs/guide/first-app.md) and [the command-line tool](docs/guide/cli.md)
 - [HTTP API](docs/guide/http-api.md), [Desk](docs/guide/desk.md) and [Workflow, saved views and reports](docs/guide/workflow-and-reports.md)
-- [Webhooks](docs/guide/webhooks.md), [Operating Forgebase](docs/guide/operations.md) and [Deploy](docs/guide/deploy.md)
+- [Webhooks](docs/guide/webhooks.md), [Integrating with other systems](docs/guide/integration.md), [Operating Forgebase](docs/guide/operations.md) and [Deploy](docs/guide/deploy.md)
 - The blueprint: [vision](docs/blueprint/vision.md), [architecture](docs/blueprint/architecture.md), [security model](docs/blueprint/security-model.md), [dependency evaluation](docs/blueprint/dependency-evaluation.md) and the [ADRs](docs/adr/README.md)
 
 ## Status and roadmap
