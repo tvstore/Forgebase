@@ -242,7 +242,9 @@ jobs:
   # examples/sites/ci.sh does the work and can be run locally. It needs the client tools
   # (pg_dump, pg_restore, version 16, the server's) like the `check` job. The URLs are built from the
   # service container's throwaway credentials; the script never prints them. The databases are
-  # created by the script (`site create`).
+  # created by the script (`site create`). Since M9.5 the script also starts a webhook receiver
+  # (examples/sites/receiver.py, python3 from the runner image) and proves a delivery on the submit of
+  # a sales order, with the worker.
   sites:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
