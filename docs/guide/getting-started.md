@@ -127,6 +127,8 @@ A DocType file can list `[[permissions]]` (see [sales_order.toml](../../examples
 
 ### Field permission levels
 
+A walkthrough on the sales example, with the requests and what each user sees, is [Customizing and restricting data](customizing.md#field-permission-levels).
+
 Rights are per DocType, but a few fields are not for everybody: a credit limit, a cost price. Give such a field a `perm_level` from 1 to 9 (0 is the default) and let a rule with the same `level` grant read and write on it ([ADR 0024](../adr/0024-field-permission-levels.md)):
 
 ```toml
@@ -164,6 +166,8 @@ write = true
 - Overlay fields and [site custom fields](cli.md#customize-field-commands-m101) may carry a `perm_level` too; the rules for the level are the `[[permissions]]` of the DocType they are added to.
 
 ### User permissions
+
+A walkthrough on the sales example: [Customizing and restricting data](customizing.md#user-permissions).
 
 Roles say what a user may do; **user permissions** say which documents. Restrict a user to some documents of a DocType and they see only those, on every path: lists, a single document, summaries, exports, links and titles, and every write ([ADR 0025](../adr/0025-user-permissions.md)). An Administrator sets them with the command line (`forgebase user permission add --user ann --doctype customer_group --value Retail`, see [the CLI guide](cli.md#user-permissions-m103)) or [the API](http-api.md#user-permissions-m103); no `[[permissions]]` file changes and no restart: they apply on the user's next request.
 

@@ -17,6 +17,7 @@ For people who build on Forgebase or run it.
 | [Webhooks](guide/webhooks.md) | Sending document events to other systems, and verifying a delivery |
 | [Integrating with other systems](guide/integration.md) | A walkthrough on the sales example: an app method, a webhook, CSV import and export, fixtures, TLS to PostgreSQL |
 | [Operating Forgebase](guide/operations.md) | Configuration, sites, reverse proxy, workers, upgrades, backups and restores |
+| [Customizing and restricting data](guide/customizing.md) | A walkthrough on the sales example: an overlay field on another app's DocType, a site custom field, a field only managers see, a user restricted to one customer group |
 | [Deploy](guide/deploy.md) | Run Forgebase on a free or small VM with Docker, HTTPS and backups |
 
 ## Reference, records and examples

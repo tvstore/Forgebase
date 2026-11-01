@@ -231,6 +231,8 @@ Run `cargo test` in both crates (`crm` still passes on its own). The rules of th
 
 ### Add a field to another app's DocType (overlays)
 
+A worked example with `sales_extension`, and the site custom fields that complete it, is in [Customizing and restricting data](customizing.md#extending-another-apps-doctype).
+
 `tasks` depends on `crm`, so it may add fields to `crm_note` without changing the DocType or the `crm` crate ([ADR 0023](../adr/0023-metadata-overlays.md)). An overlay file holds only `[[fields]]` entries, written exactly like those of a DocType file, with every property a field has except the type `table`:
 
 ```toml

@@ -38,6 +38,8 @@ FORGEBASE_DEV_INSECURE_COOKIES=1 FORGEBASE_DESK_DIR=desk/dist target/debug/examp
 cd desk && npx playwright install chromium && npx playwright test   # or set PLAYWRIGHT_CHROMIUM_EXECUTABLE to an installed Chromium
 ```
 
+**Customization and restrictions (M10.4).** `desk/e2e/restrict.spec.ts` checks what the desk shows for the M10 features, with no change to the desk (it reads the metadata API): a Sales User has no `credit_limit` (level 1) in the form or the Columns menu, a Sales Manager sees and saves it, a role that reads but cannot write level 1 sees it as plain text, a Sales User restricted to the customer group `Retail` sees only the allowed customers and groups (a hidden customer opened by its address is "Cannot open this page", not found), a restricted manager has no **New** for customer groups, and a site custom field added by `seed.sh` with `customize field add` is on the customer form and can be saved. `seed.sh` makes the users, groups, customers and the custom field with the stock commands of `e2e_app`, and an e2e-only role (Credit Auditor) for the read-only case. See [Customizing and restricting data](customizing.md).
+
 **Screenshots.** `desk/e2e/screenshots.spec.ts` adds a few sample documents (draft, submitted and cancelled orders) and takes the login page, home, list and form at 1280, 800 and 375 px (and the list at 320 px, a submitted form at 375 px); it also checks that no page scrolls sideways on a phone. It is skipped unless `SCREENSHOTS=1`, so CI does not run it, and the images are not committed:
 
 ```sh

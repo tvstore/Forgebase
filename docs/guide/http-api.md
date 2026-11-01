@@ -83,6 +83,8 @@ Whatever the method did in the transaction is rolled back on every error.
 
 ## Customize fields (M10.1)
 
+Walkthrough: [Customizing and restricting data](customizing.md#site-custom-fields).
+
 Site custom fields over HTTP ([ADR 0023](../adr/0023-metadata-overlays.md); the command line does the same, see [Customize field commands](cli.md#customize-field-commands-m101)). **Only the Administrator role** may use these routes: any other authenticated user gets `403 permission_denied`, a cookie call needs the CSRF header like any write, and no credentials is `401`.
 
 | Route | Effect |
@@ -111,6 +113,8 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
 A custom field may have a `perm_level` (0 to 9, see [field permission levels](getting-started.md#field-permission-levels)): the rules for it are the `level` rules of the DocType, and a caller without the level does not see the field at all. A custom field is a field of its DocType in every other respect: `GET /api/v1/meta/{doctype}` lists it (after the fields of the app), the `[[permissions]]` of the DocType apply to it, and it can be filtered, sorted, summarized, exported and imported. A disabled field is none of that: input with it is `422` (unknown field) and a filter or sort on it is `400 invalid_query`.
 
 ## User permissions (M10.3)
+
+Walkthrough: [Customizing and restricting data](customizing.md#user-permissions).
 
 Which documents a user is restricted to, over HTTP ([ADR 0025](../adr/0025-user-permissions.md); the command line does the same, see [User permissions](cli.md#user-permissions-m103), and the rule is in [getting started](getting-started.md#user-permissions)). **Only the Administrator role** may use these routes: any other authenticated user gets `403 permission_denied`, a cookie call needs the CSRF header like any write, and no credentials is `401`. A change applies on the affected user's **next request**.
 
