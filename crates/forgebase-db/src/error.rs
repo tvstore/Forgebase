@@ -409,6 +409,21 @@ pub enum DbError {
     /// migrations were applied. One message per problem.
     #[error("report check failed ({} problem(s))", .0.len())]
     ReportCheck(Vec<String>),
+    /// A fixture record could not be applied (M9.4, ADR 0022). The fixtures of that app were all
+    /// rolled back; the migrations before them stay applied.
+    #[error(
+        "fixtures of app `{app}` were not applied: {file}: {record}: {message} (nothing from this app's fixtures was kept)"
+    )]
+    FixtureFailed {
+        /// The app.
+        app: String,
+        /// The fixture file.
+        file: String,
+        /// The record: its position and name.
+        record: String,
+        /// What went wrong.
+        message: String,
+    },
     /// A lifecycle hook ([`forgebase_core::hooks::DocTypeHooks`]) rejected the operation. The
     /// whole operation was rolled back: nothing was persisted.
     #[error("{hook} hook of DocType `{doctype}` rejected the operation: {message}")]

@@ -23,6 +23,7 @@ const APP: AppSpec<'static> = AppSpec {
     name: "slow_app",
     version: Some("1"),
     migrations: SLOW,
+    fixtures: &[],
 };
 
 #[tokio::test]
@@ -109,6 +110,7 @@ async fn a_cancelled_migrate_does_not_leave_its_lock_on_a_pooled_connection() {
             name: "sleepy_app",
             version: None,
             migrations: SLEEPY,
+            fixtures: &[],
         };
         migrate_apps(&pool, &Registry::new(), &[app], &SyncOptions::default()).await
     });
@@ -151,6 +153,7 @@ async fn an_app_migration_gives_up_waiting_for_a_lock_after_the_lock_timeout() {
         name: "blocked_app",
         version: None,
         migrations: BLOCKED,
+        fixtures: &[],
     };
     // Another transaction holds a conflicting lock on the table and does not end.
     let mut holder = db.pool.get().await.expect("connection");
@@ -252,6 +255,7 @@ fn app<'a>(migrations: &'a [AppMigration<'a>]) -> AppSpec<'a> {
         name: "verify_app",
         version: Some("1"),
         migrations,
+        fixtures: &[],
     }
 }
 

@@ -79,6 +79,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "webhooks",
         sql: include_str!("../migrations/0010_webhooks.sql"),
     },
+    Migration {
+        version: 11,
+        name: "fixtures",
+        sql: include_str!("../migrations/0011_fixtures.sql"),
+    },
 ];
 
 /// Applies the pending framework migrations and returns them.
