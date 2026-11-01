@@ -287,7 +287,7 @@ fn dry_run_creates_nothing() {
     let output = db.forgebase(&["migrate", "--doctypes", DOCTYPES, "--dry-run"]);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("framework migrations: 12 pending"), "{text}");
+    assert!(text.contains("framework migrations: 13 pending"), "{text}");
     assert!(
         text.contains("0001 init")
             && text.contains("0002 series")
@@ -333,7 +333,7 @@ fn migrate_creates_tables_and_a_rerun_changes_nothing() {
     let first = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
     assert_eq!(code(&first), Some(0), "{}", stderr(&first));
     let text = stdout(&first);
-    assert!(text.contains("framework migrations: 12 applied"), "{text}");
+    assert!(text.contains("framework migrations: 13 applied"), "{text}");
     assert!(text.contains("schema sync: applied"), "{text}");
     assert_eq!(
         db.scalar("SELECT to_regclass('doc_customer')::text")
@@ -3385,4 +3385,242 @@ fn malformed_json_and_filters_fail_before_the_database_is_used() {
         );
         assert!(!text.contains("site `"), "{args:?}: {text}");
     }
+}
+
+// ---- user permission (M10.3, ADR 0025) --------------------------------------------------------
+
+#[test]
+fn user_permission_adds_lists_and_removes() {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    for (user, role) in [("alice", "Sales User"), ("bob", "Sales User")] {
+        let out = db.forgebase_with_stdin(
+            &["user", "create", user, "--role", role],
+            Some("a long enough password\n"),
+        );
+        assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    }
+    for title in ["retail", "wholesale"] {
+        let data = format!(r#"{{"title":"{title}"}}"#);
+        let out = db.forgebase(&[
+            "doc",
+            "insert",
+            "customer_group",
+            "--data",
+            &data,
+            "--doctypes",
+            DOCTYPES,
+        ]);
+        assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    }
+    let permission = |action: &str, user: &str, doctype: &str, value: &str| {
+        let mut args = vec![
+            "user",
+            "permission",
+            action,
+            "--user",
+            user,
+            "--doctype",
+            doctype,
+            "--value",
+            value,
+        ];
+        // Only `add` checks the DocType against the DocType directory.
+        if action == "add" {
+            args.extend(["--doctypes", DOCTYPES]);
+        }
+        db.forgebase(&args)
+    };
+
+    // Add: said once, then "already".
+    let out = permission("add", "alice", "customer_group", "retail");
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("restricted user alice to customer_group retail;"),
+        "{}",
+        stdout(&out)
+    );
+    let out = permission("add", "alice", "customer_group", "retail");
+    assert_eq!(
+        stdout(&out),
+        "user alice is restricted to customer_group retail already\n"
+    );
+    for (user, value) in [("alice", "wholesale"), ("bob", "retail")] {
+        assert_eq!(
+            code(&permission("add", user, "customer_group", value)),
+            Some(0)
+        );
+    }
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_user_permission")
+            .as_deref(),
+        Some("3")
+    );
+
+    // List: a sorted table, filtered by user or DocType; empty is just the header.
+    let list = db.forgebase(&["user", "permission", "list"]);
+    assert_eq!(code(&list), Some(0), "{}", stderr(&list));
+    let text = stdout(&list);
+    let lines: Vec<Vec<&str>> = text
+        .lines()
+        .map(|l| l.split_whitespace().take(3).collect())
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            vec!["USER", "DOCTYPE", "VALUE"],
+            vec!["alice", "customer_group", "retail"],
+            vec!["alice", "customer_group", "wholesale"],
+            vec!["bob", "customer_group", "retail"],
+        ],
+        "{text}"
+    );
+    let list = db.forgebase(&["user", "permission", "list", "--user", "bob"]);
+    assert_eq!(stdout(&list).lines().count(), 2, "{}", stdout(&list));
+    let list = db.forgebase(&["user", "permission", "list", "--doctype", "customer"]);
+    assert_eq!(stdout(&list).lines().count(), 1, "{}", stdout(&list));
+
+    // Remove: said once, then "not restricted".
+    let out = permission("remove", "alice", "customer_group", "retail");
+    assert!(
+        stdout(&out).starts_with("removed the restriction of user alice to customer_group retail;"),
+        "{}",
+        stdout(&out)
+    );
+    let out = permission("remove", "alice", "customer_group", "retail");
+    assert_eq!(code(&out), Some(0));
+    assert_eq!(
+        stdout(&out),
+        "user alice is not restricted to customer_group retail\n"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_user_permission")
+            .as_deref(),
+        Some("2")
+    );
+}
+
+#[test]
+fn user_permission_refusals_change_nothing() {
+    let db = TestDb::new();
+    let migrated = db.forgebase(&["migrate", "--doctypes", DOCTYPES]);
+    assert_eq!(code(&migrated), Some(0), "{}", stderr(&migrated));
+    let out = db.forgebase_with_stdin(
+        &["user", "create", "alice", "--role", "Sales User"],
+        Some("a long enough password\n"),
+    );
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+    let data = r#"{"title":"retail"}"#;
+    let out = db.forgebase(&[
+        "doc",
+        "insert",
+        "customer_group",
+        "--data",
+        data,
+        "--doctypes",
+        DOCTYPES,
+    ]);
+    assert_eq!(code(&out), Some(0), "{}", stderr(&out));
+
+    for (args, expected) in [
+        (
+            ["add", "nobody", "customer_group", "retail"],
+            "user `nobody` not found",
+        ),
+        (
+            ["add", "alice", "ghost", "x"],
+            "invalid user permission: unknown DocType `ghost`",
+        ),
+        (
+            ["add", "alice", "customer_group", "missing"],
+            "no `customer_group` document named `missing`",
+        ),
+        (
+            ["add", "alice", "customer_group", ""],
+            "the value must be a document name",
+        ),
+        (
+            ["add", "bad name", "customer_group", "retail"],
+            "invalid username",
+        ),
+        (
+            ["remove", "nobody", "customer_group", "retail"],
+            "user `nobody` not found",
+        ),
+    ] {
+        let mut command = vec![
+            "user",
+            "permission",
+            args[0],
+            "--user",
+            args[1],
+            "--doctype",
+            args[2],
+            "--value",
+            args[3],
+        ];
+        if args[0] == "add" {
+            command.extend(["--doctypes", DOCTYPES]);
+        }
+        let out = db.forgebase(&command);
+        assert_eq!(code(&out), Some(1), "{args:?}: {}", stdout(&out));
+        assert!(
+            stderr(&out).contains(expected),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    // A child DocType cannot be restricted.
+    let out = db.forgebase(&[
+        "user",
+        "permission",
+        "add",
+        "--user",
+        "alice",
+        "--doctype",
+        "sales_order_item",
+        "--value",
+        "x",
+        "--doctypes",
+        DOCTYPES,
+    ]);
+    assert_eq!(code(&out), Some(1));
+    assert!(stderr(&out).contains("child DocType"), "{}", stderr(&out));
+    // An unknown user in `list` is an error too.
+    let out = db.forgebase(&["user", "permission", "list", "--user", "nobody"]);
+    assert_eq!(code(&out), Some(1));
+    // A missing option is a usage error.
+    let out = db.forgebase(&["user", "permission", "add", "--user", "alice"]);
+    assert_eq!(code(&out), Some(2));
+    assert_eq!(
+        db.scalar("SELECT count(*)::text FROM fb_user_permission")
+            .as_deref(),
+        Some("0")
+    );
+
+    // The limit of 1000 documents per user and DocType, from the command line.
+    db.exec(
+        "INSERT INTO fb_user_permission (user_id, doctype, value) \
+         SELECT u.id, 'customer_group', 'n' || g FROM fb_user u, generate_series(1, 1000) g",
+    );
+    let out = db.forgebase(&[
+        "user",
+        "permission",
+        "add",
+        "--user",
+        "alice",
+        "--doctype",
+        "customer_group",
+        "--value",
+        "retail",
+        "--doctypes",
+        DOCTYPES,
+    ]);
+    assert_eq!(code(&out), Some(1));
+    assert!(
+        stderr(&out).contains("1000") && stderr(&out).contains("customer_group"),
+        "{}",
+        stderr(&out)
+    );
 }

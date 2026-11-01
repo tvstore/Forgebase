@@ -573,6 +573,39 @@ mod tests {
     }
 
     #[test]
+    fn user_permissions_are_bound_conditions_before_the_filters() {
+        let allowed = vec!["Retail".to_owned(), "a\"b".to_owned()];
+        let rows = RowScope {
+            names: None,
+            links: vec![forgebase_core::permission::LinkScope {
+                field: "customer",
+                target: "customer",
+                allowed: &allowed,
+            }],
+        };
+        let q = query(vec![Filter::new("qty", FilterOp::Gt(Value::Int(5)))]);
+        let (sql, binds) = build(&doctype(), &ReadScope::new(Some("ann"), rows), &q).unwrap();
+        assert!(
+            sql.contains(
+                "WHERE \"doc_order\".\"owner\" = $1::text \
+                 AND (\"doc_order\".\"customer\" IS NULL OR \"doc_order\".\"customer\" IN \
+                 (SELECT t.\"id\" FROM \"doc_customer\" t WHERE t.\"name\" = ANY($2::text::text[]))) \
+                 AND \"doc_order\".\"qty\" > $3::bigint ORDER BY"
+            ),
+            "{sql}"
+        );
+        assert_eq!(binds[0], text("ann"));
+        assert_eq!(binds[1], text("{\"Retail\",\"a\\\"b\"}"));
+        assert_eq!(binds[2], Value::Int(5));
+        // Without a scope the statement is the plain one.
+        let (plain, _) = build(&doctype(), &ReadScope::default(), &q).unwrap();
+        assert!(
+            !plain.contains("ANY") && !plain.contains("\"owner\" ="),
+            "{plain}"
+        );
+    }
+
+    #[test]
     fn every_operator_binds_its_values_with_a_cast() {
         let q = query(vec![
             Filter::new("title", FilterOp::Eq(text("a"))),
