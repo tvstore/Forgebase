@@ -246,7 +246,7 @@ options = ["low", "normal", "high"]
 .extend_doctype("crm_note", forgebase::overlays!["overlays/crm_note.toml"])
 ```
 
-`overlays!` embeds files like `doctypes!`, relative to the crate's root. The fields are appended after the fields of `crm_note` (apps in order, files in order), `migrate` adds the column, the hooks of every app see the field, and the `[[permissions]]` of `crm_note` apply to it. The DocType is still owned by `crm` (`"app": "crm"` in the metadata API).
+`overlays!` embeds files like `doctypes!`, relative to the crate's root. The fields are appended after the fields of `crm_note` (apps in order, files in order), `migrate` adds the column, the hooks of every app see the field, and the `[[permissions]]` of `crm_note` apply to it (an overlay field may carry a `perm_level` as well; the rules of that level are the `level` rules of `crm_note`'s `[[permissions]]`, because an overlay file holds only `[[fields]]`, see [field permission levels](getting-started.md#field-permission-levels)). The DocType is still owned by `crm` (`"app": "crm"` in the metadata API).
 
 Startup errors, each naming the app and the file: an unknown target; a target that none of your dependencies owns (your **own** DocTypes too: put the field in the DocType's file); a child DocType; a `table` field; a field name that the DocType or another overlay already has (the message names both apps); and a name that starts with `custom_`, a prefix reserved for [site custom fields](cli.md#customize-field-commands-m101) (an app's own DocType fields may not start with it either).
 
