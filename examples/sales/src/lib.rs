@@ -383,10 +383,10 @@ fn summary_filters(body: &forgebase::serde_json::Value) -> Result<Vec<SummaryFil
             }
         }
     }
-    if let [from, to] = dates[..] {
-        if from > to {
-            return Err(MethodError::bad_request("from must not be after to"));
-        }
+    if let [from, to] = dates[..]
+        && from > to
+    {
+        return Err(MethodError::bad_request("from must not be after to"));
     }
     Ok(filters)
 }
