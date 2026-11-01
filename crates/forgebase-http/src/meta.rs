@@ -1,14 +1,15 @@
 //! The metadata routes for the desk: what a user may see of the DocTypes (`GET /api/v1/meta` and
 //! `GET /api/v1/meta/{doctype}`). Only metadata, never documents; the caller's rights come from
 //! the one evaluator of `forgebase-core`, and the DocType's `[[permissions]]` rules (which name
-//! roles) are never sent.
+//! roles) are never sent. A field the caller cannot read (`perm_level`, ADR 0024) is left out,
+//! and a field they can read but not write is reported with `read_only: true`.
 
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use forgebase_core::meta::{DocField, DocType, FieldType, Naming, Registry};
-use forgebase_core::permission::{Access, Caller, Right, evaluate};
+use forgebase_core::permission::{Access, Caller, Right, evaluate, field_access, readable_fields};
 use forgebase_db::DbError;
 use serde_json::{Map, Value as Json, json};
 
@@ -170,10 +171,19 @@ pub async fn read(
         }
         .into());
     }
-    let fields: Vec<Json> = doctype
-        .fields
-        .iter()
-        .map(|f| field_with_children(&registry, f))
+    // Field levels (M10.2, ADR 0024): a field the caller cannot read is not in the metadata at
+    // all, and one they can read but not write is `read_only` (the desk never sends such a field
+    // and shows it read-only). Every response is `no-store`, so the per-caller answer is never
+    // cached.
+    let access = field_access(doctype, &caller);
+    let fields: Vec<Json> = readable_fields(doctype, access)
+        .map(|f| {
+            let mut field = field_with_children(&registry, f);
+            if f.perm_level > 0 && !access.can_write(f.perm_level) {
+                field["read_only"] = json!(true);
+            }
+            field
+        })
         .collect();
     Ok(data(
         StatusCode::OK,

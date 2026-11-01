@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use forgebase_core::meta::DocType;
-use forgebase_core::permission::Right;
+use forgebase_core::permission::{Right, readable_doctype_for};
 use forgebase_db::{
     AggregateFn, Group, ListQuery, SummaryQuery, Uuid, View, ViewChanges, ViewDefinition,
 };
@@ -149,7 +149,7 @@ pub async fn create(
         return Err(ApiError::bad_request("`label` must be a string"));
     };
     let definition = match map.remove("definition") {
-        Some(json) => definition(doctype, json)?,
+        Some(json) => definition(&readable_doctype_for(doctype, &caller), json)?,
         None => return Err(ApiError::bad_request("`definition` must be an object")),
     };
     let mut client = state.client().await?;
@@ -185,7 +185,7 @@ pub async fn update(
     let expected_version = version(&map)?;
     let new_definition = map
         .remove("definition")
-        .map(|json| definition(doctype, json))
+        .map(|json| definition(&readable_doctype_for(doctype, &caller), json))
         .transpose()?;
     let client = state.client().await?;
     let view = forgebase_db::update_view(
@@ -287,7 +287,9 @@ pub async fn summary(
         .ok_or_else(|| ApiError::invalid_query("`group_by` is required"))?;
     let summary_query = SummaryQuery {
         filters: match query.get("filters") {
-            Some(text) => parse_filters(doctype, text).map_err(query_error)?,
+            Some(text) => {
+                parse_filters(&readable_doctype_for(doctype, &caller), text).map_err(query_error)?
+            }
             None => Vec::new(),
         },
         group_by: group_by.clone(),
