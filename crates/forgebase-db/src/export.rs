@@ -14,7 +14,7 @@
 //! only the caller's own documents are exported.
 
 use forgebase_core::meta::{DocType, Registry};
-use forgebase_core::permission::{Access, Caller, Right};
+use forgebase_core::permission::{Access, Caller, Right, field_access, readable_doctype};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, IsolationLevel, Portal, Transaction};
 
@@ -87,6 +87,9 @@ impl Export {
         let export = access_to(doctype, caller, Right::Export)?;
         let owner =
             (read == Access::OwnerOnly || export == Access::OwnerOnly).then(|| caller.name());
+        // The columns, the filters, the sort and the child rows follow the fields the caller can
+        // read: a hidden field is not exported and is unknown to the query (ADR 0024).
+        let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
         let (rows_sql, count_sql, binds) = build_export(doctype, owner, filters, sort)?;
         let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
         let params: Vec<&(dyn ToSql + Sync)> =

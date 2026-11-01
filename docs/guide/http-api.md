@@ -54,7 +54,7 @@ TOKEN=$(cargo run -q -p sales -- token create root)    # prints key:secret once
 curl -s -H "Authorization: token $TOKEN" http://localhost:8000/api/v1/resource/customer
 ```
 
-Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one. The route table, the request pipeline, the codes and the limits are in the [architecture](../blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) and the [security model](../blueprint/security-model.md#the-http-layer-implemented-in-m33).
+Responses are JSON: `{"data": ...}` on success and `{"error": {"code", "message", "details"?}}` on failure, with stable codes (for example `unauthenticated` 401, `permission_denied` 403, `csrf_failed` 403, `not_found` 404, `conflict` 409, `validation_failed` 422, `invalid_query` 400). A document you cannot read is a 404, like a missing one, and a **field** you cannot read (a `perm_level` you have no rule for, [ADR 0024](../adr/0024-field-permission-levels.md)) is left out everywhere and is an unknown field in filters, sort, `group_by`, `fields` and input; a field you can read but not write answers `422 field_not_permitted` when a value would change it, and `GET /api/v1/meta/{doctype}` lists it with `read_only: true`. The route table, the request pipeline, the codes and the limits are in the [architecture](../blueprint/architecture.md#7-api-rest-resource-api-implemented-in-m33-metadata-and-session-routes-in-m41-the-rest-proposed) and the [security model](../blueprint/security-model.md#the-http-layer-implemented-in-m33).
 
 ## App methods
 
@@ -88,7 +88,7 @@ Site custom fields over HTTP ([ADR 0023](../adr/0023-metadata-overlays.md); the 
 | Route | Effect |
 |---|---|
 | `GET /api/v1/customize/{doctype}/fields` | The custom fields of the DocType, enabled and disabled, in the order they were added: `{"data": [{"doctype", "name", "label", "type", "definition", "enabled", "created_at", "modified_at", "modified_by"}]}`. |
-| `POST /api/v1/customize/{doctype}/fields` | Adds a field. The body is the field as JSON with the keys of a TOML `[[fields]]` entry (`name`, `type`, `label`, `unique`, `allow_on_submit`, `max_length`, `precision`, `scale`, `options`, `target`). `201` with the stored field. |
+| `POST /api/v1/customize/{doctype}/fields` | Adds a field. The body is the field as JSON with the keys of a TOML `[[fields]]` entry (`name`, `type`, `label`, `unique`, `allow_on_submit`, `perm_level`, `max_length`, `precision`, `scale`, `options`, `target`). `201` with the stored field. |
 | `POST /api/v1/customize/{doctype}/fields/{name}/disable` and `/enable` | Hides or shows the field; the column and data stay. `200` with the field. The body is ignored (send `{}`). |
 
 ```sh
@@ -104,11 +104,11 @@ curl -s -b jar.txt -X PATCH -H "X-Forgebase-CSRF: $CSRF" -H 'Content-Type: appli
 | Status | When |
 |---|---|
 | `404` | The DocType, or the field for `disable` and `enable`, does not exist. |
-| `422 validation_failed` | A rule is broken: the name must start with `custom_`; no `required`, `read_only` or `table`; not a child DocType; a Link target that does not exist; an unknown key or type. `details` says which. |
+| `422 validation_failed` | A rule is broken: the name must start with `custom_`; no `required`, `read_only` or `table`; not a child DocType; a Link target that does not exist; a `perm_level` outside 0 to 9; an unknown key or type. `details` says which. |
 | `409 conflict` | The DocType has a field of that name already (a disabled custom field included). |
 | `503 lock_timeout` | A `migrate` or another schema change holds the lock longer than 5 s (`Retry-After: 5`); nothing was written, retry. |
 
-A custom field is a field of its DocType in every other respect: `GET /api/v1/meta/{doctype}` lists it (after the fields of the app), the `[[permissions]]` of the DocType apply to it, and it can be filtered, sorted, summarized, exported and imported. A disabled field is none of that: input with it is `422` (unknown field) and a filter or sort on it is `400 invalid_query`.
+A custom field may have a `perm_level` (0 to 9, see [field permission levels](getting-started.md#field-permission-levels)): the rules for it are the `level` rules of the DocType, and a caller without the level does not see the field at all. A custom field is a field of its DocType in every other respect: `GET /api/v1/meta/{doctype}` lists it (after the fields of the app), the `[[permissions]]` of the DocType apply to it, and it can be filtered, sorted, summarized, exported and imported. A disabled field is none of that: input with it is `422` (unknown field) and a filter or sort on it is `400 invalid_query`.
 
 ## Import and export (M9.3)
 

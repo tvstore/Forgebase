@@ -14,6 +14,7 @@
 //! | `unique_violation`, `linked_document_exists` | 409 | |
 //! | `not_submittable` | 422 | submit, cancel or amend of a DocType that is not submittable |
 //! | `validation_failed` | 422 | the data breaks the DocType's rules; `details` lists every problem; also a saved view's label, definition or limit |
+//! | `field_not_permitted` | 422 | a value for a field the caller can read but not write (`perm_level`, M10.2); `details` lists every problem. A field the caller cannot even read is an unknown field (`validation_failed`) |
 //! | `hook_rejected` | 422 | a lifecycle hook refused; the message is the hook's |
 //! | `bad_request` | 400 | malformed body or parameters (for a method: a body that is not a JSON object) |
 //! | `invalid_query` | 400 | a filter, sort, limit or offset cannot be used |
@@ -44,6 +45,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use forgebase_core::document::ValidationError;
 use forgebase_core::overlay::OverlayError;
 use forgebase_db::auth::AuthError;
 use forgebase_db::{DbError, MAX_REPORTED_ERRORS};
@@ -401,7 +403,17 @@ impl From<DbError> for ApiError {
         let text = error.to_string();
         match error {
             DbError::Validation(errors) => {
-                Self::validation(errors.iter().map(ToString::to_string).collect())
+                let not_permitted = errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::NotPermitted { .. }));
+                let mut api = Self::validation(errors.iter().map(ToString::to_string).collect());
+                // A field the caller can read but not write (M10.2, ADR 0024): still a 422 with
+                // the problems listed, under a code that says what is wrong.
+                if not_permitted {
+                    api.code = "field_not_permitted";
+                    api.message = "a field cannot be changed with your permissions".to_owned();
+                }
+                api
             }
             DbError::Naming(message) => Self::validation(vec![message]),
             DbError::InvalidView(message) => Self::validation(vec![message]),

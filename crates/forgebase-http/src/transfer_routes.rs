@@ -13,7 +13,7 @@ use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
-use forgebase_core::permission::Right;
+use forgebase_core::permission::{Right, readable_doctype_for};
 use forgebase_db::{
     DbError, Export, ExportQuery, ImportMode, ListQuery, ReportConnection, begin_export,
 };
@@ -103,9 +103,12 @@ pub async fn export(
     require(doctype, &caller, &[Right::Export], Right::Export)?;
     let query = params(query, &["format", "filters", "sort", "fields"])?;
     let format = format_param(&query)?;
+    // The columns, the filters, the sort and `fields` follow what the caller can read: a hidden
+    // field is unknown (ADR 0024).
+    let readable = readable_doctype_for(doctype, &caller);
     let list_query = ListQuery {
         filters: match query.get("filters") {
-            Some(text) => parse_filters(doctype, text).map_err(query_error)?,
+            Some(text) => parse_filters(&readable, text).map_err(query_error)?,
             None => Vec::new(),
         },
         sort: match query.get("sort") {
@@ -119,7 +122,7 @@ pub async fn export(
     let fields: Option<Vec<String>> = query
         .get("fields")
         .map(|text| text.split(',').map(str::to_owned).collect());
-    let exporter = Exporter::new(doctype, format, fields.as_deref()).map_err(query_error)?;
+    let exporter = Exporter::new(&readable, format, fields.as_deref()).map_err(query_error)?;
 
     let client = state
         .pool()
@@ -422,12 +425,14 @@ pub async fn import(
         }
     })?;
     let max_rows = state.config().import_max_rows;
-    let parsed = parse_import(&registry, doctype, format, mode, &body, max_rows).map_err(
-        |error| match error {
-            FileError::Invalid(problems) => ApiError::invalid_import(problems),
-            FileError::TooLarge { limit } => ApiError::import_too_large(limit),
-        },
-    )?;
+    let readable = readable_doctype_for(doctype, &caller);
+    let parsed =
+        parse_import(&registry, &readable, format, mode, &body, max_rows).map_err(|error| {
+            match error {
+                FileError::Invalid(problems) => ApiError::invalid_import(problems),
+                FileError::TooLarge { limit } => ApiError::import_too_large(limit),
+            }
+        })?;
     drop(body);
     let mut client = state.client().await?;
     let summary = run_import(

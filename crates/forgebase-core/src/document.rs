@@ -171,6 +171,22 @@ pub enum ValidationError {
         /// The field.
         field: String,
     },
+    /// A caller supplied a value for a field they can read but not write, because the field has
+    /// a `perm_level` above 0 and none of their roles has a `write` rule at that level (M10.2,
+    /// ADR 0024). Not produced by [`validate`]: `forgebase-db` reports it for the caller's input,
+    /// before the hooks. Sending the stored value back is allowed. A field the caller cannot even
+    /// read is not reported like this but as [`ValidationError::UnknownField`].
+    #[error("field `{field}` cannot be changed with your permissions")]
+    NotPermitted {
+        /// The field.
+        field: String,
+    },
+    /// A problem with a field that the caller cannot read (a stored value that is no longer
+    /// valid, a value a hook set). The field is deliberately not named: its name and value must
+    /// not reach a caller who is not allowed to know the field (ADR 0024). Not produced by
+    /// [`validate`]; `forgebase-db` puts it in place of such a problem.
+    #[error("a field that you cannot see has a value that is not valid")]
+    Hidden,
     /// A Link value names a document that does not exist. Not produced by [`validate`] (which
     /// does no I/O): `forgebase-db` reports it when it resolves the link.
     #[error("field `{field}`: {target} `{}` does not exist", crate::shorten(.name))]
@@ -195,9 +211,11 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
-    /// The field this problem is about. For a problem in a row, the Table field.
+    /// The field this problem is about. For a problem in a row, the Table field. Empty for
+    /// [`ValidationError::Hidden`], which names none.
     pub fn field(&self) -> &str {
         match self {
+            ValidationError::Hidden => "",
             ValidationError::UnknownField { field }
             | ValidationError::Required { field }
             | ValidationError::TypeMismatch { field, .. }
@@ -205,6 +223,7 @@ impl ValidationError {
             | ValidationError::InvalidOption { field, .. }
             | ValidationError::ContainsNul { field }
             | ValidationError::ReadOnly { field }
+            | ValidationError::NotPermitted { field }
             | ValidationError::DecimalScale { field, .. }
             | ValidationError::DecimalPrecision { field, .. }
             | ValidationError::LinkNotFound { field, .. }
@@ -465,6 +484,7 @@ mod tests {
             unique: false,
             allow_on_submit: false,
             read_only: false,
+            perm_level: 0,
         }
     }
 

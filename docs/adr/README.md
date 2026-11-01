@@ -40,7 +40,7 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0008](0008-model-selection-policy.md) | Model selection policy for the agent workflow | Accepted by owner |
 | [0009](0009-lifecycle-pipeline-and-hooks.md) | Lifecycle pipeline and hooks | Accepted |
 | [0010](0010-authentication-and-sessions.md) | Authentication and sessions | Accepted |
-| [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted (extended by M9.3: the `export` and `import` rights) |
+| [0011](0011-permission-model-phase-1.md) | Permission model, phase 1 | Accepted (extended by M9.3: the `export` and `import` rights; by M10.2: field levels, [ADR 0024](0024-field-permission-levels.md)) |
 | [0012](0012-app-model-and-public-api-boundary.md) | App model and public API boundary | Accepted |
 | [0013](0013-jobs-scheduler-and-transactional-outbox.md) | Jobs, scheduler and transactional outbox | Accepted |
 | [0014](0014-multi-site-database-per-site.md) | Multi-site: database per site | Accepted |
@@ -53,3 +53,4 @@ An ADR records one significant decision: the context, what was decided, what els
 | [0021](0021-import-and-export.md) | Import and export | Accepted |
 | [0022](0022-fixtures.md) | Fixtures | Accepted |
 | [0023](0023-metadata-overlays.md) | Metadata overlays: app overlays, site custom fields, live reload | Accepted |
+| [0024](0024-field-permission-levels.md) | Field permission levels: `perm_level`, rule `level`, hidden fields are unknown | Accepted |

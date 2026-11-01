@@ -9,7 +9,7 @@ use forgebase_core::document::{DocStatus, ValidationError};
 use forgebase_core::ident::TABLE_PREFIX;
 use forgebase_core::meta::{DefinitionError, DocType, FieldType};
 use forgebase_core::overlay::OverlayError;
-use forgebase_core::permission::Right;
+use forgebase_core::permission::{FieldAccess, Right};
 
 use crate::plan::Conflict;
 
@@ -503,15 +503,31 @@ impl DbError {
     ///
     /// For a `unique` Link field the server's detail would show the internal id of the target
     /// document, which users never see elsewhere; the message names the field instead.
-    pub(crate) fn from_write(error: tokio_postgres::Error, doctype: &DocType) -> Self {
+    ///
+    /// A violation on a field the caller cannot read (`levels`, ADR 0024) names neither the
+    /// field nor the value: a value the caller never saw is not told back. (Only a hook can set
+    /// such a value, since the caller's own input for it is refused earlier.)
+    pub(crate) fn from_write(
+        error: tokio_postgres::Error,
+        doctype: &DocType,
+        levels: Option<FieldAccess>,
+    ) -> Self {
         if error.code() == Some(&SqlState::UNIQUE_VIOLATION) {
-            let link_field = error
+            let column = error
                 .as_db_error()
                 .and_then(|db| db.detail())
                 .and_then(|detail| detail.strip_prefix("Key ("))
                 .and_then(|rest| rest.split_once(")=("))
-                .and_then(|(column, _)| doctype.field(column))
-                .filter(|field| matches!(field.field_type, FieldType::Link { .. }));
+                .and_then(|(column, _)| doctype.field(column));
+            if let (Some(field), Some(levels)) = (column, levels)
+                && !levels.shows(field.perm_level)
+            {
+                return DbError::UniqueViolation {
+                    message: "a value that must be unique already exists".to_owned(),
+                };
+            }
+            let link_field =
+                column.filter(|field| matches!(field.field_type, FieldType::Link { .. }));
             let message = match link_field {
                 Some(field) => format!(
                     "a `{}` document with this `{}` already exists (unique field `{}`)",

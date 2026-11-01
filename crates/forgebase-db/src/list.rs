@@ -35,7 +35,7 @@
 
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Registry};
-use forgebase_core::permission::{Access, Caller, Right};
+use forgebase_core::permission::{Access, Caller, Right, field_access, readable_doctype};
 use forgebase_core::value::Value;
 use time::UtcOffset;
 use tokio_postgres::GenericClient;
@@ -145,8 +145,9 @@ impl Sort {
 /// query is [`DbError::InvalidQuery`]; a name that is not a DocType is
 /// [`DbError::UnknownDocType`] (nothing is put into SQL before it is found in the registry).
 ///
-/// The documents are as [`get`](crate::get) returns them, except that `tables` is empty: the rows
-/// of child tables are not listed. Link values are the targets' names. One statement, so the
+/// The documents are as [`get`](crate::get) returns them (without the fields the caller cannot
+/// read, which a filter or sort may not name either: they are unknown, ADR 0024), except that
+/// `tables` is empty: the rows of child tables are not listed. Link values are the targets' names. One statement, so the
 /// page is consistent without a transaction.
 pub async fn list(
     client: &impl GenericClient,
@@ -157,6 +158,8 @@ pub async fn list(
 ) -> Result<Vec<StoredDocument>, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let owner = read_owner(doctype, caller)?;
+    // A field the caller cannot read is unknown to the query (ADR 0024).
+    let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
     let (sql, binds) = build(doctype, owner, query)?;
     let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
     let params: Vec<&(dyn ToSql + Sync)> =

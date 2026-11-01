@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use forgebase_core::document::{Changes, Document};
 use forgebase_core::meta::{DocType, Registry};
-use forgebase_core::permission::{Access, Caller, Right, evaluate};
+use forgebase_core::permission::{Access, Caller, Right, evaluate, readable_doctype_for};
 use forgebase_db::auth;
 use forgebase_db::{DbError, ListQuery};
 use serde_json::{Map, Value as Json, json};
@@ -305,9 +305,11 @@ pub async fn list(
         &["filters", "sort", "limit", "offset", "link_titles"],
     )?;
     let titles = link_titles_flag(&query)?;
+    // A field the caller cannot read is unknown to the filters (ADR 0024).
+    let readable = readable_doctype_for(doctype, &authenticated.caller());
     let list_query = ListQuery {
         filters: match query.get("filters") {
-            Some(text) => parse_filters(doctype, text).map_err(query_error)?,
+            Some(text) => parse_filters(&readable, text).map_err(query_error)?,
             None => Vec::new(),
         },
         sort: match query.get("sort") {
@@ -373,7 +375,9 @@ pub async fn create(
         Right::Create,
     )?;
     params(query, &[])?;
-    let input = input_from_json(&registry, doctype, body)?;
+    // A field the caller cannot read is unknown to the input: its value is not even looked at.
+    let readable = readable_doctype_for(doctype, &authenticated.caller());
+    let input = input_from_json(&registry, &readable, body)?;
     let document = Document {
         name: None,
         values: input.values,
@@ -455,7 +459,8 @@ pub async fn update(
     let changes = map
         .remove("data")
         .ok_or_else(|| ApiError::bad_request("`data` must be a JSON object"))?;
-    let input = input_from_json(&registry, doctype, changes)?;
+    let readable = readable_doctype_for(doctype, &authenticated.caller());
+    let input = input_from_json(&registry, &readable, changes)?;
     let changes = Changes {
         values: input.values,
         tables: input.tables,

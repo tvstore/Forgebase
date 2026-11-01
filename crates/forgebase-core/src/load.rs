@@ -7,7 +7,7 @@ use crate::meta::{
     DEFAULT_MAX_LENGTH, DefinitionError, DocField, DocType, FieldType, MetaError, Naming, humanize,
 };
 use crate::overlay::OverlayError;
-use crate::permission::PermissionRule;
+use crate::permission::{MAX_PERM_LEVEL, PermissionRule};
 use crate::series::SeriesPattern;
 use crate::workflow::{StateStyle, Transition, Workflow, WorkflowState};
 
@@ -139,6 +139,28 @@ struct RawPermission {
     import: bool,
     #[serde(default)]
     if_owner: bool,
+    /// Kept as an integer so a value outside 0 to 9 gets a clear message.
+    #[serde(default)]
+    level: i64,
+}
+
+/// Converts a rule. A `level` outside 0 to 9 is reported and replaced by 0, so the other checks
+/// still run without a second, derived error.
+fn convert_permission(raw: RawPermission, errors: &mut Vec<DefinitionError>) -> PermissionRule {
+    let level = match u8::try_from(raw.level) {
+        Ok(level) if level <= MAX_PERM_LEVEL => level,
+        _ => {
+            errors.push(DefinitionError::InvalidRuleLevel {
+                role: raw.role.clone(),
+                found: raw.level,
+            });
+            0
+        }
+    };
+    PermissionRule {
+        level,
+        ..PermissionRule::from(raw)
+    }
 }
 
 impl From<RawPermission> for PermissionRule {
@@ -155,6 +177,7 @@ impl From<RawPermission> for PermissionRule {
             export: raw.export,
             import: raw.import,
             if_owner: raw.if_owner,
+            level: 0,
         }
     }
 }
@@ -208,6 +231,9 @@ struct RawField {
     allow_on_submit: bool,
     #[serde(default)]
     read_only: bool,
+    /// Kept as an integer so a value outside 0 to 9 gets a clear message.
+    #[serde(default)]
+    perm_level: i64,
     max_length: Option<u32>,
     precision: Option<u8>,
     scale: Option<u8>,
@@ -247,7 +273,11 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
         fields,
         is_child: raw.is_child,
         submittable: raw.submittable,
-        permissions: raw.permissions.into_iter().map(Into::into).collect(),
+        permissions: raw
+            .permissions
+            .into_iter()
+            .map(|rule| convert_permission(rule, &mut errors))
+            .collect(),
         title_field: raw.title_field,
         list_fields: raw.list_fields,
         icon: raw.icon,
@@ -264,7 +294,23 @@ pub(crate) fn from_toml_str(text: &str) -> Result<DocType, MetaError> {
 /// One raw field into the validated model: the type and its parameters. The rules that need the
 /// whole DocType (duplicates, names, `allow_on_submit`) are checked by [`DocType::check`].
 fn convert_field(f: RawField) -> Result<DocField, Vec<DefinitionError>> {
-    let field_type = convert_type(&f)?;
+    let level = match u8::try_from(f.perm_level) {
+        Ok(level) if level <= MAX_PERM_LEVEL => Ok(level),
+        _ => Err(DefinitionError::InvalidPermLevel {
+            field: f.name.clone(),
+            found: f.perm_level,
+        }),
+    };
+    let field_type = match (convert_type(&f), &level) {
+        (Ok(field_type), Ok(_)) => field_type,
+        (Ok(_), Err(e)) => return Err(vec![e.clone()]),
+        (Err(mut errors), Err(e)) => {
+            errors.push(e.clone());
+            return Err(errors);
+        }
+        (Err(errors), Ok(_)) => return Err(errors),
+    };
+    let perm_level = level.unwrap_or(0);
     Ok(DocField {
         label: f.label.unwrap_or_else(|| humanize(&f.name)),
         name: f.name,
@@ -273,6 +319,7 @@ fn convert_field(f: RawField) -> Result<DocField, Vec<DefinitionError>> {
         unique: f.unique,
         allow_on_submit: f.allow_on_submit,
         read_only: f.read_only,
+        perm_level,
     })
 }
 
@@ -1809,5 +1856,313 @@ to = "Nowhere"
                 .any(|e| matches!(e, DefinitionError::WorkflowUnknownState { .. })),
             "{errors:?}"
         );
+    }
+
+    // ----- Field permission levels (M10.2, ADR 0024) ------------------------------------------
+
+    const LEVELS: &str = "name = \"t\"\nlabel = \"T\"\n";
+
+    fn field(body: &str) -> String {
+        format!("[[fields]]\nname = \"x\"\ntype = \"int\"\n{body}\n")
+    }
+
+    #[test]
+    fn perm_level_and_level_default_to_zero_and_parse() {
+        let d = from_toml_str(&format!(
+            "{LEVELS}{}[[fields]]\nname = \"y\"\ntype = \"int\"\nperm_level = 3\n{}",
+            field(""),
+            rule("role = \"A\"\nread = true\nlevel = 3")
+        ))
+        .unwrap();
+        assert_eq!(d.field("x").unwrap().perm_level, 0);
+        assert_eq!(d.field("y").unwrap().perm_level, 3);
+        assert_eq!(d.permissions[0].level, 3);
+        assert!(d.has_field_levels());
+        assert!(
+            !from_toml_str(&format!("{LEVELS}{}", field("")))
+                .unwrap()
+                .has_field_levels()
+        );
+        // The highest level is 9.
+        assert!(from_toml_str(&format!("{LEVELS}{}", field("perm_level = 9"))).is_ok());
+    }
+
+    #[test]
+    fn a_perm_level_or_level_outside_zero_to_nine_is_a_definition_error() {
+        for bad in [10, -1, 300, 256] {
+            assert_eq!(
+                invalid(&format!(
+                    "{LEVELS}{}",
+                    field(&format!("perm_level = {bad}"))
+                )),
+                vec![DefinitionError::InvalidPermLevel {
+                    field: "x".into(),
+                    found: bad
+                }],
+                "{bad}"
+            );
+            assert_eq!(
+                invalid(&format!(
+                    "{LEVELS}{}",
+                    rule(&format!("role = \"A\"\nread = true\nlevel = {bad}"))
+                )),
+                vec![DefinitionError::InvalidRuleLevel {
+                    role: "A".into(),
+                    found: bad
+                }],
+                "{bad}"
+            );
+        }
+        // Reported next to the other problems of the field.
+        let errors = invalid(&format!(
+            "{LEVELS}[[fields]]\nname = \"x\"\ntype = \"nope\"\nperm_level = 11\n"
+        ));
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        // A level is an integer.
+        assert!(matches!(
+            from_toml_str(&format!("{LEVELS}{}", field("perm_level = \"1\""))),
+            Err(MetaError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn a_field_of_a_child_doctype_stays_at_level_zero() {
+        let child = "name = \"row\"\nlabel = \"R\"\nis_child = true\n";
+        assert_eq!(
+            invalid(&format!("{child}{}", field("perm_level = 1"))),
+            vec![DefinitionError::ChildFieldPermLevel { field: "x".into() }]
+        );
+        assert!(from_toml_str(&format!("{child}{}", field("perm_level = 0"))).is_ok());
+        // A Table field of the parent can carry the level.
+        assert!(
+            from_toml_str(&format!(
+                "{LEVELS}[[fields]]\nname = \"rows\"\ntype = \"table\"\ntarget = \"row\"\nperm_level = 2\n"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_rule_of_a_level_grants_read_and_write_only_without_if_owner() {
+        use crate::permission::Right;
+        let at = |body: &str| {
+            format!(
+                "{SUBMITTABLE}{}",
+                rule(&format!("role = \"A\"\nlevel = 1\n{body}"))
+            )
+        };
+        assert!(from_toml_str(&at("read = true")).is_ok());
+        assert!(from_toml_str(&at("read = true\nwrite = true")).is_ok());
+        assert_eq!(
+            invalid(&at("write = true")),
+            vec![DefinitionError::LevelWriteWithoutRead {
+                role: "A".into(),
+                level: 1
+            }]
+        );
+        assert_eq!(
+            invalid(&at("read = true\nif_owner = true")),
+            vec![DefinitionError::LevelRuleIfOwner {
+                role: "A".into(),
+                level: 1
+            }]
+        );
+        for right in [
+            Right::Create,
+            Right::Delete,
+            Right::Submit,
+            Right::Cancel,
+            Right::Amend,
+            Right::Export,
+            Right::Import,
+        ] {
+            assert_eq!(
+                invalid(&at(&format!("read = true\n{right} = true"))),
+                vec![DefinitionError::LevelRuleRight {
+                    role: "A".into(),
+                    level: 1,
+                    right
+                }],
+                "{right}"
+            );
+        }
+        // A level rule that grants nothing is the same mistake as at level 0.
+        assert_eq!(
+            invalid(&at("")),
+            vec![DefinitionError::EmptyPermissionRule { role: "A".into() }]
+        );
+    }
+
+    #[test]
+    fn rules_are_unique_per_role_if_owner_and_level() {
+        let a = |level: u8, if_owner: bool| {
+            rule(&format!(
+                "role = \"A\"\nread = true\nlevel = {level}\nif_owner = {if_owner}"
+            ))
+        };
+        // The same role may have a rule at level 0 and one at each level.
+        assert!(
+            from_toml_str(&format!(
+                "{PLAIN}{}{}{}",
+                a(0, false),
+                a(1, false),
+                a(2, false)
+            ))
+            .is_ok()
+        );
+        // Two rules at the same level 1 are one too many (if_owner is refused there, so no variant).
+        assert_eq!(
+            invalid(&format!(
+                "{PLAIN}{}{}",
+                rule("role = \"A\"\nread = true\nlevel = 1"),
+                rule("role = \"A\"\nread = true\nwrite = true\nlevel = 1")
+            )),
+            vec![DefinitionError::DuplicateLevelRule {
+                role: "A".into(),
+                level: 1
+            }]
+        );
+        // Level 0 keeps its own check (and its own error).
+        assert_eq!(
+            invalid(&format!("{PLAIN}{}{}", a(0, false), a(0, false))),
+            vec![DefinitionError::DuplicatePermissionRule {
+                role: "A".into(),
+                if_owner: false
+            }]
+        );
+    }
+
+    #[test]
+    fn fields_that_a_doctype_setting_names_stay_at_level_zero() {
+        let key = |setting: &str, extra: &str| {
+            format!(
+                "name = \"t\"\nlabel = \"T\"\n{setting}\n[[fields]]\nname = \"code\"\ntype = \"data\"\n{extra}\n"
+            )
+        };
+        assert_eq!(
+            invalid(&key(
+                "naming = { field = \"code\" }",
+                "required = true\nunique = true\nperm_level = 1"
+            )),
+            vec![
+                DefinitionError::RequiredPermLevel {
+                    field: "code".into()
+                },
+                DefinitionError::KeyFieldPermLevel {
+                    field: "code".into(),
+                    used_as: "the naming field"
+                }
+            ]
+        );
+        assert_eq!(
+            invalid(&key("title_field = \"code\"", "perm_level = 1")),
+            vec![DefinitionError::KeyFieldPermLevel {
+                field: "code".into(),
+                used_as: "the title_field"
+            }]
+        );
+        assert_eq!(
+            invalid(&key("list_fields = [\"code\"]", "perm_level = 2")),
+            vec![DefinitionError::KeyFieldPermLevel {
+                field: "code".into(),
+                used_as: "a list_fields column"
+            }]
+        );
+        // Another field may carry a level while those settings name level 0 fields.
+        let ok = format!(
+            "{}[[fields]]\nname = \"secret\"\ntype = \"int\"\nperm_level = 1\n",
+            key(
+                "title_field = \"code\"\nlist_fields = [\"code\"]\nnaming = { field = \"code\" }",
+                "required = true\nunique = true"
+            )
+        );
+        assert!(from_toml_str(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_required_field_cannot_have_a_level() {
+        assert_eq!(
+            invalid(&format!(
+                "{LEVELS}{}",
+                field("required = true\nperm_level = 1")
+            )),
+            vec![DefinitionError::RequiredPermLevel { field: "x".into() }]
+        );
+        assert!(from_toml_str(&format!("{LEVELS}{}", field("required = true"))).is_ok());
+    }
+
+    #[test]
+    fn a_level_without_a_rule_is_allowed_and_closed_to_everybody_but_the_administrator() {
+        // No rule of level 1 anywhere: legitimate (only Administrator and System see it).
+        let d = from_toml_str(&format!(
+            "{LEVELS}{}{}",
+            field("perm_level = 1"),
+            rule("role = \"A\"\nread = true")
+        ))
+        .unwrap();
+        let reader = crate::permission::Caller::user("u", vec!["A".into()]);
+        assert!(!crate::permission::field_access(&d, &reader).can_read(1));
+        assert!(
+            crate::permission::field_access(&d, &crate::permission::Caller::system("cli"))
+                .can_read(1)
+        );
+    }
+
+    #[test]
+    fn the_workflow_names_no_field_so_it_has_nothing_to_protect() {
+        // The state is the standard column `workflow_state`: a field of that name is refused.
+        let errors = invalid(&format!(
+            "{SUBMITTABLE}[workflow]\n[[workflow.states]]\nname = \"Draft\"\ndocstatus = 0\n[[fields]]\nname = \"workflow_state\"\ntype = \"data\"\nperm_level = 1\n"
+        ));
+        assert!(
+            errors.contains(&DefinitionError::WorkflowStateFieldName),
+            "{errors:?}"
+        );
+    }
+
+    /// The example of `docs/guide/getting-started.md` ("Field permission levels"), in a file.
+    #[test]
+    fn the_example_of_the_guide_loads_and_means_what_it_says() {
+        use crate::permission::{Caller, field_access};
+        let d = from_toml_str(
+            r#"
+name = "customer"
+label = "Customer"
+
+[[fields]]
+name = "full_name"
+type = "data"
+
+[[fields]]
+name = "credit_limit"
+type = "decimal"
+precision = 12
+scale = 2
+perm_level = 1
+
+[[permissions]]
+role = "Sales User"
+read = true
+write = true
+create = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+
+# Level 1: the manager sees and changes credit_limit, the sales user does not even know it exists.
+[[permissions]]
+role = "Sales Manager"
+level = 1
+read = true
+write = true
+"#,
+        )
+        .unwrap();
+        let user = field_access(&d, &Caller::user("u", vec!["Sales User".into()]));
+        assert!(user.shows(0) && !user.shows(1));
+        let manager = field_access(&d, &Caller::user("m", vec!["Sales Manager".into()]));
+        assert!(manager.can_read(1) && manager.can_write(1));
     }
 }

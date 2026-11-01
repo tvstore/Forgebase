@@ -85,3 +85,11 @@ Owner decision 7 of the M9 plan adds two rights to the list above, `export` and 
 - **Import** needs `import` and `create`, and `write` for an upsert; every row then runs through `insert` or `update`, which check their own rights per row.
 
 The details are in [ADR 0021](0021-import-and-export.md).
+
+## Amendment (2026-11-01, M10.2): field permission levels
+
+Owner decision 6 of the M10 plan adds **field levels**, recorded in [ADR 0024](0024-field-permission-levels.md). The rest of this ADR is unchanged except where the sentences "Rights are per DocType, not per field; list results include every column field" and the deferral of "field-level permissions" above are concerned:
+
+- A field has a `perm_level` (0 to 9, 0 by default) and a `[[permissions]]` rule has a `level` (0 to 9, 0 by default). **A rule at level 0 is the rule of this ADR, unchanged**, and `evaluate` decides about documents with the rules of level 0 only: a rule of a higher level grants `read` and `write` on the fields of that level and never a document right.
+- A caller reads or writes a field at level `n > 0` only with a rule `level = n` (the new pure function `field_access`, next to `evaluate`). A field the caller cannot read is **unknown** to them: omitted from get, list, summary, export and the metadata API, refused in filters, sort and group-by with the error of a missing field, refused in input as an unknown field; a field they can read but not write is refused in input with the new `ValidationError::NotPermitted`.
+- A DocType without `perm_level` and without `level` rules is not changed in any way. Query reports stay exempt, as they are from `if_owner`.

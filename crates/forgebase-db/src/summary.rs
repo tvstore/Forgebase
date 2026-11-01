@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 
 use forgebase_core::ident::table_name;
 use forgebase_core::meta::{DocType, FieldType, Registry};
-use forgebase_core::permission::Caller;
+use forgebase_core::permission::{Caller, field_access, readable_doctype};
 use forgebase_core::value::Value;
 use rust_decimal::Decimal;
 use tokio_postgres::GenericClient;
@@ -129,6 +129,9 @@ pub async fn summary(
 ) -> Result<Summary, DbError> {
     let doctype = document_doctype(registry, doctype)?;
     let owner = read_owner(doctype, caller)?;
+    // A group-by, an aggregate or a filter on a field the caller cannot read is an unknown
+    // field (ADR 0024).
+    let doctype = &*readable_doctype(doctype, field_access(doctype, caller));
     let (sql, binds, key_type, selected) = build(doctype, owner, query)?;
     let params: Vec<SqlValue<'_>> = binds.iter().map(SqlValue).collect();
     let params: Vec<&(dyn ToSql + Sync)> =

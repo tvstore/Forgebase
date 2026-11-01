@@ -25,7 +25,7 @@
 //! The system context has no user id: it manages shared views only.
 
 use forgebase_core::meta::{DocType, FieldType, MAX_LIST_FIELDS, Registry};
-use forgebase_core::permission::Caller;
+use forgebase_core::permission::{Caller, FieldAccess, field_access, readable_doctype};
 use serde_json::Value as Json;
 use time::OffsetDateTime;
 use tokio_postgres::GenericClient;
@@ -156,12 +156,50 @@ pub async fn list_views(
          WHERE v.doctype = $1 AND (v.owner_id IS NULL OR v.owner_id = $2) \
          ORDER BY (v.owner_id IS NOT NULL), v.label COLLATE \"C\""
     );
-    client
+    let views = client
         .query(&sql, &[&doctype.name, &owner])
         .await?
         .iter()
         .map(from_row)
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    // A view that names a field the caller cannot read is not shown to them: its definition
+    // would tell the field's name (ADR 0024).
+    let access = field_access(doctype, caller);
+    Ok(views
+        .into_iter()
+        .filter(|view| !names_hidden_field(doctype, access, &view.definition))
+        .collect())
+}
+
+/// Whether a view definition (`filters`, `sort`, `columns`) names a field that `access` does not
+/// let the caller read. A name that is not a field of the DocType is not hidden (the view is
+/// just as broken for everybody).
+fn names_hidden_field(doctype: &DocType, access: FieldAccess, definition: &Json) -> bool {
+    let hidden = |name: &str| {
+        doctype
+            .field(name)
+            .is_some_and(|f| !access.shows(f.perm_level))
+    };
+    let filters = definition
+        .get("filters")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("field").and_then(Json::as_str));
+    let sort = definition
+        .get("sort")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .map(|spec| spec.split_once(':').map_or(spec, |(field, _)| field));
+    let columns = definition
+        .get("columns")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str);
+    filters.chain(sort).chain(columns).any(hidden)
 }
 
 /// Creates a view and returns it. A private view (`shared` false) belongs to the caller; a
@@ -197,7 +235,11 @@ pub async fn create_view(
         ))?)
     };
     check_label(label)?;
-    check_definition(doctype, definition)?;
+    // A field the caller cannot read is unknown to the definition (ADR 0024).
+    check_definition(
+        &readable_doctype(doctype, field_access(doctype, caller)),
+        definition,
+    )?;
 
     let tx = client.transaction().await?;
     let scope = owner.map_or_else(|| "shared".to_owned(), |id| id.to_string());
@@ -274,7 +316,10 @@ pub async fn update_view(
         check_label(label)?;
     }
     if let Some(definition) = definition {
-        check_definition(doctype, definition)?;
+        check_definition(
+            &readable_doctype(doctype, field_access(doctype, caller)),
+            definition,
+        )?;
     }
     let text = definition.map(|d| d.json.to_string());
     let sql = format!(

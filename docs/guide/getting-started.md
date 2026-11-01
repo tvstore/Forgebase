@@ -125,6 +125,44 @@ cargo run -p sales -- doc list customer \
 
 A DocType file can list `[[permissions]]` (see [sales_order.toml](../../examples/sales/doctypes/sales_order.toml)): a `role`, the rights it grants (`read`, `write`, `create`, `delete`, `submit`, `cancel`, `amend`) and optionally `if_owner = true` (the rights then apply to documents the user owns only). A user may do what any of their roles grants; the role `Administrator` may do everything; **a DocType without rules is closed to everyone else**. Child rows follow their parent. The rules are enforced by `forgebase-db` in every operation (`insert`, `get`, `update`, `delete`, `submit`, `cancel`, `amend`, `list`), which take a `Caller`: a user with roles (`AuthUser::caller()`), or the trusted system context. A document a user is not allowed to read is treated as if it did not exist (`get`, `list`, updates, links, errors), with the known limits listed in [ADR 0011](../adr/0011-permission-model-phase-1.md). The `forgebase doc` commands run as the system context; the rules apply to real users of the [HTTP API](http-api.md#http-api) (and to Rust code that calls `forgebase_db` with `Caller::user(...)`). See [ADR 0011](../adr/0011-permission-model-phase-1.md) and the [security model](../blueprint/security-model.md).
 
+### Field permission levels
+
+Rights are per DocType, but a few fields are not for everybody: a credit limit, a cost price. Give such a field a `perm_level` from 1 to 9 (0 is the default) and let a rule with the same `level` grant read and write on it ([ADR 0024](../adr/0024-field-permission-levels.md)):
+
+```toml
+[[fields]]
+name = "credit_limit"
+type = "decimal"
+precision = 12
+scale = 2
+perm_level = 1
+
+[[permissions]]
+role = "Sales User"
+read = true
+write = true
+create = true
+
+[[permissions]]
+role = "Sales Manager"
+read = true
+write = true
+
+# Level 1: the manager sees and changes credit_limit, the sales user does not even know it exists.
+[[permissions]]
+role = "Sales Manager"
+level = 1
+read = true
+write = true
+```
+
+- A rule at level 0 (no `level` key) is the document rule you already know. A rule at `level = n` grants `read` and `write` on the fields at level `n` and **nothing else**: it never grants a right on documents, never with `if_owner` (the level 0 rule already limits the documents), and not `write` without `read`. A caller needs the right at level 0 as well (a `level = 1` rule alone gives nothing).
+- **A field the caller cannot read does not exist for them.** It is left out of the document, the list, the summary, an export and the metadata API; a filter, sort or group-by on it is an `unknown field` error, the same as for a name that is not a field; sending it in a document is an unknown field too. A caller who can read a level but not write it gets `422 field_not_permitted` when a value would change the field (sending back the stored value is fine), and the metadata API shows the field as `read_only`.
+- **An update by a user who cannot see a field keeps its value.** Hooks see every field. The Administrator role and the system context (the `forgebase doc` commands, jobs) see and write every level. Two things are **not** filtered by levels: webhook payloads (they carry the whole document) and query reports.
+- A field at a level that no rule names is visible to Administrator only: a good place for something only a hook or an operator uses.
+- Not allowed (the file does not load): a level outside 0 to 9; a `perm_level` on a field of a child DocType (give the `table` field of the parent a `perm_level` to protect the whole table); on the naming field, the `title_field` or a `list_fields` column (they are shown to everybody who can read a document); or together with `required` (a caller who cannot write the field could never save the document).
+- Overlay fields and [site custom fields](cli.md#customize-field-commands-m101) may carry a `perm_level` too; the rules for the level are the `[[permissions]]` of the DocType they are added to.
+
 ## Workflow
 
 A DocType can have a **workflow** (M8.1, [ADR 0015](../adr/0015-workflow-states-and-transitions.md)): states, each with a docstatus, and transitions between them, written by the app in the DocType file. The first state is the initial one. A transition needs one of its `roles` **and** the right its move needs (`write` for draft to draft, `submit` for draft to submitted, `cancel` for submitted to cancelled), so a role in a workflow never grants more than `[[permissions]]` do. On a DocType with a workflow plain `submit` and `cancel` are refused (`workflow_required`): the state changes only through a transition.
