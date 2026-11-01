@@ -123,7 +123,7 @@ mod worker;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use app::{App, DocTypeFile, FixtureFile, MigrationFile};
+pub use app::{App, DocTypeFile, FixtureFile, MigrationFile, OverlayFile};
 pub use builder::Forgebase;
 pub use compose::StartupError;
 pub use documents::{DocError, Documents, FilterOp, ListQuery, StoredDocument};

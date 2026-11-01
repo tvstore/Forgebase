@@ -89,6 +89,46 @@ impl FixtureFile {
     }
 }
 
+/// An overlay file embedded in the binary: its path (for error messages) and its TOML text. Build
+/// the list with [`overlays!`](crate::overlays); by hand (in a test, for example) with
+/// [`OverlayFile::new`].
+///
+/// An overlay file holds only `[[fields]]` entries, written exactly like those of a DocType file
+/// (`name`, `type`, `label`, `required`, `unique`, ...); any other key is an error. See
+/// [`App::extend_doctype`] for the rules.
+///
+/// The fields are private and the type is `#[non_exhaustive]`, like [`DocTypeFile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OverlayFile {
+    path: &'static str,
+    toml: &'static str,
+}
+
+impl OverlayFile {
+    /// A file from its path (only used in messages; use the path as you would write it in
+    /// [`overlays!`](crate::overlays), relative to the app crate's root) and its TOML text.
+    pub const fn new(path: &'static str, toml: &'static str) -> Self {
+        Self { path, toml }
+    }
+
+    /// Used by [`overlays!`](crate::overlays). Not part of the API: it may change with the macro.
+    #[doc(hidden)]
+    pub const fn __new(path: &'static str, toml: &'static str) -> Self {
+        Self { path, toml }
+    }
+
+    /// The path as written in the macro, relative to the app crate's root.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    /// The file's contents.
+    pub const fn toml(&self) -> &'static str {
+        self.toml
+    }
+}
+
 /// An app data migration embedded in the binary. Build the list with
 /// [`migrations!`](crate::migrations); by hand with [`MigrationFile::new`].
 ///
@@ -187,6 +227,27 @@ macro_rules! doctypes {
     };
 }
 
+/// Embeds overlay files (TOML, only `[[fields]]`), with paths relative to **the root of the crate
+/// that calls the macro** (its `CARGO_MANIFEST_DIR`). Gives a `&'static [OverlayFile]` for
+/// [`App::extend_doctype`].
+///
+/// ```ignore
+/// App::new("sales_extension")
+///     .depends_on(&["sales"])
+///     .extend_doctype("customer", forgebase::overlays!["overlays/customer.toml"])
+/// ```
+#[macro_export]
+macro_rules! overlays {
+    ($($path:literal),* $(,)?) => {
+        const {
+            &[$($crate::OverlayFile::__new(
+                $path,
+                ::core::include_str!(::core::concat!(::core::env!("CARGO_MANIFEST_DIR"), "/", $path)),
+            )),*]
+        }
+    };
+}
+
 /// Embeds fixture files (JSON), with paths relative to **the root of the crate that calls the
 /// macro** (its `CARGO_MANIFEST_DIR`). Gives a `&'static [FixtureFile]` for [`App::fixtures`].
 ///
@@ -255,6 +316,7 @@ macro_rules! migrations {
 /// - own DocTypes (a DocType name belongs to exactly one app);
 /// - link to DocTypes of itself and of the apps it depends on (directly or through other
 ///   apps), and nothing else;
+/// - add fields to DocTypes of the apps it depends on ([`App::extend_doctype`]);
 /// - register hooks ([`DocTypeHooks`]) for its own DocTypes and for DocTypes of the apps it
 ///   depends on. Hooks run in app order, then in registration order within the app: the hooks
 ///   of an app that extends another run after the hooks of the app it extends;
@@ -267,8 +329,8 @@ macro_rules! migrations {
 ///   roles it names;
 /// - define methods ([`App::method`]): functions a client calls over HTTP, as the caller.
 ///
-/// What it may not do: change the definition of another app's DocType (add fields to it, for
-/// example), run code outside the binary, or reach the database from a hook (a hook may
+/// What it may not do: change the definition of another app's DocType other than by adding
+/// fields ([`App::extend_doctype`]), run code outside the binary, or reach the database from a hook (a hook may
 /// enqueue a job, and the job reaches the database).
 #[derive(Clone)]
 pub struct App {
@@ -276,6 +338,8 @@ pub struct App {
     pub(crate) version: Option<&'static str>,
     pub(crate) depends_on: Vec<String>,
     pub(crate) doctypes: Vec<DocTypeFile>,
+    /// (target DocType, overlay file), in the order they were registered.
+    pub(crate) overlays: Vec<(String, OverlayFile)>,
     pub(crate) hooks: Vec<(String, Arc<dyn DocTypeHooks>)>,
     pub(crate) migrations: Vec<MigrationFile>,
     pub(crate) fixtures: Vec<FixtureFile>,
@@ -299,6 +363,7 @@ impl fmt::Debug for App {
             .field("version", &self.version)
             .field("depends_on", &self.depends_on)
             .field("doctypes", &self.doctypes)
+            .field("overlays", &self.overlays)
             .field("hooks", &hooked)
             .field("migrations", &self.migrations)
             .field("fixtures", &self.fixtures)
@@ -348,6 +413,7 @@ impl App {
             version: None,
             depends_on: Vec::new(),
             doctypes: Vec::new(),
+            overlays: Vec::new(),
             hooks: Vec::new(),
             migrations: Vec::new(),
             fixtures: Vec::new(),
@@ -376,6 +442,39 @@ impl App {
     /// Calling it again adds more files.
     pub fn doctypes(mut self, files: &'static [DocTypeFile]) -> Self {
         self.doctypes.extend_from_slice(files);
+        self
+    }
+
+    /// Adds fields to a DocType of an app this app depends on (directly or through other apps),
+    /// from [`overlays!`](crate::overlays) (or built by hand). Calling it again adds more
+    /// files, for the same DocType or another. See ADR 0023.
+    ///
+    /// ```ignore
+    /// App::new("sales_extension")
+    ///     .depends_on(&["sales"])
+    ///     .extend_doctype("customer", forgebase::overlays!["overlays/customer.toml"])
+    /// ```
+    ///
+    /// An overlay file holds `[[fields]]` entries, written exactly like those of a DocType file
+    /// and with every property a field has (`required`, `unique`, `read_only`, `allow_on_submit`,
+    /// ...) except that the type may not be `table`. The fields are appended after the fields of
+    /// the DocType, in app order and then file order, so they get a column at `migrate` like any
+    /// other field, and the hooks of this app (and of every other app) see them.
+    ///
+    /// Everything wrong with an overlay is a startup error that names this app and the file:
+    /// an unknown target DocType; a target that no dependency of this app owns (the app's **own**
+    /// DocTypes are refused too: put the field in the DocType's file); a child DocType; a Table
+    /// field; a field name the DocType, an earlier overlay or another app's overlay has already
+    /// (the message names both apps); a name that starts with `custom_`, a prefix reserved for
+    /// site custom fields (an app's own DocType fields may not start with it either).
+    ///
+    /// **Two cautions for the author of the app.** A `required` field added to a DocType that
+    /// already has documents makes the next update of each of them fail until the field is
+    /// filled in. A `unique` field creates a unique index over the existing rows (the rows hold
+    /// NULL for it, and NULLs never collide).
+    pub fn extend_doctype(mut self, doctype: &str, files: &'static [OverlayFile]) -> Self {
+        self.overlays
+            .extend(files.iter().map(|f| (doctype.to_owned(), *f)));
         self
     }
 
