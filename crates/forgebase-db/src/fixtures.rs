@@ -109,7 +109,7 @@ pub(crate) async fn apply(
         app: app.name.to_owned(),
         file: "(all fixture files)".to_owned(),
         record: "transaction".to_owned(),
-        message: e.to_string(),
+        message: format!("{e} (nothing from this app's fixtures was kept)"),
     };
     let mut tx = client
         .transaction()
@@ -128,10 +128,14 @@ pub(crate) async fn apply(
             record: describe(record),
             message,
         };
-        let fail = |e: DbError| failed(e.to_string());
-        let doctype = registry
-            .get(record.doctype)
-            .ok_or_else(|| failed(format!("unknown DocType `{}`", record.doctype)))?;
+        // The transaction is dropped, so rolled back, on every error below.
+        let fail = |e: DbError| failed(format!("{e} (nothing from this app's fixtures was kept)"));
+        let doctype = registry.get(record.doctype).ok_or_else(|| {
+            failed(format!(
+                "unknown DocType `{}` (nothing from this app's fixtures was kept)",
+                record.doctype
+            ))
+        })?;
         let previous: Option<String> = tx
             .query_opt(
                 "SELECT checksum FROM fb_fixture WHERE doctype = $1 AND name = $2",
@@ -187,7 +191,7 @@ pub(crate) async fn apply(
                 // name its document does not have, and inserted again at every changed version.
                 if inserted.name != record.name {
                     return Err(failed(format!(
-                        "a hook changed the naming field of fixture record `{}` to `{}`; fixtures need a stable name",
+                        "a hook changed the naming field of fixture record `{}` to `{}`; fixtures need a stable name (nothing from this app's fixtures was kept)",
                         record.name, inserted.name
                     )));
                 }
@@ -205,7 +209,15 @@ pub(crate) async fn apply(
     }
     // A database error here is still the fixtures' failure: `migrate` then keeps and prints the
     // report of what was committed before.
-    tx.commit().await.map_err(|e| setup_failed(e.into()))?;
+    tx.commit().await.map_err(|e| DbError::FixtureFailed {
+        app: app.name.to_owned(),
+        file: "(all fixture files)".to_owned(),
+        record: "commit".to_owned(),
+        message: format!(
+            "{} (the outcome of the commit is unknown: the fixtures of this app may have been kept; running migrate again is safe)",
+            DbError::from(e)
+        ),
+    })?;
     Ok(report)
 }
 

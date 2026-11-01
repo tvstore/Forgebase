@@ -410,10 +410,8 @@ pub enum DbError {
     #[error("report check failed ({} problem(s))", .0.len())]
     ReportCheck(Vec<String>),
     /// A fixture record could not be applied (M9.4, ADR 0022). The fixtures of that app were all
-    /// rolled back; the migrations before them stay applied.
-    #[error(
-        "fixtures of app `{app}` were not applied: {file}: {record}: {message} (nothing from this app's fixtures was kept)"
-    )]
+    /// rolled back (unless the message says the outcome of the commit is unknown); the migrations before them stay applied.
+    #[error("fixtures of app `{app}` were not applied: {file}: {record}: {message}")]
     FixtureFailed {
         /// The app.
         app: String,

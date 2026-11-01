@@ -55,21 +55,26 @@ pub(crate) fn checksum(record: &Json) -> String {
     text
 }
 
-/// The canonical JSON of a value. What is guaranteed, and by whom:
+/// The canonical JSON of a value: **the whole text is produced here**, so it depends neither on
+/// the features of `serde_json` that the app's dependency graph enables nor on its version (its
+/// number formatter changed between releases). Stored checksums must never change for those
+/// reasons: the next `migrate` would update every record and overwrite the site's edits.
 ///
-/// - **Keys.** Written here, not by `serde_json`'s serializer: object keys are sorted by their
-///   bytes, whatever order the map iterates in, so `preserve_order` cannot change the text.
-/// - **Numbers.** The parser is `serde_json`'s, whose features are chosen by the app's
-///   dependency graph (`arbitrary_precision`, `float_roundtrip`) and change how some numbers
-///   parse or print. [`number_problem`] therefore **refuses at startup** every number that could
-///   differ (negative zero, an integer outside `i64`/`u64`, a non-integer with more than 15
-///   significant digits or a decimal exponent beyond 22), so a number that gets here has one
-///   value and one text in every build: an integer as its digits, any other number as the
-///   shortest `f64` text.
+/// The form:
+/// - compact, no white space; arrays in order; object keys sorted by their bytes;
+/// - strings in double quotes with `"` `\\` `\b` `\f` `\n` `\r` `\t` escaped as such, any other
+///   control character below U+0020 as `\u00xx` (lower-case hex), everything else as is;
+/// - an integer that fits `i64` or `u64` as its decimal digits (no plus sign, no leading zeros);
+/// - any other number as `f64`, by [`write_float`]: the shortest digits that read back as the
+///   same `f64` (Rust's `{:e}`, which is deterministic), as a plain decimal with an exponent from
+///   -5 to 15 (`0.00001`, `12.5`, `100.0`: always a `.` and at least one fractional digit) and
+///   otherwise as `d.ddde+N` or `d.ddde-N` (`1.5e+17`, `6.0e-22`).
 ///
-/// Stored checksums must never change for these reasons: the next `migrate` would update every
-/// record and overwrite the site's edits. For accepted values the text equals `serde_json`'s
-/// default compact output, so checksums computed before this writer existed are unchanged.
+/// The parser is still `serde_json`'s, and its features can change how a number parses.
+/// [`number_problem`] **refuses at startup** the numbers for which that can matter (see there),
+/// so that if two builds both accept a number its canonical text is the same; a number accepted
+/// by one build can be a startup error in another, which is fail-closed (a refusal, never a
+/// silent overwrite). The values that are accepted as floats are below 2^63 in magnitude.
 pub(crate) fn canonical(value: &Json) -> String {
     let mut out = String::new();
     write_canonical(value, &mut out);
@@ -87,13 +92,15 @@ fn write_canonical(value: &Json, out: &mut String) {
             } else if let Some(u) = n.as_u64() {
                 let _ = write!(out, "{u}");
             } else {
-                let f = n.as_f64().unwrap_or(f64::NAN);
-                // A float always has a form (JSON has no NaN or infinity); `serde_json` writes a
-                // primitive `f64` the same way in every feature setting.
-                out.push_str(&serde_json::to_string(&f).unwrap_or_else(|_| "null".to_owned()));
+                // Not finite cannot happen for a value that passed `number_problem`; it is
+                // written as null here only so that this function never fails.
+                match n.as_f64().filter(|f| f.is_finite()) {
+                    Some(f) => write_float(f, out),
+                    None => out.push_str("null"),
+                }
             }
         }
-        Json::String(text) => out.push_str(&serde_json::to_string(text).expect("a string")),
+        Json::String(text) => write_string(text, out),
         Json::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
@@ -112,7 +119,7 @@ fn write_canonical(value: &Json, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(key).expect("a string"));
+                write_string(key, out);
                 out.push(':');
                 write_canonical(&map[key.as_str()], out);
             }
@@ -121,25 +128,93 @@ fn write_canonical(value: &Json, out: &mut String) {
     }
 }
 
-/// Why a number cannot be part of a fixture record, or `None`: it must have the same value and the
-/// same canonical text in every build of the app (see [`canonical`]). Accepted: an integer in the
-/// `i64` or `u64` range (not negative zero), and a non-integer, or an integer written as a float,
-/// (below 2^63) whose shortest `f64` text has at most 15 significant digits and a decimal exponent within
-/// ±22, which is exact in every parsing mode (the fast path of `serde_json`). Refused: negative
-/// zero (`-0` is `-0.0` by default and `0` with `arbitrary_precision`), a number that is not
-/// finite, an integer beyond the `i64`/`u64` range (it goes through `f64`), and any number with
-/// more digits or a larger exponent (`float_roundtrip` and `arbitrary_precision` can parse
-/// those to another `f64`). A number that is out of range for `f64` (`1e400`) is a parse error
-/// by default and refused here when it parses under `arbitrary_precision`.
+/// A string as the canonical form writes it (see [`canonical`]).
+fn write_string(text: &str, out: &mut String) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// A finite `f64` as the canonical form writes it (see [`canonical`]): the digits and exponent of
+/// Rust's `{:e}` (the shortest text that reads back as `f`), rendered by a fixed rule.
+fn write_float(f: f64, out: &mut String) {
+    let scientific = format!("{:e}", f.abs());
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    if f.is_sign_negative() {
+        out.push('-');
+    }
+    if (-5..=15).contains(&exponent) {
+        if exponent >= 0 {
+            let integer_len = exponent as usize + 1;
+            if digits.len() <= integer_len {
+                out.push_str(&digits);
+                out.extend(std::iter::repeat_n('0', integer_len - digits.len()));
+                out.push_str(".0");
+            } else {
+                out.push_str(&digits[..integer_len]);
+                out.push('.');
+                out.push_str(&digits[integer_len..]);
+            }
+        } else {
+            out.push_str("0.");
+            out.extend(std::iter::repeat_n('0', (-exponent - 1) as usize));
+            out.push_str(&digits);
+        }
+    } else {
+        out.push_str(&digits[..1]);
+        out.push('.');
+        out.push_str(if digits.len() > 1 { &digits[1..] } else { "0" });
+        let _ = write!(
+            out,
+            "e{}{}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        );
+    }
+}
+
+/// Why a number cannot be part of a fixture record, or `None`. The guarantee: **if two builds of
+/// the app (with different `serde_json` features, `arbitrary_precision` and `float_roundtrip`)
+/// both accept a number, its canonical text ([`canonical`]) is the same.** A number accepted by
+/// one build may be a startup error in another; that is fail-closed. Accepted: an integer in the
+/// `i64` or `u64` range, and a number written as a float (a fraction, an exponent, or an
+/// integer above that range) whose shortest `f64` text has at most 15 significant digits and a
+/// decimal exponent within ±15, and which is below 2^63 in magnitude. Those parse to the same
+/// `f64` in every mode. Refused: negative zero (`-0` is `-0.0` by default and `0` with
+/// `arbitrary_precision`; also a negative number that underflows to `-0.0`), a number that is not
+/// finite, a non-zero number that underflows to zero, an integer beyond the `i64`/`u64` range,
+/// and any number with more digits or a larger exponent. A number out of range for `f64`
+/// (`1e400`) is a parse error by default and refused here when it parses under
+/// `arbitrary_precision`; a non-zero number that underflows (`1e-400`) is seen as zero by a
+/// default build, which cannot tell (it accepts `0.0`), and is refused by an
+/// `arbitrary_precision` build.
 fn number_problem(n: &serde_json::Number) -> Option<String> {
     let text = n.to_string();
-    let advice = "write it with at most 15 significant digits, or as a string";
+    let advice = "write it as a string, or with fewer significant digits";
+    let negative_zero = format!(
+        "number `{text}` is a negative zero, which cannot be represented the same way in every build; write 0"
+    );
     // Negative zero: a sign and no non-zero digit before any exponent.
     let mantissa = text.split(['e', 'E']).next().unwrap_or("");
-    if mantissa.starts_with('-') && !mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b)) {
-        return Some(format!(
-            "number `{text}` is a negative zero, which cannot be represented the same way in every build; write 0"
-        ));
+    let nonzero_digits = mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b));
+    if mantissa.starts_with('-') && !nonzero_digits {
+        return Some(negative_zero);
     }
     if n.as_i64().is_some() || n.as_u64().is_some() {
         return None;
@@ -147,6 +222,14 @@ fn number_problem(n: &serde_json::Number) -> Option<String> {
     let Some(f) = n.as_f64().filter(|f| f.is_finite()) else {
         return Some(format!("number `{text}` is out of range"));
     };
+    if f == 0.0 && f.is_sign_negative() {
+        return Some(negative_zero);
+    }
+    if f == 0.0 && nonzero_digits {
+        return Some(format!(
+            "number `{text}` is too small to be represented (it becomes zero); write it as a string"
+        ));
+    }
     // An integer beyond the 64-bit range goes through `f64`, whatever it is written like.
     if f.fract() == 0.0 && f.abs() >= 9_223_372_036_854_775_808.0 {
         return Some(format!(
@@ -158,7 +241,7 @@ fn number_problem(n: &serde_json::Number) -> Option<String> {
     let (digits, exponent) = shortest.split_once('e').unwrap_or((&shortest, "0"));
     let significant = digits.bytes().filter(u8::is_ascii_digit).count();
     let exponent: i32 = exponent.parse().unwrap_or(i32::MAX);
-    if significant > 15 || !(-22..=22).contains(&exponent) {
+    if significant > 15 || !(-15..=15).contains(&exponent) {
         return Some(format!(
             "number `{text}` cannot be represented the same way in every build; {advice}"
         ));
@@ -480,17 +563,63 @@ mod tests {
         assert_eq!(canonical(&left), expected);
         assert_eq!(canonical(&right), expected);
         assert_eq!(checksum(&left), checksum(&right));
-        // The same text as serde_json's default form for a sorted value.
-        assert_eq!(serde_json::to_string(&right).unwrap(), expected);
     }
 
     #[test]
-    fn numbers_have_one_form() {
+    fn floats_have_one_fixed_form() {
+        // Golden values: the plain form for an exponent from -5 to 15, with a `.` and at least
+        // one fractional digit; `d.ddde+N` / `d.ddde-N` outside it. Checked on the writer, so
+        // the edges are covered even for values that startup refuses.
+        for (value, expected) in [
+            (0.0, "0.0"),
+            (1.0, "1.0"),
+            (100.0, "100.0"),
+            (12.5, "12.5"),
+            (-12.5, "-12.5"),
+            (0.1, "0.1"),
+            (0.5, "0.5"),
+            (0.001, "0.001"),
+            (0.00001, "0.00001"),
+            (0.000012345, "0.000012345"),
+            (123456789012345.0, "123456789012345.0"),
+            (1e15, "1000000000000000.0"),
+            (1.5e15, "1500000000000000.0"),
+            (9.999e15, "9999000000000000.0"),
+            (1e16, "1.0e+16"),
+            (1.5e17, "1.5e+17"),
+            (-1.5e17, "-1.5e+17"),
+            (1e23, "1.0e+23"),
+            (0.000001, "1.0e-6"),
+            (0.0000012, "1.2e-6"),
+            (6e-22, "6.0e-22"),
+            (-6.192e-20, "-6.192e-20"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (5e-324, "5.0e-324"),
+            (0.30000000000000004, "0.30000000000000004"),
+        ] {
+            let mut out = String::new();
+            write_float(value, &mut out);
+            assert_eq!(out, expected, "{value:e}");
+        }
+        // And through the canonical form of a parsed value.
         assert_eq!(
             canonical(&json(
-                "[0, 12, -12, 18446744073709551615, 1.0, 2.5e3, 1e-7]"
+                "[0, 12, -12, 18446744073709551615, 1.0, 2.5e3, 1e-7, 0.1]"
             )),
-            "[0,12,-12,18446744073709551615,1.0,2500.0,1e-7]"
+            "[0,12,-12,18446744073709551615,1.0,2500.0,1.0e-7,0.1]"
+        );
+    }
+
+    #[test]
+    fn strings_are_escaped_by_our_own_rule() {
+        let value = Json::String("a\"b\\c\u{8}\u{c}\n\r\t\u{0}\u{1f}\u{7f}é€😀/".to_owned());
+        assert_eq!(
+            canonical(&value),
+            "\"a\\\"b\\\\c\\b\\f\\n\\r\\t\\u0000\\u001f\u{7f}é€😀/\""
+        );
+        assert_eq!(
+            canonical(&json(r#"{"k\u0001": ""}"#)),
+            "{\"k\\u0001\":\"\"}"
         );
     }
 
@@ -525,6 +654,11 @@ mod tests {
             // beyond the exponent range of the exact fast path
             "1e23",
             "1e-23",
+            "1e16",
+            "1e-16",
+            "-1e-400",
+            "6.192E-20",
+            "1e18",
             "1.5e100",
             // integers outside i64 and u64
             "18446744073709551616",
@@ -537,7 +671,7 @@ mod tests {
         let problem = number_problem(&number("0.1234567890123456")).unwrap();
         assert!(
             problem.contains("cannot be represented the same way in every build")
-                && problem.contains("15 significant digits, or as a string"),
+                && problem.contains("write it as a string, or with fewer significant digits"),
             "{problem}"
         );
     }
@@ -550,8 +684,7 @@ mod tests {
             "0.1",
             "12.50",
             "1e2",
-            "1e18",
-            "1e-22",
+            "1e15",
             "2.5e3",
             "123456789012345",
             "-7",
