@@ -317,12 +317,14 @@ async fn the_migration_creates_the_groups_once() {
         first.app_migrations[0],
         forgebase::testing::AppliedMigration::new("sales", 1, "default_customer_groups")
     );
+    // The migration made Retail and Wholesale; the fixture (below) added Online.
     let groups = db
         .rows("SELECT name, title, owner, version::text FROM doc_customer_group ORDER BY name COLLATE \"C\"")
         .await;
     assert_eq!(
         groups,
         [
+            ["Online", "Online", "fixture:sales", "1"],
             ["Retail", "Retail", "system", "1"],
             ["Wholesale", "Wholesale", "system", "1"]
         ]
@@ -338,8 +340,104 @@ async fn the_migration_creates_the_groups_once() {
     let count = db
         .rows("SELECT count(*)::text FROM doc_customer_group")
         .await;
+    assert_eq!(count, [["3"]]);
+    db.cleanup().await;
+}
+
+// --- The fixture customer_group.json (M9.4, ADR 0022) -------------------------------------------
+
+#[tokio::test]
+async fn the_fixture_adopts_the_migrated_groups_and_inserts_online() {
+    let binary = Forgebase::new().app(app());
+    let db = TestDb::new().await;
+
+    // The first migrate: the SQL migration made Retail and Wholesale, so the fixture finds them
+    // and keeps them as they are (adoption), and inserts Online.
+    let first = db.migrate(&binary, false).await.expect("migrate");
+    assert_eq!(first.fixtures.len(), 1);
+    let fixtures = &first.fixtures[0];
+    assert_eq!(fixtures.app, "sales");
+    assert_eq!(
+        (
+            fixtures.inserted,
+            fixtures.updated,
+            fixtures.kept,
+            fixtures.unchanged
+        ),
+        (1, 0, 2, 0)
+    );
+    let groups = db
+        .rows("SELECT name FROM doc_customer_group ORDER BY name COLLATE \"C\"")
+        .await;
+    assert_eq!(groups, [["Online"], ["Retail"], ["Wholesale"]]);
+    // Every record is tracked from now on, the adopted ones too.
+    let tracked = db
+        .rows("SELECT doctype, name FROM fb_fixture ORDER BY name COLLATE \"C\"")
+        .await;
+    assert_eq!(
+        tracked,
+        [
+            ["customer_group", "Online"],
+            ["customer_group", "Retail"],
+            ["customer_group", "Wholesale"]
+        ]
+    );
+    // The adopted groups were not written: they are still the migration's rows (owner `system`,
+    // version 1); Online is the fixture's.
+    let owners = db
+        .rows(
+            "SELECT name, owner, version::text FROM doc_customer_group ORDER BY name COLLATE \"C\"",
+        )
+        .await;
+    assert_eq!(
+        owners,
+        [
+            ["Online", "fixture:sales", "1"],
+            ["Retail", "system", "1"],
+            ["Wholesale", "system", "1"]
+        ]
+    );
+
+    // The second migrate finds all three unchanged and writes nothing.
+    let second = db.migrate(&binary, false).await.expect("migrate again");
+    let fixtures = &second.fixtures[0];
+    assert_eq!(
+        (
+            fixtures.inserted,
+            fixtures.updated,
+            fixtures.kept,
+            fixtures.unchanged
+        ),
+        (0, 0, 0, 3)
+    );
+    // A site that deletes a group keeps it deleted: the record did not change.
+    db.exec("DELETE FROM doc_customer_group WHERE name = 'Online'")
+        .await;
+    let third = db
+        .migrate(&binary, false)
+        .await
+        .expect("migrate a third time");
+    assert_eq!(third.fixtures[0].unchanged, 3);
+    let count = db
+        .rows("SELECT count(*)::text FROM doc_customer_group")
+        .await;
     assert_eq!(count, [["2"]]);
     db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_fixture_groups_are_usable_by_customers() {
+    let env = env().await;
+    let reply = env
+        .manager
+        .post(
+            "/api/v1/resource/customer",
+            json!({"email": "web@example.com", "full_name": "Web Shopper", "customer_group": "Online"}),
+        )
+        .await;
+    assert_eq!(reply.status, 201, "{:?}", reply.body);
+    assert_eq!(reply.data()["customer_group"], "Online");
+    env.db.cleanup().await;
 }
 
 #[tokio::test]
@@ -352,7 +450,7 @@ async fn the_groups_are_usable_and_the_sql_is_idempotent() {
         .db
         .rows("SELECT count(*)::text FROM doc_customer_group")
         .await;
-    assert_eq!(count, [["2"]]);
+    assert_eq!(count, [["3"]]);
 
     // A row written by the migration is a real document: a customer can link to it.
     let reply = env

@@ -66,6 +66,11 @@ pub fn app() -> App {
             "default_customer_groups",
             "migrations/0001_default_customer_groups.sql"
         )])
+        // Fixtures (ADR 0022): records `migrate` inserts when missing and updates only when the
+        // app changes them, after the migrations above. This file names `Retail` and `Wholesale`
+        // too, which the migration made already: the first `migrate` adopts them ("kept") and
+        // inserts `Online`.
+        .fixtures(forgebase::fixtures!["fixtures/customer_group.json"])
 }
 
 /// Business rules of a sales order: computed amounts and total, and what a submit needs.
